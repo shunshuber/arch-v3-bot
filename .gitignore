@@ -1,0 +1,7 @@
+.env.private
+.env
+__pycache__/
+cache/
+logs/
+sessions/
+*.session
