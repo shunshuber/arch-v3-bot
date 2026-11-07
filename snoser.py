@@ -22,6 +22,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     FSInputFile,
+    BufferedInputFile,
+    InputMediaPhoto,
 )
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
@@ -130,22 +132,22 @@ async def user_card_path(bot, user) -> str:
             v = int(6 + 26 * t)
             d.line([(0, y), (W, y)], fill=(v, v, v))
 
-        fword = _load_font(196)
+        fword = _load_font(280)
         glow = Image.new("RGB", (W, H), (0, 0, 0))
         gd = ImageDraw.Draw(glow)
-        gd.text((116, 236), "Arch V3", font=_load_font(196), fill=(90, 90, 90))
-        glow = glow.filter(ImageFilter.GaussianBlur(16))
+        gd.text((84, 168), "Arch V3", font=fword, fill=(120, 120, 120))
+        glow = glow.filter(ImageFilter.GaussianBlur(20))
         img = ImageChops.screen(img, glow)
 
         d = ImageDraw.Draw(img)
-        d.text((120, 248), "Arch V3", font=_load_font(196), fill=(250, 250, 250))
+        d.text((96, 186), "Arch V3", font=fword, fill=(252, 252, 252))
 
         # ── top-right: avatar + nick/id (сдвинут левее) ──
         label = user.username or user.full_name or str(user.id)
-        avatar_size = 108
-        margin = 140
+        avatar_size = 132
+        margin = 120
         ax = W - avatar_size - margin
-        ay = 52
+        ay = 44
         if avatar_raw:
             try:
                 av, mask = _circle_avatar(avatar_raw, avatar_size)
@@ -158,20 +160,21 @@ async def user_card_path(bot, user) -> str:
             except Exception as e:
                 log.warning("avatar paste failed: %s", e)
         else:
+            # fallback circle: initial letter
             d.ellipse((ax, ay, ax + avatar_size * 2, ay + avatar_size * 2),
-                      outline=(250, 250, 250), width=4)
+                      outline=(250, 250, 250), width=6)
             initial = (label[:1] or "?").upper()
-            f_av = _load_font(96)
+            f_av = _load_font(150)
             tw = d.textlength(initial, font=f_av)
-            d.text((ax + avatar_size - tw / 2, ay + avatar_size - 60),
+            d.text((ax + avatar_size - tw / 2, ay + avatar_size - 100),
                    initial, font=f_av, fill=(250, 250, 250))
 
         # nick/id left of avatar, right-aligned
         if avatar_raw:
-            f_tag = _load_font(36)
+            f_tag = _load_font(48)
             tw = d.textlength(label, font=f_tag)
-            tx = ax - 24 - tw
-            d.text((tx, ay + avatar_size - 22), label, font=f_tag,
+            tx = ax - 28 - tw
+            d.text((tx, ay + avatar_size - 40), label, font=f_tag,
                    fill=(240, 240, 240))
 
         # grain
@@ -232,6 +235,14 @@ class Report(StatesGroup):
 class Snos(StatesGroup):
     target = State()
     phone = State()
+
+
+class Captcha(StatesGroup):
+    solve = State()
+
+
+CAPTCHA_PENDING: dict = {}   # user_id -> {"code": str, "answer": int, "chips": [str]}
+CAPTCHA_VERIFIED: dict = {}  # user_id -> monotonic timestamp of last solve
 
 
 # ── reasons ─────────────────────────────────────────────
@@ -1133,6 +1144,7 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="\U0001f680 \u0417\u0430\u043f\u0443\u0441\u043a", callback_data="menu:launch")],
         [InlineKeyboardButton(text="\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data="menu:profile"),
          InlineKeyboardButton(text="\U0001f4b3 \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", callback_data="menu:subs")],
+        [InlineKeyboardButton(text="\U0001f381 \u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", callback_data="menu:refs")],
     ]
 
     if ADMIN_ID and user_id == int(ADMIN_ID):
@@ -1217,6 +1229,66 @@ def summary_text(data: dict) -> str:
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
     uid = msg.from_user.id
+
+    # register user first (sets rec["_first"]) for captcha gate
+    rec = touch_user(msg.from_user)
+
+    # captcha gate for brand-new participants
+    verifiedRecently = CAPTCHA_VERIFIED.get(uid, 0)
+    if rec.get("_first") and time.time() - verifiedRecently > 60:
+        try:
+            from captcha import generate_captcha
+        except ImportError:
+            generate_captcha = None
+        if generate_captcha and not CAPTCHA_PENDING.get(uid):
+            png, meta, _ch = generate_captcha(uid)
+            CAPTCHA_PENDING[uid] = {"meta": meta, "ts": time.time()}
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="1️⃣", callback_data="cap:0"),
+                InlineKeyboardButton(text="2️⃣", callback_data="cap:1"),
+                InlineKeyboardButton(text="3️⃣", callback_data="cap:2"),
+            ], [
+                InlineKeyboardButton(text="4️⃣", callback_data="cap:3"),
+                InlineKeyboardButton(text="5️⃣", callback_data="cap:4"),
+                InlineKeyboardButton(text="6️⃣", callback_data="cap:5"),
+            ]])
+            await state.set_state(Captcha.solve)
+            await msg.answer_photo(
+                photo=BufferedInputFile(png, filename="captcha.png"),
+                caption=(
+                    bq(f"<b>{NAME}</b>  \u00b7  <i>\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430</i>")
+                    + "\n\n\U0001f9dd <b>\u0414\u043e\u043a\u0430\u0436\u0438, \u0447\u0442\u043e \u0442\u044b \u043d\u0435 \u0431\u043e\u0442:</b>"
+                    + "\n\u0432\u044b\u0431\u0435\u0440\u0438 \u043a\u043b\u0435\u0442\u043a\u0443 \u0441 \u043d\u0443\u0436\u043d\u044b\u043c \u0441\u043b\u043e\u0432\u043e\u043c"
+                ),
+                parse_mode=ParseMode.HTML,
+                show_caption_above_media=True,
+                reply_markup=kb,
+            )
+            return
+    if not rec.get("ref_by"):
+        args_text = msg.text or ""
+        m = re.search(r"ref_(\d+)", args_text)
+        rm = re.match(r"^ref_(\d+)$", m.group(1)) if m else None
+        if rm:
+            referrer_id = int(rm.group(1))
+            status = set_referral(msg.from_user, referrer_id)
+            if status == "added":
+                try:
+                    await msg.bot.send_message(
+                        referrer_id,
+                        bq(f"\U0001f389 <b>{NAME}</b>")
+                        + "\n\n\U0001f465 <b>\u041d\u043e\u0432\u044b\u0439 \u0440\u0435\u0444\u0435\u0440\u0430\u043b!</b>\n"
+                        + f"\U0001f464 <b>{html_mod.escape(msg.from_user.full_name)}</b>"
+                        + "\n\n\U0001f4e5 \u0415\u0449\u0451 \u043d\u0435\u043c\u043d\u043e\u0433\u043e \u0440\u0435\u0444\u0435\u0440\u0430\u043b\u043e\u0432 \u2014 <b>+1 \u0434\u0435\u043d\u044c \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438</b>",
+                        parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
+                await msg.answer(
+                    bq(f"<b>{NAME}</b>  \u2014  \u0440\u0435\u0444\u0435\u0440\u0430\u043b")
+                    + "\n\n\u2705 <b>\u0422\u044b \u043f\u0440\u0438\u0432\u044f\u0437\u0430\u043d \u043a \u043f\u0440\u0438\u0433\u043b\u0430\u0441\u0438\u0432\u0448\u0435\u043c\u0443!</b>\n"
+                    + "\U0001f4eb \u041f\u043e\u0434\u043f\u0438\u0448\u0438\u0441\u044c \u043d\u0430 \u043a\u0430\u043d\u0430\u043b \u2014 \u044d\u0442\u043e \u0437\u0430\u0447\u0435\u0442\u0451\u0442\u0441\u044f \u0435\u043c\u0443 \u0432 \u0441\u0447\u0451\u0442.",
+                    parse_mode=ParseMode.HTML)
+
     caption = hero_caption(uid)
     card = await user_card_path(msg.bot, msg.from_user)
     await msg.answer_photo(
@@ -1228,6 +1300,11 @@ async def cmd_start(msg: Message, state: FSMContext):
     )
 
 
+async def count_valid_refs_async_check():
+    """Hook for future deferred validation (noop now)."""
+    return None
+
+
 # ── main menu ───────────────────────────────────────────
 @router.callback_query(F.data == "menu:launch")
 async def menu_launch(cb: CallbackQuery, state: FSMContext):
@@ -1235,6 +1312,7 @@ async def menu_launch(cb: CallbackQuery, state: FSMContext):
         return
     if not await sub_gate(cb, state):
         return
+    await refs_check_and_grant(cb)
     await state.clear()
     await cb.message.edit_caption(
         caption=bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>",
@@ -1288,6 +1366,75 @@ async def back_methods(cb: CallbackQuery, state: FSMContext):
         reply_markup=kb_methods(),
     )
     await cb.answer()
+
+
+@router.callback_query(F.data == "menu:refs")
+async def menu_refs(cb: CallbackQuery, state: FSMContext):
+    botRefCtx["bot"] = cb.bot
+    users = load_users()
+    rec = users.get(str(cb.from_user.id), {})
+    refs = rec.get("refs") or []
+    valid = await count_valid_refs_async(cb.from_user.id)
+    grants = rec.get("ref_grants", 0) or 0
+    pending = max(0, valid - grants * REF_BONUS) if valid else 0
+    total = len(refs)
+    uname = cb.from_user.username
+    link = (f"https://t.me/{uname}" if uname
+            else f"https://t.me/{(await cb.bot.me()).username}"
+            + (f"?start=ref_{cb.from_user.id}" if True else ""))
+
+    rules = (
+        f"• Твои ссылки — это /start с кодом <code>ref_{cb.from_user.id}</code>"
+        + (f"\n• Прямая ссылка: <code>{link}</code>" if uname else "")
+        + f"\n• Реферал зачитывается <b>только</b> если он подписан"
+          f"\n  на канал и написал /start"
+        + f"\n• <b>{REF_BONUS}</b> подписавшихся по твоей ссылке = "
+          f"<b>+1 день подписки</b>"
+        + "\n• Бонус начисляется автоматически при проверке"
+    )
+    text = (
+        bq(f"<b>{NAME}</b>  ·  Рефералы")
+        + f"\n\n👥 <b>Приглашено:</b> {total}"
+        + f"\n✅ <b>Зачитано (подписаны):</b> {valid}"
+        + f"\n🎁 <b>Начислено дней:</b> {grants}"
+        + f"\n⏳ <b>До следующего дня:</b> {max(0, REF_BONUS - (valid % REF_BONUS)) if valid else REF_BONUS} чел."
+        + "\n\n" + bqe(rules)
+        + "\n\n<i>Твоя ссылка:</i>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📤 Поделиться ссылкой",
+                             url=f"https://t.me/share/url?url={link}&text=Arch%20V3%20-%20жалобы%20и%20сброс%20сессий"),
+    ], [
+        InlineKeyboardButton(text="🔄 Проверить заново", callback_data="menu:refs"),
+        InlineKeyboardButton(text="◀ Назад", callback_data="back:home"),
+    ]])
+    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
+                                  reply_markup=kb)
+    await cb.answer()
+
+
+async def refs_check_and_grant(cb: CallbackQuery):
+    """Validated refs -> auto-grant bonus days."""
+    users = load_users()
+    rec = users.get(str(cb.from_user.id), {})
+    valid = await count_valid_refs_async(cb.from_user.id)
+    grants = rec.get("ref_grants", 0)
+    due = valid // REF_BONUS if valid else 0
+    if due > grants:
+        days = (due - grants)
+        s, until = grant_ref_bonus(cb.from_user.id, days)
+        rec["ref_grants"] = due
+        rec["deep_refs"] = rec.get("deep_refs", 0)
+        users[str(cb.from_user.id)] = rec
+        save_users(users)
+        state = "finished"
+        await cb.bot.send_message(
+            cb.from_user.id,
+            bq(f"🎁 <b>{NAME}</b>") +
+            f"\n\n\U0001f4e5 <b>+{days} дн. подписки начислено!</b>"
+            + f"\nПриглашено валидно: <b>{valid}</b>"
+            + f"\nПодписка активна до: <b>{until}</b>",
+            parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data == "menu:profile")
@@ -1400,7 +1547,39 @@ async def back_home(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-# ── snos flow handlers ──────────────────────────────────
+# ── captcha solve ───────────────────────────────────────
+@router.callback_query(Captcha.solve, F.data.startswith("cap:"))
+async def captcha_solve(cb: CallbackQuery, state: FSMContext):
+    uid = cb.from_user.id
+    pend = CAPTCHA_PENDING.get(uid)
+    if not pend:
+        await cb.answer("\u043a\u0430\u043f\u0447\u0430 \u0443\u0441\u0442\u0430\u0440\u0435\u043b\u0430 \u2014 /start", show_alert=True)
+        await state.clear()
+        return
+    try:
+        picked = int(cb.data.split(":", 1)[1])
+    except ValueError:
+        picked = -1
+    meta = pend["meta"]
+    if picked != meta["index"]:
+        await cb.answer("\u274c \u043d\u0435 \u0442\u043e \u2014 \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439 \u0435\u0449\u0451 \u0440\u0430\u0437", show_alert=True)
+        return
+    # correct
+    CAPTCHA_VERIFIED[uid] = time.time()
+    CAPTCHA_PENDING.pop(uid, None)
+    await cb.answer("\u2705 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e")
+    await state.clear()
+    # hmm — render the hero card fresh right after pass
+    card = await user_card_path(cb.bot, cb.from_user)
+    await cb.message.edit_media(
+        media=InputMediaPhoto(media=FSInputFile(card)),
+        reply_markup=kb_main(uid),
+    )
+    await cb.message.edit_caption(
+        caption=hero_caption(uid),
+        parse_mode=ParseMode.HTML,
+        show_caption_above_media=True,
+    )
 @router.message(Snos.phone)
 async def got_snos_phone(msg: Message, state: FSMContext):
     raw = (msg.text or "").strip()
@@ -1864,6 +2043,156 @@ def save_subs(subs: dict) -> None:
 
 def user_is_admin(user_id: int) -> bool:
     return bool(ADMIN_ID) and user_id == int(ADMIN_ID)
+
+
+
+# ── user database + referral system ─────────────────────
+USERS_FILE = Path(__file__).parent / "users.json"
+REF_BONUS = 5          # приглашённых за +1 день подписки
+REF_DEEP_BONUS = 1     # бонус за реферала 2-го уровня
+
+
+def load_users() -> dict:
+    if USERS_FILE.exists():
+        try:
+            return json.loads(USERS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def save_users(users: dict) -> None:
+    USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=1),
+                          encoding="utf-8")
+
+
+def touch_user(user) -> dict:
+    """Register/update a user in DB; returns the record."""
+    users = load_users()
+    key = str(user.id)
+    rec = users.get(key)
+    first = rec is None
+    if first:
+        rec = {
+            "id": user.id,
+            "username": user.username or "",
+            "name": user.full_name or "",
+            "first_seen": datetime.now().isoformat(timespec="seconds"),
+            "last_seen": datetime.now().isoformat(timespec="seconds"),
+            "ref_by": None,
+            "refs": [],
+            "ref_grants": 0,
+            "deep_refs": 0,
+        }
+        users[key] = rec
+    else:
+        rec["last_seen"] = datetime.now().isoformat(timespec="seconds")
+        rec["username"] = user.username or rec.get("username", "")
+        rec["name"] = user.full_name or rec.get("name", "")
+    save_users(users)
+    rec["_first"] = first
+    return rec
+
+
+def set_referral(invitee, referrer_id: int) -> str | None:
+    """Bind invitee → referrer. Returns 'added'|'self'|'dup'|'loop'."""
+    users = load_users()
+    inv_key = str(invitee.id)
+    ref_key = str(referrer_id)
+    if inv_key == ref_key:
+        return "self"
+    rec = users.get(inv_key)
+    if rec is None:
+        rec = touch_user(invitee)
+        users = load_users()
+        rec = users.get(inv_key)
+    if rec.get("ref_by"):
+        return "dup"
+    if rec.get("ref_by") == ref_key:
+        return "dup"
+    if ref_key in (users.get(inv_key, {}).get("refs") or []):
+        return "loop"
+    ref_rec = users.get(ref_key)
+    if ref_rec is None:
+        # referrer may not be in DB yet — create shell record
+        users[ref_key] = {
+            "id": referrer_id,
+            "username": "", "name": "",
+            "first_seen": datetime.now().isoformat(timespec="seconds"),
+            "last_seen": datetime.now().isoformat(timespec="seconds"),
+            "ref_by": None, "refs": [], "ref_grants": 0, "deep_refs": 0,
+        }
+        ref_rec = users[ref_key]
+    # loop-guard: referrer's own chain already contains invitee?
+    chain_root = ref_key
+    hops = 0
+    cur = users.get(chain_root, {})
+    while cur and hops < 10:
+        by = cur.get("ref_by")
+        if by == inv_key:
+            return "loop"
+        cur = users.get(str(by), {}) if by else {}
+        hops += 1
+    rec["ref_by"] = referrer_id
+    ref_rec.setdefault("refs", []).append(int(invitee.id))
+    save_users(users)
+    return "added"
+
+
+def grant_ref_bonus(referrer_id: int, days: int) -> tuple[str, str]:
+    """Add `days` to referrer subscription. Returns (state, until_str)."""
+    subs = load_subs()
+    rec = subs.setdefault(str(referrer_id), {})
+    if rec.get("forever"):
+        save_subs(subs)
+        return "forever", "\u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430"
+    base = rec.get("until", 0)
+    start = max(base, time.time())
+    rec["until"] = start + days * 86400
+    save_subs(subs)
+    d = datetime.fromtimestamp(rec["until"]).strftime("%d.%m.%Y %H:%M")
+    return "active", d
+
+
+def count_valid_refs(user_id: int) -> int:
+    """Refs that are currently channel-subscribed members."""
+    users = load_users()
+    rec = users.get(str(user_id), {})
+    refs = rec.get("refs", [])
+    cid = get_channel_id()
+    if not cid:
+        return 0
+    good = 0
+    for rid in refs:
+        try:
+            m = asyncio.get_event_loop().run_until_complete(
+                botRefCtx["bot"].get_chat_member(cid, rid))
+            if m.status in ("member", "administrator", "creator"):
+                good += 1
+        except Exception:
+            continue
+    return good
+
+
+botRefCtx: dict = {"bot": None}
+
+
+async def count_valid_refs_async(user_id: int) -> int:
+    users = load_users()
+    rec = users.get(str(user_id), {})
+    refs = rec.get("refs", [])
+    cid = get_channel_id()
+    if not cid or not refs:
+        return 0
+    good = 0
+    for rid in refs:
+        try:
+            m = await botRefCtx["bot"].get_chat_member(cid, rid)
+            if m.status in ("member", "administrator", "creator"):
+                good += 1
+        except Exception:
+            continue
+    return good
 
 
 def sub_quality(subs: dict, user_id: int) -> tuple[str, str]:
