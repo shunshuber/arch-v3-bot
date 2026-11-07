@@ -1326,18 +1326,17 @@ async def menu_refs(cb: CallbackQuery, state: FSMContext):
     refs = rec.get("refs") or []
     valid = await count_valid_refs_async(cb.from_user.id)
     grants = rec.get("ref_grants", 0) or 0
-    pending = max(0, valid - grants * REF_BONUS) if valid else 0
     total = len(refs)
     uname = cb.from_user.username
-    link = (f"https://t.me/{uname}" if uname
-            else f"https://t.me/{(await cb.bot.me()).username}"
-            + (f"?start=ref_{cb.from_user.id}" if True else ""))
+    me = await cb.bot.me()
+    bot_uname = me.username
+    # ссылка всегда с реферальным кодом приглашающего
+    link = f"https://t.me/{bot_uname}?start=ref_{cb.from_user.id}"
 
     rules = (
-        f"• Твои ссылки — это /start с кодом <code>ref_{cb.from_user.id}</code>"
-        + (f"\n• Прямая ссылка: <code>{link}</code>" if uname else "")
+        f"• Каждый брат по твоей ссылке попадёт в бот с меткой твоего кода <code>ref_{cb.from_user.id}</code>"
         + f"\n• Реферал зачитывается <b>только</b> если он подписан"
-          f"\n  на канал и написал /start"
+          f"\n  на канал"
         + f"\n• <b>{REF_BONUS}</b> подписавшихся по твоей ссылке = "
           f"<b>+1 день подписки</b>"
         + "\n• Бонус начисляется автоматически при проверке"
