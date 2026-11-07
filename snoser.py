@@ -109,94 +109,43 @@ def _circle_avatar(raw: bytes, size: int):
 
 
 async def user_card_path(bot, user) -> str:
-    """Render a personal black/white card with the user's avatar top-right.
+    """Render the smooth black/white card: centered Arch V3, no user photo.
     Returns a filesystem path; falls back to static banner on failure."""
     CARDS_DIR.mkdir(parents=True, exist_ok=True)
-    out = CARDS_DIR / f"{user.id}.png"
-
-    avatar_raw = None
-    try:
-        prof = await bot.get_user_profile_photos(user.id, limit=1)
-        if getattr(prof, "total_count", 0) > 0:
-            blob = await bot.download(prof.photos[0][-1].file_id)
-            avatar_raw = blob.getvalue() if hasattr(blob, "getvalue") else None
-    except Exception as e:
-        log.warning("avatar fetch failed for %s: %s", user.id, e)
+    out = CARDS_DIR / "arch_hero.png"
 
     try:
         W, H = 1280, 720
         img = Image.new("RGB", (W, H))
         d = ImageDraw.Draw(img)
+        # smooth vertical gradient, dark at top -> slightly lighter bottom
         for y in range(H):
             t = y / H
-            v = int(6 + 26 * t)
+            v = int(6 + 30 * t)
             d.line([(0, y), (W, y)], fill=(v, v, v))
 
-        fword = _load_font(280)
+        fword = _load_font(220)
+        label_txt = "Arch V3"
+        tw = d.textlength(label_txt, font=fword)
+        bbox = fword.getbbox(label_txt)
+        th = bbox[3] - bbox[1]
+
         glow = Image.new("RGB", (W, H), (0, 0, 0))
         gd = ImageDraw.Draw(glow)
-        gd.text((84, 168), "Arch V3", font=fword, fill=(120, 120, 120))
-        glow = glow.filter(ImageFilter.GaussianBlur(20))
+        gd.text(((W - tw) / 2, (H - th) / 2 - 30),
+                label_txt, font=fword, fill=(110, 110, 110))
+        glow = glow.filter(ImageFilter.GaussianBlur(18))
         img = ImageChops.screen(img, glow)
 
         d = ImageDraw.Draw(img)
-        d.text((96, 186), "Arch V3", font=fword, fill=(252, 252, 252))
-
-        # ── top-right: avatar + nick/id (сдвинут левее) ──
-        label = user.username or user.full_name or str(user.id)
-        avatar_size = 132
-        margin = 120
-        ax = W - avatar_size - margin
-        ay = 44
-        if avatar_raw:
-            try:
-                av, mask = _circle_avatar(avatar_raw, avatar_size)
-                ring = Image.new("RGBA", (avatar_size * 2, avatar_size * 2), (0, 0, 0, 0))
-                rd = ImageDraw.Draw(ring)
-                rd.ellipse((2, 2, avatar_size * 2 - 3, avatar_size * 2 - 3),
-                           outline=(250, 250, 250, 220), width=4)
-                img.paste(av, (ax, ay), mask)
-                img.paste(ring, (ax, ay), ring)
-            except Exception as e:
-                log.warning("avatar paste failed: %s", e)
-        else:
-            # fallback circle: initial letter
-            d.ellipse((ax, ay, ax + avatar_size * 2, ay + avatar_size * 2),
-                      outline=(250, 250, 250), width=6)
-            initial = (label[:1] or "?").upper()
-            f_av = _load_font(150)
-            tw = d.textlength(initial, font=f_av)
-            d.text((ax + avatar_size - tw / 2, ay + avatar_size - 100),
-                   initial, font=f_av, fill=(250, 250, 250))
-
-        # nick/id left of avatar, right-aligned
-        if avatar_raw:
-            f_tag = _load_font(48)
-            tw = d.textlength(label, font=f_tag)
-            tx = ax - 28 - tw
-            d.text((tx, ay + avatar_size - 40), label, font=f_tag,
-                   fill=(240, 240, 240))
-
-        # grain
-        px = img.load()
-        for _ in range(40000):
-            gx = random.randrange(W)
-            gy = random.randrange(H)
-            r0, g0, b0 = px[gx, gy]
-            delta = random.randint(-5, 5)
-            px[gx, gy] = (max(0, min(255, r0 + delta)),
-                          max(0, min(255, g0 + delta)),
-                          max(0, min(255, b0 + delta)))
-
-        # vignette
-        vig = Image.new("L", (W, H), 0)
-        vd = ImageDraw.Draw(vig)
-        vd.ellipse((-W * 0.3, -H * 0.35, W * 1.3, H * 1.35), fill=255)
-        vig = vig.filter(ImageFilter.GaussianBlur(200))
-        dark = Image.new("RGB", (W, H), (4, 4, 4))
-        img = Image.composite(img, dark, vig)
+        d.text(((W - tw) / 2, (H - th) / 2 - 30),
+               label_txt, font=fword, fill=(252, 252, 252))
 
         img.save(out, optimize=True)
+        return str(out)
+    except Exception as e:
+        log.error("card render failed: %s", e)
+        return str(BANNER)
         return str(out)
     except Exception as e:
         log.error("card render failed: %s", e)
