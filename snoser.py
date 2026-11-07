@@ -112,7 +112,8 @@ async def user_card_path(bot, user) -> str:
     """Render the smooth black/white card: centered Arch V3, no user photo.
     Returns a filesystem path; falls back to static banner on failure."""
     CARDS_DIR.mkdir(parents=True, exist_ok=True)
-    out = CARDS_DIR / "arch_hero.png"
+    # unique filename per call — busts Telegram media cache entirely
+    out = CARDS_DIR / f"arch_hero_{int(time.time() * 1000)}_{random.randint(100, 999)}.png"
 
     try:
         W, H = 1280, 720
