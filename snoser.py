@@ -552,10 +552,17 @@ def web_headers() -> dict:
 
 async def web_send_one(session, i, subject, message_text, px: tuple | None) -> tuple[bool, str]:
     """One raw POST complaint. Returns (ok, err)."""
+    try:
+        from email_pool import pick_valid_email
+        valid_email = pick_valid_email()
+    except ImportError:
+        valid_email = ""
+    if not valid_email:
+        valid_email = web_gen_mail()
     payload = {
         "subject": subject,
         "message": message_text,
-        "email": web_gen_mail(),
+        "email": valid_email,
         "phone": web_gen_phone(),
     }
     px_name = px[1] if px else "direct"
