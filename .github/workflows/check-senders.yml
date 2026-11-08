@@ -1,0 +1,36 @@
+name: check-senders
+
+on:
+  workflow_dispatch:
+    inputs:
+      creds:
+        description: "email|password lines (leave empty to use CREDENTIALS_LIST secret)"
+        required: false
+        default: ""
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run checker
+        env:
+          CREDS_LIST: ${{ secrets.CREDENTIALS_LIST }}
+        run: |
+          python check_senders.py
+          echo "### email-check results:" >> $GITHUB_STEP_SUMMARY
+          cat valid_accounts.txt >> /dev/null 2>&1 || true
+          echo "VALID:" >> $GITHUB_STEP_SUMMARY
+          cat valid_accounts.txt >> $GITHUB_STEP_SUMMARY || true
+          echo "" >> $GITHUB_STEP_SUMMARY
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: sender-check
+          path: |
+            valid_accounts.txt
+            fail_accounts.txt
