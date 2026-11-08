@@ -1115,8 +1115,6 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data="menu:profile"),
          InlineKeyboardButton(text="\U0001f4b3 \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", callback_data="menu:subs")],
         [InlineKeyboardButton(text="\U0001f381 \u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", callback_data="menu:refs")],
-        [InlineKeyboardButton(text="\U0001f381 \u041a\u043e\u043b\u0435\u0441\u043e", callback_data="menu:wheel"),
-         InlineKeyboardButton(text="\U0001f4e6 \u041a\u0435\u0439\u0441", callback_data="menu:case")],
         [InlineKeyboardButton(text="\U0001f76c \u0417\u0435\u0440\u043a\u0430\u043b\u0430", callback_data="menu:mirror_list")],
     ]
 
@@ -1575,53 +1573,7 @@ async def captcha_solve(cb: CallbackQuery, state: FSMContext):
     )
 
 
-# ── rewards (wheel / case / promo) ──────────────────────
-@router.callback_query(F.data == "menu:wheel")
-async def menu_wheel(cb: CallbackQuery, state: FSMContext):
-    try:
-        from rewards import can_spin, spin_wheel
-    except ImportError:
-        await cb.answer("reward module missing")
-        return
-    ok, left = can_spin(cb.from_user.id)
-    if not ok:
-        hours = left // 3600
-        mins = (left % 3600) // 60
-        await cb.answer(f"まだ {hours}h {mins}m — приходи позже", show_alert=True)
-        return
-    prize = spin_wheel(cb.from_user.id)
-    text = (
-        bq(f"<b>{NAME}</b>  ·  🎡 Колесо")
-        + f"\n\n🎁 <b>Выпало:</b> {prize}"
-        + "\n\n<i>Крути колесо раз в сутки — привали победа.</i>"
-    )
-    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
-        ]))
-    await cb.answer()
-
-
-@router.callback_query(F.data == "menu:case")
-async def menu_case(cb: CallbackQuery, state: FSMContext):
-    try:
-        from rewards import open_case
-    except ImportError:
-        await cb.answer("reward module missing")
-        return
-    prize, _ = open_case(cb.from_user.id)
-    text = (
-        bq(f"<b>{NAME}</b>  ·  📦 Кейс")
-        + f"\n\n🎁 <b>Выпало:</b> {prize}"
-        + "\n\n<i>Платные кейсы: opening soon.</i>"
-    )
-    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
-        ]))
-    await cb.answer()
-
-
+# ── rewards (promo only, wheel/case disabled) ───────────
 # ── mirrors (🪞) — главный бот рождает саб-ботов ───────
 class MirrorCreateFSM(StatesGroup):
     token = State()
