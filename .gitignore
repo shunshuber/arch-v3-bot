@@ -5,3 +5,6 @@ cache/
 logs/
 sessions/
 *.session
+_*.ps1
+_artifacts/
+*.log
