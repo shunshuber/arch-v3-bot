@@ -1,0 +1,35 @@
+name: omnikill-sender
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "targets separated by spaces (e.g. @trolluser t.me/xxx ftg.org)"
+        required: false
+        default: ""
+
+jobs:
+  omni:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Write targets
+        env:
+          TARGETS: ${{ github.event.inputs.targets }}
+        run: |
+          if [ -z "$TARGETS" ]; then
+            echo "@durov" > abuse_targets.txt
+          else
+            echo "$TARGETS" | tr ' ' '\n' > abuse_targets.txt
+          fi
+      - name: Run omnikill
+        run: python omnikill.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnikill-log
+          path: omnikill_log.txt
