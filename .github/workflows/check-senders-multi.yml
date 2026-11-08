@@ -1,0 +1,24 @@
+name: check-senders-multi
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run multi checker
+        run: |
+          python check_senders_multi.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-check
+          path: |
+            valid_accounts.txt
+            fail_accounts.txt
