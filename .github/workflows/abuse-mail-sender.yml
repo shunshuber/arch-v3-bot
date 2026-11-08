@@ -1,0 +1,26 @@
+name: abuse-mail-sender
+
+on:
+  workflow_dispatch:
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install python-dotenv
+      - name: Send abuse reports
+        env:
+          ABUSE_REASON: ${{ secrets.ABUSE_REASON }}
+          ABUSE_COMMENT: ${{ secrets.ABUSE_COMMENT }}
+        run: python abuse_mailer.py
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: abuse-result
+          path: abuse_sent.txt
