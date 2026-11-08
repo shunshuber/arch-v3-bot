@@ -550,8 +550,27 @@ def web_headers() -> dict:
     }
 
 
-async def web_send_one(session, i, subject, message_text, px: tuple | None) -> tuple[bool, str]:
-    """One raw POST complaint. Returns (ok, err)."""
+async def web_send_one(session, i, subject, message_text, px: tuple | None,
+                       target_text: str = "", reason_label: str = "",
+                       comment: str = "", reason_key: str = "") -> tuple[bool, str]:
+    """One raw POST complaint. Returns (ok, err).
+    Text is unique per-call: Groq generates fresh, falls back to template spin."""
+    text = ""
+    try:
+        from groq_gen import generate_complaint, fallback_complaint
+    except ImportError:
+        generate_complaint = None
+        fallback_complaint = None
+    if generate_complaint:
+        text = await generate_complaint(
+            reason_label=reason_label or reason_key or "Policy Violation",
+            target_hint=target_text,
+            extra=comment)
+    if not text:
+        if fallback_complaint:
+            text = fallback_complaint(reason_label or "Policy Violation", target_text)
+        else:
+            text = message_text or "Complaint regarding a Telegram policy violation."
     try:
         from email_pool import pick_valid_email
         valid_email = pick_valid_email()
@@ -561,7 +580,7 @@ async def web_send_one(session, i, subject, message_text, px: tuple | None) -> t
         valid_email = web_gen_mail()
     payload = {
         "subject": subject,
-        "message": message_text,
+        "message": text,
         "email": valid_email,
         "phone": web_gen_phone(),
     }
@@ -601,24 +620,18 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
     """Raw POST complaints straight to the support form backend.
 
     The turnstile exists only in the browser UI layer; the server accepts
-    direct form posts. Count = WEB_COUNT env (default 5), proxies rotate."""
+    direct form posts. Count = WEB_COUNT env (default 5), proxies rotate.
+    Text per-shot generated via Groq if key present, else unique fallback spin."""
     count = WEB_COUNT
     results = {"ok": 0, "fail": 0, "total": count, "details": []}
 
     subject = f"Complaint About {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}"
-    msg_lines = [
-        "Complaint regarding a Telegram policy violation.",
-        f"Target: {target_text}",
-        f"Violation: {reason_label}",
-    ]
-    if comment:
-        msg_lines.append(f"Details: {comment}")
-    msg_lines.append("Please review and take action against this account/channel.")
-    text = "\n".join(msg_lines)
 
     proxies = load_proxies()
-    tasks = [web_send_one(None, i + 1, subject, text,
-                          proxies[i % len(proxies)] if proxies else None)
+    tasks = [web_send_one(None, i + 1, subject, None,
+                          proxies[i % len(proxies)] if proxies else None,
+                          target_text=target_text, reason_label=reason_label,
+                          comment=comment, reason_key=reason_key)
              for i in range(count)]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1102,6 +1115,9 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data="menu:profile"),
          InlineKeyboardButton(text="\U0001f4b3 \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", callback_data="menu:subs")],
         [InlineKeyboardButton(text="\U0001f381 \u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", callback_data="menu:refs")],
+        [InlineKeyboardButton(text="\U0001f381 \u041a\u043e\u043b\u0435\u0441\u043e", callback_data="menu:wheel"),
+         InlineKeyboardButton(text="\U0001f4e6 \u041a\u0435\u0439\u0441", callback_data="menu:case")],
+        [InlineKeyboardButton(text="\U0001f76c \u0417\u0435\u0440\u043a\u0430\u043b\u0430", callback_data="menu:mirror_list")],
     ]
 
     if ADMIN_ID and user_id == int(ADMIN_ID):
@@ -1370,7 +1386,7 @@ async def menu_refs(cb: CallbackQuery, state: FSMContext):
 
 
 async def refs_check_and_grant(cb: CallbackQuery):
-    """Validated refs -> auto-grant bonus days."""
+    """Validated refs -> auto-grant bonus days (tier1) + tier2 deep-referral chain."""
     users = load_users()
     rec = users.get(str(cb.from_user.id), {})
     valid = await count_valid_refs_async(cb.from_user.id)
@@ -1380,7 +1396,27 @@ async def refs_check_and_grant(cb: CallbackQuery):
         days = (due - grants)
         s, until = grant_ref_bonus(cb.from_user.id, days)
         rec["ref_grants"] = due
-        rec["deep_refs"] = rec.get("deep_refs", 0)
+
+        # tier2 bonus: when one of your refs THEMSELVES invites 5 valid refs,
+        # you get +1 extra day. Deep-chain boost.
+        for rid in (rec.get("refs") or []):
+            r2 = users.get(str(rid), {})
+            if (r2.get("ref_grants", 0) or 0) >= 1 and not r2.get("_t2_credited", False):
+                s, until2 = grant_ref_bonus(cb.from_user.id, 1)
+                rec["deep_refs"] = (rec.get("deep_refs", 0) or 0) + 1
+                r2["_t2_credited"] = True
+                users[str(rid)] = r2
+                try:
+                    await cb.bot.send_message(
+                        cb.from_user.id,
+                        bq(f"🎁 <b>{NAME}</b>")
+                        + "\n\n🌐 <b>Рефер 2-го уровня!</b>"
+                        + f"\n<b>+1 дн.</b> за то, что твой пригл. сам привёл 5.",
+                        parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
+                break
+
         users[str(cb.from_user.id)] = rec
         save_users(users)
         state = "finished"
@@ -1389,7 +1425,8 @@ async def refs_check_and_grant(cb: CallbackQuery):
             bq(f"🎁 <b>{NAME}</b>") +
             f"\n\n\U0001f4e5 <b>+{days} дн. подписки начислено!</b>"
             + f"\nПриглашено валидно: <b>{valid}</b>"
-            + f"\nПодписка активна до: <b>{until}</b>",
+            + f"\nПодписка активна до: <b>{until}</b>"
+            + (f"\n🌐 Рефер 2-го уровня: всего {rec.get('deep_refs') or 0}" if rec.get("deep_refs") else ""),
             parse_mode=ParseMode.HTML)
 
 
@@ -1536,6 +1573,162 @@ async def captcha_solve(cb: CallbackQuery, state: FSMContext):
         parse_mode=ParseMode.HTML,
         show_caption_above_media=True,
     )
+
+
+# ── rewards (wheel / case / promo) ──────────────────────
+@router.callback_query(F.data == "menu:wheel")
+async def menu_wheel(cb: CallbackQuery, state: FSMContext):
+    try:
+        from rewards import can_spin, spin_wheel
+    except ImportError:
+        await cb.answer("reward module missing")
+        return
+    ok, left = can_spin(cb.from_user.id)
+    if not ok:
+        hours = left // 3600
+        mins = (left % 3600) // 60
+        await cb.answer(f"まだ {hours}h {mins}m — приходи позже", show_alert=True)
+        return
+    prize = spin_wheel(cb.from_user.id)
+    text = (
+        bq(f"<b>{NAME}</b>  ·  🎡 Колесо")
+        + f"\n\n🎁 <b>Выпало:</b> {prize}"
+        + "\n\n<i>Крути колесо раз в сутки — привали победа.</i>"
+    )
+    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "menu:case")
+async def menu_case(cb: CallbackQuery, state: FSMContext):
+    try:
+        from rewards import open_case
+    except ImportError:
+        await cb.answer("reward module missing")
+        return
+    prize, _ = open_case(cb.from_user.id)
+    text = (
+        bq(f"<b>{NAME}</b>  ·  📦 Кейс")
+        + f"\n\n🎁 <b>Выпало:</b> {prize}"
+        + "\n\n<i>Платные кейсы: opening soon.</i>"
+    )
+    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+# ── mirrors (🪞) — главный бот рождает саб-ботов ───────
+class MirrorCreateFSM(StatesGroup):
+    token = State()
+
+
+@router.callback_query(F.data == "menu:mirror_add")
+async def menu_mirror_add(cb: CallbackQuery, state: FSMContext):
+    try:
+        from mirror import count_mirrors, MIRROR_MAX
+        n = count_mirrors(cb.from_user.id)
+    except ImportError:
+        await cb.answer("mirrors module missing")
+        return
+    if n >= MIRROR_MAX:
+        await cb.answer(f"лимит зеркал ({MIRROR_MAX})", show_alert=True)
+        return
+    await state.set_state(MirrorCreateFSM.token)
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>  \u00b7  🪞 Зеркало")
+            + "\n\n\U0001f4e5 Пришли <b>BotFather token</b> зеркала:"
+            + "\n<i>формат:</i> <code>1234:ABC...</code>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Назад", callback_data="menu:mirror_list")],
+        ]))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "menu:mirror_list")
+async def menu_mirror_list(cb: CallbackQuery, state: FSMContext):
+    try:
+        from mirror import list_mirrors_for, register_mirror, start_mirror, count_mirrors, MIRROR_MAX
+    except ImportError:
+        await cb.answer("mirrors module missing")
+        return
+    mirrors = list_mirrors_for(cb.from_user.id)
+    kb_rows = [[InlineKeyboardButton(
+        text=f"🪞 @{m['username']}", url=f"https://t.me/{m['username']}")] for m in mirrors]
+    kb_rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="menu:mirror_add")])
+    kb_rows.append([InlineKeyboardButton(text="◀ Назад", callback_data="back:home")])
+    text = (
+        bq(f"<b>{NAME}</b>  ·  🪞 Зеркала")
+        + f"\n\nВаши зеркала: <b>{len(mirrors)}</b> / {MIRROR_MAX}"
+        + "\n<i>каждое зеркало работает как отдельный Arch V3</i>"
+    )
+    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await cb.answer()
+
+
+@router.message(MirrorCreateFSM.token)
+async def mirror_token(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip()
+    await state.clear()
+    try:
+        from mirror import validate_token, register_mirror, start_mirror, count_mirrors, MIRROR_MAX
+    except ImportError:
+        return
+    if ":" not in raw or len(raw) < 30:
+        await msg.answer("❌ Неверный формат токена. `1234:ABC...`", parse_mode=ParseMode.HTML)
+        return
+    wait = await msg.answer("⏳ Проверяю токен...")
+    bot_username = await validate_token(raw)
+    try:
+        await wait.delete()
+    except Exception:
+        pass
+    if not bot_username:
+        await msg.answer("❌ Токен невалидный.")
+        return
+    ok = register_mirror(msg.from_user.id, raw, bot_username)
+    if not ok:
+        n = count_mirrors(msg.from_user.id)
+        await msg.answer(f"❌ Токен уже есть / лимит ({n})")
+        return
+    start_mirror(raw)
+    n = count_mirrors(msg.from_user.id)
+    await msg.answer(
+        f"✅ Зеркало работает!\n🤖 @{bot_username}\n📊 Всего зеркал: {n}",
+        parse_mode=ParseMode.HTML)
+
+
+@router.message(Captcha.solve, F.text.regexp(r"^/promo\s+(\S+)$"))
+async def promo_enter(msg: Message, state: FSMContext):
+    await state.clear()
+    code = msg.text.strip().split(" ", 1)[1]
+    try:
+        from rewards import apply_promo
+    except ImportError:
+        return
+    ok, reply = apply_promo(msg.from_user.id, code)
+    await msg.answer(f"{'✅' if ok else '❌'} {reply}", parse_mode=ParseMode.HTML)
+
+
+@router.message(F.text.regexp(r"^/promo\s+(\S+)$"))
+async def promo_any(msg: Message, state: FSMContext):
+    code = msg.text.strip().split(" ", 1)[1]
+    try:
+        from rewards import apply_promo
+    except ImportError:
+        return
+    ok, reply = apply_promo(msg.from_user.id, code)
+    await msg.answer(f"{'✅' if ok else '❌'} {reply}", parse_mode=ParseMode.HTML)
+
+
 @router.message(Snos.phone)
 async def got_snos_phone(msg: Message, state: FSMContext):
     raw = (msg.text or "").strip()
@@ -2459,6 +2652,21 @@ async def main():
     n = len(load_sessions())
     p = len(load_proxies())
     log.info("%s starting... sessions=%d proxies=%d", NAME, n, p)
+
+    # mirror sub-bots: restart any previously-registered mirrors before main polling
+    try:
+        from mirror import _mirror_store, start_mirror
+        mstore = _mirror_store()
+        for tok, vminfo in mstore.items():
+            try:
+                start_mirror(tok)
+            except Exception as e:
+                log.warning("mirror %s failed to start: %s", vminfo.get("username"), e)
+        n_mirrors = sum(1 for v in mstore.values())
+        if n_mirrors:
+            log.info("mirrors started: %d", n_mirrors)
+    except Exception as e:
+        log.warning("mirror submodule unavailable: %s", e)
 
     # retry the whole polling loop on network hiccups
     while True:

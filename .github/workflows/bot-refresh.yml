@@ -1,0 +1,39 @@
+name: bot-refresh
+
+on:
+  workflow_dispatch:
+    inputs:
+      mirror_token:
+        description: "optional: mirror token to give newly registered mirror life in this same job"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
+      SUB_CHANNEL_LINK: ${{ secrets.SUB_CHANNEL_LINK }}
+      SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
+      GROQ_KEY: ${{ secrets.GROQ_KEY }}
+      CREDS_MULTI: ${{ secrets.CREDENTIALS_LIST }}
+      WEB_COUNT: "5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run bot
+        run: |
+          tries=0
+          while true; do
+            echo "attempt $try"
+            python snoser.py || true
+            sleep 5
+            tries=$((tries+1))
+          done
