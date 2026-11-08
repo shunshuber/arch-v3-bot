@@ -1,18 +1,17 @@
-name: arch-v3-bot
+name: bot-refresh
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут — джоба встанет в очередь и продолжит после смерти предыдущей
-  workflow_dispatch: {}
-
-concurrency:
-  group: arch-v3-bot
-  cancel-in-progress: false   # не рвём живую джобу — новая ждёт в очереди
+  workflow_dispatch:
+    inputs:
+      mirror_token:
+        description: "optional: mirror token to give newly registered mirror life in this same job"
+        required: false
+        default: ""
 
 jobs:
-  run-bot:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 350    # GitHub max ~6ч; 350 мин на джобу
+    timeout-minutes: 350
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       ADMIN_ID: ${{ secrets.ADMIN_ID }}
@@ -21,28 +20,18 @@ jobs:
       XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
       SUB_CHANNEL_LINK: ${{ secrets.SUB_CHANNEL_LINK }}
       SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
+      GROQ_KEY: ${{ secrets.GROQ_KEY }}
+      CREDS_MULTI: ${{ secrets.CREDENTIALS_LIST }}
       WEB_COUNT: "5"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-      - name: Install deps
+      - name: Run bot
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-      - name: Run bot (auto-restart loop inside job)
-        run: |
-          echo "bot job started at $(date -u +%H:%M:%S)"
-          # восстанавливаем процесс, если он упал внутри job — до 5с между попытками
           tries=0
           while true; do
-            try=$((tries+1))
             echo "attempt $try"
             python snoser.py || true
             sleep 5
