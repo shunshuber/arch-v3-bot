@@ -1,0 +1,21 @@
+name: abuse-mail-targeted
+
+on:
+  workflow_dispatch:
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Send targeted abuse mail
+        run: python omnikill_v3.py
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+        with:
+          name: targeted-log
+          path: omnikill_v3_log.txt
