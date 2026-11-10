@@ -11,6 +11,7 @@ The bot picks from this file on start and rotates sendcode calls per session.
 import asyncio
 import os
 import random
+import re
 import ssl
 import sys
 import io
@@ -113,7 +114,45 @@ async def harvest() -> list[tuple[str, str]]:
 
 
 async def validate_proxy(proxy_url: str, scheme: str) -> bool:
-    """Test each proxy by connecting to Telegram over it."""
+    """Test each proxy the way sessions actually use it: a real MTProto
+    handshake with a Telegram DC over Telethon (throwaway unauthenticated
+    session). A plain HTTPS GET to api.telegram.org is NOT enough — free
+    proxies often pass that but die on the MTProto tunnel, killing every
+    session that gets pinned to them."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+    api_id = int(os.getenv("API_ID", "0") or 0)
+    api_hash = os.getenv("API_HASH", "")
+    try:
+        from snoser import parse_proxy
+        px = parse_proxy(proxy_url)
+    except Exception:
+        px = None
+        m = re.match(r"(?:socks5|socks4|http)://(?:[^@/]+@)?([\w.\-]+):(\d+)",
+                     proxy_url)
+        if m:
+            ptype = ProxyType.SOCKS5 if scheme.startswith("socks5") else (
+                ProxyType.SOCKS4 if scheme.startswith("socks4") else ProxyType.HTTP)
+            px = (ptype, m.group(1), int(m.group(2)), True, None, None)
+    if px is None:
+        return False
+    if not api_id or not api_hash:
+        return await _http_probe(proxy_url, scheme)
+    client = TelegramClient(StringSession(), api_id, api_hash, proxy=px)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=10)
+        return client.is_connected()
+    except Exception:
+        return False
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+async def _http_probe(proxy_url: str, scheme: str) -> bool:
+    """Cheap fallback probe when API creds are absent (HTTP GET only)."""
     conn = ProxyConnector.from_url(proxy_url) if scheme in ("socks5", "socks4") else None
     timeout = aiohttp.ClientTimeout(total=8)
     try:
@@ -121,13 +160,11 @@ async def validate_proxy(proxy_url: str, scheme: str) -> bool:
             async with aiohttp.ClientSession(connector=conn, timeout=timeout) as s:
                 async with s.get("https://api.telegram.org", ssl=False) as r:
                     return r.status in (200, 301, 302, 307, 308)
-        else:
-            # http proxy
-            hostport = proxy_url.rsplit("://", 1)[1]
-            p = f"http://{hostport}"
-            async with aiohttp.ClientSession(timeout=timeout) as s:
-                async with s.get("https://api.telegram.org", proxy=p, ssl=False) as r:
-                    return r.status in (200, 301, 302, 307, 308)
+        hostport = proxy_url.rsplit("://", 1)[1]
+        p = f"http://{hostport}"
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get("https://api.telegram.org", proxy=p, ssl=False) as r:
+                return r.status in (200, 301, 302, 307, 308)
     except Exception:
         return False
 
