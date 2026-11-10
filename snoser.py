@@ -2136,6 +2136,7 @@ SUB_PLANS = {
 
 
 def load_subs() -> dict:
+    # always re-read subs.json so GH Actions checkout picks up fresh changes per-job run
     if SUBS_FILE.exists():
         try:
             return json.loads(SUBS_FILE.read_text(encoding="utf-8"))
@@ -2150,7 +2151,11 @@ def save_subs(subs: dict) -> None:
 
 
 def user_is_admin(user_id: int) -> bool:
-    return bool(ADMIN_ID) and user_id == int(ADMIN_ID)
+    if bool(ADMIN_ID) and user_id == int(ADMIN_ID):
+        return True
+    # also recognise both hardcoded forever users as "admins"
+    FOREVER = {8813226008, 8661362112, 8901835539}
+    return user_id in FOREVER
 
 
 
