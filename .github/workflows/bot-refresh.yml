@@ -23,7 +23,7 @@ jobs:
       SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
       GROQ_KEY: ${{ secrets.GROQ_KEY }}
       CREDS_MULTI: ${{ secrets.CREDENTIALS_LIST }}
-      WEB_COUNT: "5"
+      WEB_COUNT: "8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
