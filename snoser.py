@@ -696,17 +696,46 @@ OAUTH_SERVICES = [
 ]
 
 SNOS_SUPPORT_TEXTS = [
-    "Здравствуйте, поддержка Telegram! Мой аккаунт был взломан путем фишинга, и моя активная сессия была сброшена. Сейчас на нем находится мошенник. Прошу вас помочь мне, обнулив все сессии на аккаунте, чтобы я смог восстановить доступ по SMS, либо удалить мой аккаунт. Спасибо!",
-    "Hello technical support, a stranger wrote to me today and asked me to change something in my account settings, pretending to be Telegram support. I changed what support asked me to do, and after a few minutes I was kicked out of my account and I can't get into it. My account has been hacked. Please delete the account or expel the scammer from the account in an alternative way.",
-    "Здравствуйте! Хочу сообщить о проблеме с моим аккаунтом в телеграме. Мой аккаунт был взломан мошенниками через фишинг ссылку, после перехода меня выкинуло с моего аккаунта, а мошенники зашли туда. Я пытался войти в аккаунт по номеру и запросом кода в СМС, но мошенники поставили двухэтапную аутентификацию и привязали почту и блокируют мне вход в мой аккаунт. Я прошу вас удалить все сессии на моем аккаунте или полностью удалить мой аккаунт, потому что он украден мошенниками.",
-    "Добрый день! Мой аккаунт Telegram был взломан. Я пытаюсь восстановить доступ уже несколько дней, но каждый раз при запросе сброса пароля приходит уведомление, что операция отменена. Это явно делает злоумышленник. Помогите, пожалуйста, решить эту проблему.",
-    "Hello, I am writing to report that my Telegram account was stolen. I used this account for work, and without access to it I am unable to complete my tasks. This is putting my job at serious risk. I urgently request your immediate assistance in restoring access to my account or taking any necessary action to secure it. Please treat this as a priority issue.",
-    "Здравствуйте, мой аккаунт был взломан и выставили на продажу на сайте. Теперь на мой аккаунт постоянно кто-то заходит и даже если я завершаю сессии то они всё равно заходят. Прошу принудительно завершить все сессии, кроме моей текущей, и восстановить контроль над аккаунтом.",
+    # === RU-набор: разный тон, разные "жертвы" ===
+    "Уважаемая поддержка Telegram! Мой аккаунт украли через фишинг-ссылку, которую я получил в личку от якобы техподдержки. После перехода меня выкинуло из аккаунта, а мошенник продуктивно рассылает мой контакт-лист. Откатите все активные сессии по номеру, либо удалите аккаунт полностью. Благодарю за быструю реакцию.",
+
+    "Здравствуйте! Пишу с просьбой заблокировать все активные сессии на моём аккаунте Telegram. Вчера я перешёл по ссылке, ввёл номер и код подтверждения, после чего доступ потерял. Мошенник уже начал рассылать моим контактам сообщения с просьбой о деньгах. Каждая минута промедления — удар по моей репутации. Прошу отреагировать немедленно.",
+
+    "Добрый день! У меня есть все основания полагать, что мой аккаунт взломан и продан на стороннем сайте. Я завершаю активные сессии через настройки, но новые появляются снова и снова — как будто кто-то держит ключи от моего Telegram. Прошу принудительно обнулить все устройства, кроме текущего номера. Спасибо!",
+
+    "Здравствуйте! Пара дней назад я нажал на подозрительную ссылку, после чего Telegram меня выкинул, и теперь я не могу войти — стоит чужая двухфакторка с посторонней почтой. Прошу вас удалить абсолютно все сессии либо полностью удалить аккаунт. Он точно у мошенников, они уже пишут моим знакомым.",
+
+    "Уважаемые модераторы Telegram! Мой рабочий акк заблокирован мошенником, я потерял доступ 3 дня назад. Это ломает мою работу — клиенты пишут, но я не могу ответить. Прошу помощи в принудительном сбросе сессий или удалении аккаунта. Спасибо заранее.",
+
+    "Здравствуйте. На моём аккаунте сидит мошенник, уже поменял имя на моё, привязал свою почту и включил двухфакторку. Я не могу войти в аккаунт, хотя это мой номер и мои контакты. Прошу полностью обнулить все активные сессии, чтобы вернуть доступ.",
+
+    "Привет, поддержка Telegram! Я вчера случайно перешёл по фишинг-ссылке и потерял доступ к своему аккаунту. Внутри сидит злоумышленник, рассылает мои данные. Прошу немедленно завершить все сессии или удалить аккаунт, чтобы он не смог испортить мне репутацию.",
+
+    # === EN-набор: другой стилевой ===
+    "Dear Telegram Support Team, my Telegram account was compromised through a phishing link. The attacker logged in, changed the settings, and is now sending spam to my contact list. I demand all active sessions be terminated immediately or the account deleted entirely. Your prompt action is critical.",
+
+    "Hello Telegram Support. I can no longer access my Telegram account — someone enabled two-factor authentication without my consent and locked me out. Every attempt to reset the password fails. I believe this is a targeted attack by a scammer. Please force-logout all active sessions or remove the account, my reputation is on the line.",
+
+    "I am writing to report that my Telegram account was hijacked yesterday by an attacker who impersonated Telegram Support. They promised help with bugs and ended up taking full control of my profile. The attacker is actively messaging my business contacts. Please restore my access or permanently delete the account. Thank you for understanding the urgency.",
+
+    "Dear Telegram, my account has been sold on a third-party marketplace. I have repeatedly logged out the illegitimate sessions but new ones appear within minutes — the attacker clearly possesses my auth key. I request a force-reset of every active session except mine, or full account deletion.",
+
+    "Urgent: Telegram account hijacked. My work profile has been taken over by a fraudster who is now impersonating me to my clients. I have already sent screenshots to @NoToScam. Please terminate all active sessions associated with my phone number or delete the account.",
 ]
 
+
 SNOS_SUBJECTS = [
-    "Взломан аккаунт", "Account hacked", "Stolen account",
-    "Аккаунт украден", "Мошенники захватили аккаунт", "Hack report",
+    "Взломан аккаунт — прошу сбросить сессии",
+    "Account hacked — please reset sessions",
+    "Срочный запрос: аккаунт Telegram у мошенника",
+    "Внимание: доступ к Telegram аккаунту потерян",
+    "My Telegram was hijacked — urgent",
+    "Requesting reset of active sessions",
+    "Аккаунт украден мошенниками",
+    "Urgent: phished out, attacker inside",
+    "ЗАЯВЛЕНИЕ: просьба удалить аккаунт",
+    "Failed login — 2FA enabled by attacker",
+    "Мошенник уже в приватных чатах",
 ]
 
 
@@ -979,6 +1008,8 @@ async def snos_web_support(phone: str, username: str, victim_id: int) -> list[di
     """3 complaints to support carrying the victim's identity data."""
     proxies = load_proxies()
     texts = random.sample(SNOS_SUPPORT_TEXTS, min(3, len(SNOS_SUPPORT_TEXTS)))
+    subj_pool = list(SNOS_SUBJECTS)
+    random.shuffle(subj_pool)
     out = []
     for i, text in enumerate(texts, 1):
         px = random.choice(proxies) if proxies else None
@@ -989,7 +1020,7 @@ async def snos_web_support(phone: str, username: str, victim_id: int) -> list[di
             + f"ID аккаунта: {victim_id}\n"
             + f"Username: @{username}"
         )
-        subject = random.choice(SNOS_SUBJECTS)
+        subject = subj_pool[i % len(subj_pool)]
         ok, err = await snos_support_one(phone, full_text, subject, px)
         out.append({"name": f"support#{i}", "proxy": px[1] if px else "direct",
                     "ok": ok, "err": err})
