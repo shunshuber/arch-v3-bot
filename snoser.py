@@ -227,6 +227,238 @@ REASONS = {
     "other":     {"e": "\u2753",         "l": "\u0414\u0440\u0443\u0433\u043e\u0435"},
 }
 
+# ── auto comment templates: 10 per category, 10 languages ──
+# used when the user skips the comment step; strong multi-lingual texts
+COMMENT_TEMPLATES = {
+    "spam": [
+        # RU
+        "Этот аккаунт массово рассылает спам в личные сообщения и группы. Кампания идёт сутками без перерыва, сотни пользователей уже пострадали. Требую немедленной блокировки аккаунта и удаления всей рассылки.",
+        # EN
+        "This account runs a mass unsolicited mailing campaign across private chats and groups, operating 24/7 with hundreds of victims affected. Immediate permanent ban and full purge of the distribution list is required.",
+        # DE
+        "Dieses Konto versendet massenhaft unerwünschte Nachrichten in private Chats und Gruppen, rund um die Uhr. Hunderte Nutzer sind betroffen. Ich fordere die sofortige dauerhafte Sperrung des Kontos.",
+        # ES
+        "Esta cuenta envía spam masivo por mensajes privados y grupos, sin parar día y noche. Cientos de usuarios ya han sido afectados. Exijo el bloqueo inmediato y permanente de esta cuenta.",
+        # FR
+        "Ce compte diffuse du spam en masse dans les messages privés et les groupes, 24h/24. Des centaines d'utilisateurs sont touchés. Je demande la suspension immédiate et définitive de ce compte.",
+        # IT
+        "Questo account invia spam in massa tramite messaggi privati e gruppi, senza sosta giorno e notte. Centinaia di utenti sono già stati coinvolti. Richiedo la chiusura immediata e definitiva dell'account.",
+        # PT
+        "Esta conta envia spam em massa por mensagens privadas e grupos, dia e noite sem parar. Centenas de usuários já foram afetados. Exijo o bloqueio imediato e permanente desta conta.",
+        # PL
+        "To konto masowo wysyła spam w wiadomościach prywatnych i grupach, non stop przez całą dobę. Setki użytkowników już ucierpiało. Wymagam natychmiastowej i trwałej blokady konta.",
+        # TR
+        "Bu hesap, özel mesajlar ve gruplar üzerinden durmaksızın toplu spam gönderiyor. Yüzlerce kullanıcı etkilendi. Hesabın derhal ve kalıcı olarak kapatılmasını talep ediyorum.",
+        # AR
+        "يرسل هذا الحساب رسائل مزعجة بكميات ضخمة في المحادثات الخاصة والمجموعات دون توقف، وقد تأثرت مئات المستخدمين. أطالب بإغلاق الحساب فوراً بشكل دائم.",
+    ],
+    "fraud": [
+        # RU
+        "Данный аккаунт занимается мошенничеством: выманивает деньги под предлогом продаж и «безопасных сделок», после чего блокирует жертв. Пострадали десятки людей. Требую незамедлительной блокировки и передачи данных жертвам для возмещения ущерба.",
+        # EN
+        "This account is running an organized fraud scheme: it collects payments for fake sales and 'secure deals', then blocks the victims. Dozens of people have already lost money. Immediate ban and victim restitution data disclosure is required.",
+        # DE
+        "Dieses Konto betreibt organisierten Betrug: Es kassiert Zahlungen für gefälschte Verkäufe und 'sichere Deals' und blockiert dann die Opfer. Dutzende Menschen haben bereits Geld verloren. Sofortige Sperrung ist erforderlich.",
+        # ES
+        "Esta cuenta lleva a cabo un fraude organizado: cobra pagos por ventas falsas y 'tratos seguros' para luego bloquear a las víctimas. Docenas de personas ya han perdido dinero. Exijo su bloqueo inmediato.",
+        # FR
+        "Ce compte mène une escroquerie organisée : il encaisse des paiements pour de fausses ventes et des « transactions sécurisées », puis bloque les victimes. Des dizaines de personnes ont déjà perdu de l'argent. Je demande un bannissement immédiat.",
+        # IT
+        "Questo account mette in atto una truffa organizzata: incassa pagamenti per vendite finte e 'transazioni sicure', per poi bloccare le vittime. Decine di persone hanno già perso denaro. Richiedo la chiusura immediata dell'account.",
+        # PT
+        "Esta conta conduz um esquema de fraude organizado: coleta pagamentos por vendas falsas e 'negócios seguros', depois bloqueia as vítimas. Dezenas de pessoas já perderam dinheiro. Exijo o banimento imediato.",
+        # PL
+        "To konto prowadzi zorganizowane oszustwo: pobiera płatności za fałszywe sprzedaże i 'bezpieczne transakcje', a następnie blokuje ofiary. Dziesiątki osób już straciły pieniądze. Wymagam natychmiastowej blokady.",
+        # TR
+        "Bu hesap örgütlü dolandırıcılık yürütüyor: sahte satışlar ve 'güvenli anlaşmalar' için ödeme alıyor, ardından kurbanları engelliyor. Onlarca insan çoktan para kaybetti. Hesabın derhal kapatılmasını talep ediyorum.",
+        # AR
+        "يقوم هذا الحساب بعملية احتيال منظمة: يستقبل المدفوعات مقابل مبيعات وهمية و'صفقات آمنة' ثم يحجب الضحايا. عشرات الأشخاص فقدوا أموالهم بالفعل. أطالب بإغلاق الحساب فوراً.",
+    ],
+    "violence": [
+        # RU
+        "Этот канал публикует сцены насилия, изображения жестокого обращения с людьми и призывает к расправам. Такой контент прямо запрещён правилами Telegram. Требую удалить канал и заблокировать администраторов немедленно.",
+        # EN
+        "This channel publishes graphic violence, footage of people being brutalized, and calls for attacks. This content is explicitly banned under Telegram's Terms of Service. Demand: immediate channel removal and admin bans.",
+        # DE
+        "Dieser Kanal veröffentlicht explizite Gewaltdarstellungen, Aufnahmen von Misshandlungen und Aufrufe zu Übergriffen. Solche Inhalte verstoßen klar gegen die Telegram-Regeln. Ich fordere die sofortige Löschung des Kanals und Sperrung der Admins.",
+        # ES
+        "Este canal publica violencia gráfica, imágenes de agresiones a personas e incita a los ataques. Este contenido está prohibido por las normas de Telegram. Exijo la eliminación inmediata del canal y el bloqueo de sus administradores.",
+        # FR
+        "Ce canal publie des images de violence extrême, des scènes de brutalités et encourage aux agressions. Ce contenu est interdit par les règles de Telegram. Je demande la suppression immédiate du canal et le bannissement des administrateurs.",
+        # IT
+        "Questo canale pubblica violenza grafica, scene di brutalità contro persone e invoca attacchi. Tale contenuto è esplicitamente vietato dalle regole di Telegram. Richiedo la rimozione immediata del canale e il bann degli amministratori.",
+        # PT
+        "Este canal publica violência gráfica, imagens de agressões a pessoas e incita ataques. Este conteúdo é proibido pelas regras do Telegram. Exijo a remoção imediata do canal e o banimento dos administradores.",
+        # PL
+        "Ten kanał publikuje brutalne treści, nagrania przemocy wobec ludzi i nawołuje do ataków. Takie treści są wyraźnie zabronione w regulaminie Telegrama. Wymagam natychmiastowego usunięcia kanału i zablokowania administratorów.",
+        # TR
+        "Bu kanal grafik şiddet, insanlara yönelik vahşet görüntüleri ve saldırı çağrıları yayımlıyor. Bu içerik Telegram kurallarına açıkça aykırı. Kanalın derhal kaldırılmasını ve yöneticilerin engellenmesini talep ediyorum.",
+        # AR
+        "ينشر هذا القناة مشاهد عنف مروعة ومقاطع لاعتداءات على أشخاص ويحرض على الهجمات. هذا المحتوى محظور صراحةً في قواعد تيليجرام. أطالب بإزالة القناة فوراً وحظر المشرفين.",
+    ],
+    "porn": [
+        # RU
+        "Канал распространяет порнографический контент без какой-либо маркировки 18+, материал доступен любому, включая несовершеннолетних. Прямое нарушение правил Telegram. Требую немедленной блокировки канала.",
+        # EN
+        "This channel distributes explicit adult content with no age restriction or 18+ labelling, fully accessible to minors. Direct violation of Telegram's content policy. Immediate channel ban is required.",
+        # DE
+        "Dieser Kanal verbreitet explizite pornografische Inhalte ohne Altersbeschränkung oder 18+-Kennzeichnung, vollständig für Minderjährige zugänglich. Klarer Verstoß gegen die Telegram-Inhaltsrichtlinien. Sofortige Sperrung erforderlich.",
+        # ES
+        "Este canal difunde contenido pornográfico sin ninguna restricción de edad ni etiquetado 18+, totalmente accesible para menores. Violación directa de las políticas de contenido de Telegram. Exijo su bloqueo inmediato.",
+        # FR
+        "Ce canal diffuse des contenus pornographiques sans aucune restriction d'âge ni marquage 18+, entièrement accessibles aux mineurs. Violation directe de la politique de contenu de Telegram. Je demande un blocage immédiat.",
+        # IT
+        "Questo canale diffonde contenuti pornografici senza alcun limite di età né etichettatura 18+, totalmente accessibili ai minorenni. Violazione diretta delle policy sui contenuti di Telegram. Richiedo la chiusura immediata.",
+        # PT
+        "Este canal distribui conteúdo pornográfico sem qualquer restrição de idade ou marcação 18+, totalmente acessível a menores. Violação direta das políticas de conteúdo do Telegram. Exijo o bloqueio imediato.",
+        # PL
+        "Ten kanał rozpowszechnia treści pornograficzne bez jakiejkolwiek weryfikacji wieku czy oznaczenia 18+, w pełni dostępne nieletnim. Bezpośrednie naruszenie zasad Telegrama. Wymagam natychmiastowej blokady.",
+        # TR
+        "Bu kanal, yaş doğrulaması veya 18+ etiketi olmadan açık yetişkin içeriği yayımlıyor; reşit olmayanlar tamamen erişebiliyor. Telegram içerik politikalarının doğrudan ihlali. Derhal kapatılmasını talep ediyorum.",
+        # AR
+        "ينشر هذا القناة محتوى إباحياً صريحاً دون أي تصنيف عمري أو وسوم 18+، وهو متاح بالكامل للقاصرين. انتهاك صريح لسياسات المحتوى في تيليجرام. أطالب بحظر القناة فوراً.",
+    ],
+    "child": [
+        # RU
+        "Обнаружен канал с материалами сексуальной эксплуатации детей. Это тяжелейшее преступление, материалы доступны в открытом доступе. Требую НЕМЕДЛЕННОГО удаления канала, блокировки участников и передачи данных в правоохранительные органы.",
+        # EN
+        "DISCOVERED: a channel distributing child sexual abuse material. This is among the gravest crimes, with content available in open access. Demand: IMMEDIATE removal, member bans, and referral of all data to law enforcement.",
+        # DE
+        "ENTDECKT: Ein Kanal verbreitet Material sexueller Ausbeutung von Kindern. Dies zählt zu den schwersten Straftaten, die Inhalte sind frei zugänglich. Ich fordere die SOFORTIGE Löschung, Sperrung der Mitglieder und Meldung an die Strafverfolgungsbehörden.",
+        # ES
+        "DESCUBIERTO: un canal que distribuye material de explotación sexual infantil. Es uno de los delitos más graves, con contenido de acceso abierto. Exijo la eliminación INMEDIATA, el bloqueo de los miembros y el traslado de los datos a las autoridades.",
+        # FR
+        "DÉCOUVERTE : un canal distribuant du matériel d'exploitation sexuelle d'enfants. C'est l'un des crimes les plus graves, avec un contenu en accès libre. Je demande une suppression IMMÉDIATE, le bannissement des membres et la transmission des données aux autorités.",
+        # IT
+        "SCOPERTO: un canale che diffonde materiale di sfruttamento sessuale di minori. È uno dei crimini più gravi, con contenuti ad accesso libero. Richiedo la rimozione IMMEDIATA, il bann dei membri e la segnalazione alle forze dell'ordine.",
+        # PT
+        "DESCOBERTO: um canal que distribui material de exploração sexual de menores. É um dos crimes mais graves, com conteúdo em acesso aberto. Exijo a remoção IMEDIATA, o banimento dos membros e a transferência dos dados à polícia.",
+        # PL
+        "WYKRYTO: kanał rozpowszechniający materiały wykorzystania seksualnego dzieci. To jedno z najcięższych przestępstw, treści są ogólnodostępne. Wymagam NATYCHMIASTOWEGO usunięcia, zablokowania członków i przekazania danych organom ścigania.",
+        # TR
+        "BULUNDU: çocuk cinsel istismarı materyali dağıtan bir kanal bulundu. Bu, en ağır suçlardan biridir ve içerik herkese açıktır. DERHAL kaldırılmasını, üyelerin engellenmesini ve verilerin kolluk kuvvetlerine bildirilmesini talep ediyorum.",
+        # AR
+        "تم الاكتشاف: قناة توزع مواد الاستغلال الجنسي للأطفال. هذه واحدة من أخطر الجرائم والمحتوى متاح للجميع. أطالب بالإزالة الفورية وحظر الأعضاء وإحالة البيانات إلى جهات إنفاذ القانون.",
+    ],
+    "copyright": [
+        # RU
+        "Этот канал нелегально распространяет защищённые авторским правом произведения: фильмы, софт, музыку без лицензий. Ущерб правообладателям исчисляется миллионами. Требую немедленного удаления канала по DMCA.",
+        # EN
+        "This channel illegally distributes copyrighted works: films, software, music without licenses. Damages to rights holders run into millions. DMCA takedown and immediate channel removal is required.",
+        # DE
+        "Dieser Kanal verbreitet rechtswidrig urheberrechtlich geschützte Werke: Filme, Software, Musik ohne Lizenzen. Der Schaden für die Rechteinhaber geht in die Millionen. DMCA-Takedown und sofortige Löschung erforderlich.",
+        # ES
+        "Este canal distribuye ilegalmente obras protegidas por derechos de autor: películas, software, música sin licencias. El daño a los titulares de derechos ronda los millones. Exijo el retiro DMCA y su eliminación inmediata.",
+        # FR
+        "Ce canal distribue illégalement des œuvres protégées par le droit d'auteur : films, logiciels, musique sous licence. Le préjudice pour les ayants droit se chiffre en millions. Je demande un retrait DMCA et une suppression immédiate.",
+        # IT
+        "Questo canale distribuisce illegalmente opere protette da copyright: film, software, musica senza licenza. Il danno per i titolari dei diritti si misura in milioni. Richiedo la rimozione DMCA e la chiusura immediata del canale.",
+        # PT
+        "Este canal distribui ilegalmente obras protegidas por direitos autorais: filmes, softwares, músicas sem licença. O dano aos titulares gira em torno de milhões. Exijo a remoção DMCA e a eliminação imediata do canal.",
+        # PL
+        "Ten kanał nielegalnie rozpowszechnia utwory chronione prawem autorskim: filmy, oprogramowanie, muzykę bez licencji. Szkoda dla posiadaczy praw sięga milionów. Wymagam zgłoszenia DMCA i natychmiastowego usunięcia.",
+        # TR
+        "Bu kanal telif hakkıyla korunan eserleri yasadışı olarak dağıtıyor: lisanssız filmler, yazılımlar, müzikler. Hak sahiplerine verilen zarar milyonları buluyor. DMCA kaldırması ve kanalın derhal silinmesini talep ediyorum.",
+        # AR
+        "يقوم هذا القناة بتوزيع أعمال محمية بحقوق النشر بشكل غير قانوني: أفلام وبرامج وموسيقى بدون تراخيص. الضرر على أصحاب الحقوق يقدر بالملايين. أطالب بإزالة القناة فوراً وفق DMCA.",
+    ],
+    "drugs": [
+        # RU
+        "Канал ведёт открытую торговлю наркотическими веществами: публикует прайс-листы, «зкладки», координирует доставку. Это уголовное преступление. Требую немедленной блокировки канала и передачи логов в полицию.",
+        # EN
+        "This channel openly trades narcotics: price lists, dead-drop coordinates, delivery logistics. This is a criminal offense. Immediate channel ban and log handover to law enforcement is required.",
+        # DE
+        "Dieser Kanal betreibt offenen Drogenhandel: Preislisten, Depot-Koordinaten, Lieferlogistik. Dies ist eine Straftat. Ich fordere die sofortige Sperrung des Kanals und die Übergabe der Protokolle an die Behörden.",
+        # ES
+        "Este canal comercia abiertamente con narcóticos: listas de precios, coordenadas de entregas ocultas, logística de distribución. Es un delito penal. Exijo bloqueo inmediato del canal y entrega de registros a la policía.",
+        # FR
+        "Ce canal trafique ouvertement des stupéfiants : listes de prix, coordonnées de dépôts, logistique de livraison. C'est une infraction pénale. Je demande un bannissement immédiat et la transmission des journaux à la police.",
+        # IT
+        "Questo canale traffica apertamente stupefacenti: listini prezzi, coordinate dei nascondigli, logistica di consegna. Si tratta di un reato penale. Richiedo la chiusura immediata del canale e la consegna dei log alla polizia.",
+        # PT
+        "Este canal comercializa abertamente entorpecentes: listas de preços, coordenadas de esconderijos, logística de entrega. Isso é crime. Exijo bloqueio imediato do canal e entrega dos registros à polícia.",
+        # PL
+        "Ten kanał otwarcie handluje narkotykami: cenniki, współrzędne schowków, logistyka dostaw. To przestępstwo kryminalne. Wymagam natychmiastowej blokady kanału i przekazania logów policji.",
+        # TR
+        "Bu kanal uyuşturucu ticaretini açıkça yapıyor: fiyat listeleri, saklama koordinatları, teslimat lojistiği. Bu bir suçtur. Kanalın derhal kapatılmasını ve kayıtların polise verilmesini talep ediyorum.",
+        # AR
+        "يقوم هذا القناة بتجارة المخدرات بشكل علني: قوائم أسعار، إحداثيات مخابئ، لوجستيات توصيل. هذه جريمة جنائية. أطالب بإغلاق القناة فوراً وتسليم السجلات للشرطة.",
+    ],
+    "personal": [
+        # RU
+        "В этом канале публикуют персональные данные людей: адреса, телефоны, паспортные данные, фото, сканы документов. Это грубое нарушение приватности и прямая угроза жизни. Требую немедленного удаления канала.",
+        # EN
+        "This channel publishes people's personal data: addresses, phone numbers, passport scans, photos. Gross privacy violation and direct threat to lives. Immediate removal of the channel is required.",
+        # DE
+        "Dieser Kanal veröffentlicht personenbezogene Daten: Adressen, Telefonnummern, Passdaten, Fotos. Grober Verstoß gegen die Privatsphäre und direkte Gefahr für Leben. Sofortige Entfernung des Kanals erforderlich.",
+        # ES
+        "Este canal publica datos personales de personas: direcciones, teléfonos, escaneos de pasaportes, fotos. Grave violación de la privacidad y amenaza directa a la vida. Exijo la eliminación inmediata del canal.",
+        # FR
+        "Ce canal publie des données personnelles : adresses, numéros de téléphone, copies de passeports, photos. Violation grave de la vie privée et menace directe sur des vies. Je demande une suppression immédiate du canal.",
+        # IT
+        "Questo canale pubblica dati personali: indirizzi, numeri di telefono, scansioni di passaporti, foto. Grave violazione della privacy e minaccia diretta alla vita delle persone. Richiedo la rimozione immediata del canale.",
+        # PT
+        "Este canal publica dados pessoais de pessoas: endereços, telefones, cópias de passaportes, fotos. Grave violação de privacidade e ameaça direta à vida. Exijo a eliminação imediata do canal.",
+        # PL
+        "Ten kanał publikuje dane osobowe ludzi: adresy, numery telefonów, skany paszportów, zdjęcia. Brutalne naruszenie prywatności i bezpośrednie zagrożenie życia. Wymagam natychmiastowego usunięcia kanału.",
+        # TR
+        "Bu kanal insanların kişisel verilerini yayımlıyor: adresler, telefon numaraları, pasaport taramaları, fotoğraflar. Ağır bir mahremiyet ihlali ve canlara doğrudan tehdit. Kanalın derhal kaldırılmasını talep ediyorum.",
+        # AR
+        "ينشر هذا القناة بيانات شخصية للأشخاص: عناوين، أرقام هواتف، نسخ جوازات، صور. انتهاك جسيم للخصوصية وتهديد مباشر لحياة الناس. أطالب بإزالة القناة فوراً.",
+    ],
+    "fake": [
+        # RU
+        "Аккаунт выдаёт себя за реального человека, использует чужие фото и данные, проводит «фиктивные» опросы и сборы. Вводит пользователей в заблуждение. Требую маркировки и немедленной блокировки как fake-аккаунта.",
+        # EN
+        "This account impersonates a real person, uses stolen photos and identity data, runs fake polls and fundraisers. Misleads users on a mass scale. Demand: mark as fake and permanently ban immediately.",
+        # DE
+        "Dieses Konto gibt sich als echte Person aus, nutzt gestohlene Fotos und Identitätsdaten, führt gefälschte Umfragen und Spendenaktionen durch. Massenhafte Täuschung. Ich fordere die Kennzeichnung als Fake und die sofortige dauerhafte Sperrung.",
+        # ES
+        "Esta cuenta se hace pasar por una persona real, usa fotos y datos de identidad robados y realiza encuestas y recaudaciones falsas. Engaña a los usuarios a gran escala. Exijo marcarla como falsa y bloquearla de forma permanente.",
+        # FR
+        "Ce compte se fait passer pour une personne réelle, utilise des photos et données d'identité volées, mène des sondages et collectes frauduleux. Il abuse des utilisateurs à grande échelle. Je demande son marquage comme faux et un bannissement permanent immédiat.",
+        # IT
+        "Questo account si finge una persona reale, usa foto e dati di identità rubati, organizza sondaggi e raccolte fondi false. Inganna gli utenti su larga scala. Richiedo la marcatura come falso e il bann permanente immediato.",
+        # PT
+        "Esta conta finge ser uma pessoa real, usa fotos e dados de identidade roubados, realiza pesquisas e arrecadações falsas. Engana os usuários em grande escala. Exijo marcá-la como falsa e banir permanentemente.",
+        # PL
+        "To konto podszywa się pod prawdziwą osobę, używa skradzionych zdjęć i danych tożsamości, prowadzi fałszywe ankiety i zbiórki. Masowo wprowadza użytkowników w błąd. Wymagam oznaczenia jako fałszywe i natychmiastowej trwałej blokady.",
+        # TR
+        "Bu hesap gerçek bir kişi gibi davranıyor, çalınmış fotoğraflar ve kimlik verileri kullanıyor, sahte anketler ve bağış kampanyaları düzenliyor. Kullanıcıları ölçekli olarak kandırıyor. Sahte olarak işaretlenmesini ve derhal kalıcı engellenmesini talep ediyorum.",
+        # AR
+        "ينتحل هذا الحساب صفة شخص حقيقي، ويستخدم صوراً وبيانات هوية مسروقة، ويجري استطلاعات وجمع تبرعات وهمية. يخدع المستخدمين على نطاق واسع. أطالب بوسمه كحساب مزيف وإغلاقه بشكل دائم فوراً.",
+    ],
+    "other": [
+        # RU
+        "Этот ресурс систематически нарушает правила Telegram и законодательство: распространяет вредоносный контент, манипулирует аудиторией, наносит ущерб пользователям. Требую немедленной блокировки ресурса.",
+        # EN
+        "This resource systematically violates Telegram's Terms of Service and applicable law: distributes harmful content, manipulates audiences, damages users. Immediate termination is required.",
+        # DE
+        "Diese Ressource verstößt systematisch gegen die Telegram-AGB und geltendes Recht: verbreitet schädliche Inhalte, manipuliert das Publikum, schädigt Nutzer. Sofortige Beendigung erforderlich.",
+        # ES
+        "Este recurso viola sistemáticamente los Términos de Servicio de Telegram y la ley aplicable: distribuye contenido dañino, manipula a la audiencia, perjudica a los usuarios. Exijo su cese inmediato.",
+        # FR
+        "Cette ressource viole systématiquement les Conditions d'utilisation de Telegram et la loi applicable : diffusion de contenus nuisibles, manipulation du public, préjudice aux utilisateurs. Je demande une résiliation immédiate.",
+        # IT
+        "Questa risorsa viola sistematicamente i Termini di Servizio di Telegram e la legge applicabile: diffonde contenuti dannosi, manipola il pubblico, danneggia gli utenti. Richiedo la cessazione immediata.",
+        # PT
+        "Este recurso viola sistematicamente os Termos de Serviço do Telegram e a legislação aplicável: distribui conteúdo nocivo, manipula o público, prejudica os usuários. Exijo o encerramento imediato.",
+        # PL
+        "Ten zasób systematycznie narusza Regulamin Telegrama i obowiązujące prawo: rozpowszechnia szkodliwe treści, manipuluje odbiorcami, szkodzi użytkownikom. Wymagam natychmiastowego zakończenia jego działalności.",
+        # TR
+        "Bu kaynak, Telegram Kullanım Şartları'nı ve ilgili yasaları sistematik olarak ihlal ediyor: zararlı içerik dağıtıyor, kitleyi manipüle ediyor, kullanıcılara zarar veriyor. Derhal kapatılmasını talep ediyorum.",
+        # AR
+        "ينتهك هذا المورد شروط استخدام تيليجرام والقوانين المعمول بها بشكل منهجي: يوزع محتوى ضاراً ويتلاعب بالجمهور ويلحق الضرر بالمستخدمين. أطالب بإيقافه فوراً.",
+    ],
+}
+
+
+def pick_comment(reason_key: str) -> str:
+    """Strong auto-template for the category; falls back to 'other' pool."""
+    pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
+    return random.choice(pool)
+
+
 LINK_RE = re.compile(
     r"(?:https?://)?(?:t\.me|telegram\.me)/(?:c/)?(\w+)(?:/(\d+))?", re.I
 )
@@ -1245,7 +1477,7 @@ def summary_text(data: dict) -> str:
     r = REASONS[data["reason"]]
     t = data["target"]
     m = METHODS[data["method"]]
-    c = data.get("comment", "") or "<i>\u043d\u0435\u0442</i>"
+    c = data.get("comment", "") or "<i>🤖 авто: сильный шаблон</i>"
     lines = [
         bq(f"<b>{NAME}</b>  \u2014  \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435"),
         "",
@@ -2030,14 +2262,13 @@ async def got_target(msg: Message, state: FSMContext):
         await msg.answer("\u274c \u041d\u0435\u0432\u0435\u0440\u043d\u0430\u044f \u0446\u0435\u043b\u044c. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0441\u043d\u043e\u0432\u0430.")
         return
     await state.update_data(target=target)
+    # auto-jump to confirm — comment is auto-decided via templates downstream
+    data = await state.get_data()
+    data["comment"] = ""   # will be substituted by template at send time
+    await state.update_data(comment="")
     await msg.answer(
-        bq(f"<b>{NAME}</b>")
-        + f"\n\n\U0001f3af <code>{target['raw']}</code>\n\n"
-        + "\U0001f4ac <b>\u041d\u0430\u043f\u0438\u0448\u0438\u0442\u0435 \u0442\u0435\u043a\u0441\u0442 \u0436\u0430\u043b\u043e\u0431\u044b</b> \u0438\u043b\u0438 \u043f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u0435:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_skip(),
-    )
-    await state.set_state(Report.comment)
+        summary_text(data), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
+    await state.set_state(Report.confirm)
 
 
 @router.callback_query(Report.reason, F.data.startswith("reason:"))
@@ -2127,6 +2358,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     r = REASONS[data["reason"]]
     m = METHODS[data["method"]]
     c = data.get("comment", "")
+    # user skipped the text — inject a strong category template at send time
+    if not c:
+        c = pick_comment(data["reason"])
     ts = datetime.now().strftime("%H:%M:%S")
 
     await cb.answer("\u23f3 \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430...")
