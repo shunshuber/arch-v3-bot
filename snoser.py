@@ -287,21 +287,28 @@ def load_sessions() -> list[Path]:
 
 # ── reporter ────────────────────────────────────────────
 FAKE_NAMES = ["alina", "velvet", "dusya", "nastya", "kirill", "vova",
-              "sonya", "oleg", "tima", "lisa", "maks", "nika"]
+              "sonya", "oleg", "tima", "lisa", "maks", "nika",
+              "ulya", "dasha", "veronika", "vitalya", "kostya", "mika",
+              "alisa", "vovan", "roman", "kirill2", "anton", "stepa"]
 
 
 def _fake_session_rows(n: int = None) -> list[dict]:
     if n is None:
-        n = random.randint(4, 7)
+        n = random.randint(10, 16)  # was 4-7 — user asked pool of 10+
     proxies = load_proxies()
     rows = []
+    seen = set()
     for _ in range(n):
         nm = random.choice(FAKE_NAMES) + str(random.randint(11, 99))
+        while nm in seen:
+            nm = random.choice(FAKE_NAMES) + str(random.randint(11, 99))
+        seen.add(nm)
         rows.append({
             "name": nm,
             "proxy": random.choice(proxies)[1] if proxies else "direct",
             "status": "\u2705",
-            "phone": "+7" + random.choice(["495", "900", "903"]) + str(random.randint(1000000, 9999999)),
+            "phone": "+7" + random.choice(["495", "900", "903", "921", "926", "951", "962", "963", "965",
+                                           "967", "977", "999"]) + str(random.randint(1000000, 9999999)),
             "tg_name": random.choice(FAKE_NAMES).capitalize(),
             "tg_id": str(random.randint(700000000, 8999999999)),
             "username": "@" + nm,
