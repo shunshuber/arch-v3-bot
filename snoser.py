@@ -549,7 +549,7 @@ async def proxy_refresh_loop():
             await write_proxy_file(working)
             log.info("proxy refresh done: %s live", len(working))
             if working:
-                commit_file_to_repo("proxies.txt", "refresh proxy pool")
+                commit_file_to_repo("proxies.txt", "refresh proxy pool", cooldown=3600)
         except Exception as e:
             log.warning("proxy refresh failed: %s", e)
         await asyncio.sleep(PROXY_REFRESH_INTERVAL)
@@ -948,23 +948,30 @@ async def web_send_one(session, i, subject, message_text, px: tuple | None,
                        target_text: str = "", reason_label: str = "",
                        comment: str = "", reason_key: str = "") -> tuple[bool, str]:
     """One raw POST complaint. Returns (ok, err).
-    Text is unique per-call: Groq generates fresh, falls back to template spin."""
-    text = ""
-    try:
-        from groq_gen import generate_complaint, fallback_complaint
-    except ImportError:
-        generate_complaint = None
-        fallback_complaint = None
-    if generate_complaint:
-        text = await generate_complaint(
-            reason_label=reason_label or reason_key or "Policy Violation",
-            target_hint=target_text,
-            extra=comment)
+
+    Text priority: explicit comment (strong/category template passed by the
+    caller) → Groq generation → generic fallback spin. The target is always
+    embedded into the message body so the support desk can act on it."""
+    text = comment.strip() if comment and comment.strip() else ""
     if not text:
-        if fallback_complaint:
+        try:
+            from groq_gen import generate_complaint
+            text = await generate_complaint(
+                reason_label=reason_label or reason_key or "Policy Violation",
+                target_hint=target_text,
+                extra=message_text or "")
+        except ImportError:
+            generate_complaint = None
+    if not text:
+        try:
+            from groq_gen import fallback_complaint
             text = fallback_complaint(reason_label or "Policy Violation", target_text)
-        else:
+        except ImportError:
             text = message_text or "Complaint regarding a Telegram policy violation."
+    if target_text:
+        text = (text.rstrip() + "\n\n—\n"
+                + f"Violating account/channel: {target_text}\n"
+                + f"Category reported: {reason_label or reason_key or 'n/a'}")
     try:
         from email_pool import pick_valid_email
         valid_email = pick_valid_email()
@@ -2821,9 +2828,17 @@ def persist_logs_binding(chat_id: str) -> None:
     commit_file_to_repo("logs_chat.json", f"bind logs channel {chat_id}")
 
 
-def commit_file_to_repo(rel_path: str, msg: str) -> None:
+_last_commit_times: dict[str, float] = {}
+
+
+def commit_file_to_repo(rel_path: str, msg: str, cooldown: float = 0) -> None:
     """Commit a working-copy file back to the repo so runner restarts keep
-    it (bot-refresh.yml grants permissions: contents: write)."""
+    it (bot-refresh.yml grants permissions: contents: write).
+    cooldown=<seconds> throttles repeated commits (proxy pool races)."""
+    now = time.time()
+    if cooldown and now - _last_commit_times.get(rel_path, 0) < cooldown:
+        return
+    _last_commit_times[rel_path] = now
     def _push():
         base = Path(__file__).parent
         try:
@@ -3312,7 +3327,7 @@ async def main():
         if working:
             await write_proxy_file(working)
             log.info("startup proxy farm: %s live", len(working))
-            commit_file_to_repo("proxies.txt", "refresh proxy pool")
+            commit_file_to_repo("proxies.txt", "refresh proxy pool", cooldown=3600)
         else:
             log.warning("startup proxy farm: 0 working — keep old pool")
     except Exception as e:
