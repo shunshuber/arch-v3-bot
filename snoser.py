@@ -1,5 +1,6 @@
 import asyncio
 import contextvars
+import hashlib
 import html as html_mod
 import io
 import json
@@ -542,6 +543,44 @@ def _session_lock(session_path: Path) -> asyncio.Lock:
     return _SESSION_LOCKS.setdefault(session_path.stem, asyncio.Lock())
 
 
+# ── single-IP pinning ────────────────────────────────────
+# Telegram flags accounts whose auth is used from two IPs at once and can
+# kill the session; every client for a session therefore goes through ONE
+# sticky proxy, pinned across runs (session_proxy.json is committed back).
+SESSION_PIN_FILE = Path(__file__).parent / "session_proxy.json"
+
+
+def _load_pins() -> dict[str, str]:
+    try:
+        return json.loads(SESSION_PIN_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def pin_for_session(name: str, proxies: list[tuple]) -> tuple | None:
+    """Sticky session→proxy binding: same IP on every connect of this
+    session, in every method, in every run. First pin is deterministic
+    (sha1 of the session name) so fresh checkouts agree without state;
+    a re-pin (old proxy left the pool) persists to the repo."""
+    if not proxies:
+        return None
+    pins = _load_pins()
+    by_url = {proxy_to_url(px): px for px in proxies}
+    url = pins.get(name)
+    if url in by_url:
+        return by_url[url]
+    idx = int(hashlib.sha1(name.encode()).hexdigest(), 16) % len(proxies)
+    px = proxies[idx]
+    pins[name] = proxy_to_url(px)
+    try:
+        SESSION_PIN_FILE.write_text(
+            json.dumps(pins, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    commit_file_to_repo("session_proxy.json", f"pin {name}", cooldown=120)
+    return px
+
+
 # ── background proxy farm ────────────────────────────────
 PROXY_REFRESH_INTERVAL = 15 * 60   # re-harvest every 15 minutes
 
@@ -707,8 +746,8 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         Per-session lock removes 'database is locked' when two methods hit
         the same session concurrently."""
         name = sess.stem
-        # unique proxy per (session, run) — shuffle offset each launch
-        proxy = proxies[(idx + random.randint(0, 9999)) % len(proxies)] if proxies else None
+        # sticky single-IP pin — same proxy for this session on every run
+        proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
         rows = []
         async with _session_lock(sess):
@@ -1192,32 +1231,33 @@ async def snos_parse_victim(username: str) -> dict:
     proxies = load_proxies()
     session_path = random.choice(sessions)
     api_id, api_hash = _rand_api()
-    px = random.choice(proxies) if proxies else None
     name = session_path.stem
+    px = pin_for_session(name, proxies)
     try:
-        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
-                                proxy=px, system_version=SNOS_SYSTEM_VERSION)
-        await asyncio.wait_for(client.connect(), timeout=10)
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            return {"ok": False, "error": f"сессия {name} мертва"}
+        async with _session_lock(session_path):
+            client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
+                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
+            await asyncio.wait_for(client.connect(), timeout=10)
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return {"ok": False, "error": f"сессия {name} мертва"}
 
-        uname = username.lstrip("@")
-        try:
-            entity = await client.get_entity(uname)
-        except Exception as e:
-            await client.disconnect()
-            return {"ok": False, "error": f"не найден: {type(e).__name__}"}
+            uname = username.lstrip("@")
+            try:
+                entity = await client.get_entity(uname)
+            except Exception as e:
+                await client.disconnect()
+                return {"ok": False, "error": f"не найден: {type(e).__name__}"}
 
-        info = {
-            "ok": True,
-            "id": entity.id,
-            "username": uname,
-            "has_photo": entity.photo is not None,
-            "about": getattr(entity, "about", "") or "",
-        }
-        await client.disconnect()
-        return info
+            info = {
+                "ok": True,
+                "id": entity.id,
+                "username": uname,
+                "has_photo": entity.photo is not None,
+                "about": getattr(entity, "about", "") or "",
+            }
+            await client.disconnect()
+            return info
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
@@ -1285,14 +1325,14 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
     rows = []
     await asyncio.sleep(offset)
     name = session_path.stem
-    alive, why = await _session_alive(session_path)
+    alive, why = await _session_alive(session_path, pin_for_session(name, proxies))
     if not alive:
         rows.append({"name": name, "proxy": "direct", "status": f"сессия мертва ({why})",
                      "ok": False, "attempt": 0})
         return rows
     for attempt in range(attempts):
-        # unique proxy per attempt — idx offset rotates IPs across sessions too
-        px = proxies[(attempt + idx * attempts) % len(proxies)] if proxies else None
+        # sticky single-IP pin — one session never shoots from two IPs
+        px = pin_for_session(name, proxies)
         r = await snos_sendcode_one(session_path, phone, px)
         r["attempt"] = attempt + 1
         rows.append(r)
@@ -1506,21 +1546,22 @@ async def snos_monitor_loop(username: str, victim_id: int,
         await asyncio.sleep(MONITOR_INTERVAL)
         session_path = random.choice(sessions)
         api_id, api_hash = _rand_api()
-        px = random.choice(proxies) if proxies else None
+        px = pin_for_session(session_path.stem, proxies)
         try:
-            client = TelegramClient(str(session_path.with_suffix("")),
-                                    api_id, api_hash,
-                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
-            await asyncio.wait_for(client.connect(), timeout=8)
-            authorized = await client.is_user_authorized()
-            if not authorized:
+            async with _session_lock(session_path):
+                client = TelegramClient(str(session_path.with_suffix("")),
+                                        api_id, api_hash,
+                                        proxy=px, system_version=SNOS_SYSTEM_VERSION)
+                await asyncio.wait_for(client.connect(), timeout=8)
+                authorized = await client.is_user_authorized()
+                if not authorized:
+                    await client.disconnect()
+                    continue
+                entity = await client.get_entity(username)
+                state_photo = entity.photo is not None
+                state_about = getattr(entity, "about", "") or ""
+                deleted = bool(getattr(entity, "deleted", False))
                 await client.disconnect()
-                continue
-            entity = await client.get_entity(username)
-            state_photo = entity.photo is not None
-            state_about = getattr(entity, "about", "") or ""
-            deleted = bool(getattr(entity, "deleted", False))
-            await client.disconnect()
 
             changes = []
             if deleted:
@@ -2164,7 +2205,7 @@ async def addsess_file_recv(msg: Message, state: FSMContext):
     try:
         px = load_proxies()
         client = _TC(str(dest.with_suffix("")), probe_api_id, probe_api_hash,
-                     proxy=random.choice(px) if px else None)
+                     proxy=pin_for_session(dest.stem, px))
         await asyncio.wait_for(client.connect(), timeout=15)
         ok = bool(await client.is_user_authorized())
         why = "" if ok else "not authorized"

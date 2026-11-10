@@ -1,0 +1,33 @@
+name: session-kick
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  kick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Kick foreign sessions (ResetAuthorizations)
+        run: python session_kick.py
+      - name: Commit sticky pins
+        run: |
+          if [ -f session_proxy.json ]; then
+            git add session_proxy.json
+            git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "session pins" || true
+            git push || true
+          fi
