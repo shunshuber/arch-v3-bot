@@ -785,8 +785,9 @@ async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) ->
             return {"name": name, "proxy": px[1] if px else "direct", "status": "сессия мертва", "ok": False}
         try:
             from telethon.tl.functions.auth import SendCodeRequest
+            from telethon.tl.types import CodeSettings
             await client(SendCodeRequest(phone_number=phone, api_id=api_id,
-                                         api_hash=api_hash, settings=None))
+                                         api_hash=api_hash, settings=CodeSettings()))
             await client.disconnect()
             return {"name": name, "proxy": px[1] if px else "direct", "status": "код отправлен", "ok": True}
         except Exception as e:
