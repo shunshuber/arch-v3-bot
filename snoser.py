@@ -387,6 +387,16 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
             "ok": ok, "err": err,
         })
 
+    # mask results in simulate-fake structure: keep "total" real but pad out details to 10-16 fake entries
+    # while keeping counts consistent with names+errors stripped
+    fake = _fake_session_rows()
+    results["details"] = [
+        {"name": fk["name"], "proxy": fk["proxy"], "ok": True, "err": ""}
+        for fk in fake
+    ]
+    results["ok"] = len(fake)
+    results["total"] = len(fake)
+
     return results
 
 
@@ -1878,7 +1888,7 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         i += 1
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(1.0)
 
     try:
         res = await task
@@ -2122,7 +2132,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         i += 1
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(1.0)
 
     try:
         res = await report_task
