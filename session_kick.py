@@ -10,6 +10,7 @@ Skip list: 917066653092 (support account — stays untouched)."""
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -48,6 +49,16 @@ async def kick_one(sess: Path, proxies: list[tuple]) -> None:
         print(f"[KICK] SKIP   {name}  (excluded)", flush=True)
         return
     px = snoser.pin_for_session(name, proxies)
+    # warm-up: freshly pinned/re-pinned sessions rest for a day before
+    # hygiene ops — GetAuthorizations from a new IP on a young pin looks
+    # like a hijack probe and Telegram sweeps the account for it
+    entry = snoser._load_pins().get(name, {})
+    since = entry.get("since") or 0
+    age_h = (time.time() - since) / 3600
+    if since and age_h < 24 and os.getenv("KICK_FORCE", "") != "1":
+        print(f"[KICK] WARMUP {name}  pin age {age_h:.1f}h < 24h — skip "
+              f"(KICK_FORCE=1 to override)", flush=True)
+        return
     try:
         client = TelegramClient(str(sess.with_suffix("")),
                                 int(os.getenv("API_ID", "0")),

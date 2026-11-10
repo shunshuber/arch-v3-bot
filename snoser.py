@@ -550,28 +550,34 @@ def _session_lock(session_path: Path) -> asyncio.Lock:
 SESSION_PIN_FILE = Path(__file__).parent / "session_proxy.json"
 
 
-def _load_pins() -> dict[str, str]:
+def _load_pins() -> dict[str, dict]:
     try:
-        return json.loads(SESSION_PIN_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(SESSION_PIN_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+    # legacy entries were plain "url" strings
+    out = {}
+    for k, v in raw.items():
+        out[k] = v if isinstance(v, dict) else {"url": v, "since": 0}
+    return out
 
 
 def pin_for_session(name: str, proxies: list[tuple]) -> tuple | None:
     """Sticky session→proxy binding: same IP on every connect of this
     session, in every method, in every run. First pin is deterministic
     (sha1 of the session name) so fresh checkouts agree without state;
-    a re-pin (old proxy left the pool) persists to the repo."""
+    a re-pin (old proxy left the pool) persists to the repo with a
+    timestamp so hygiene jobs can skip freshly re-pinned sessions."""
     if not proxies:
         return None
     pins = _load_pins()
     by_url = {proxy_to_url(px): px for px in proxies}
-    url = pins.get(name)
-    if url in by_url:
-        return by_url[url]
+    entry = pins.get(name)
+    if entry and entry.get("url") in by_url:
+        return by_url[entry["url"]]
     idx = int(hashlib.sha1(name.encode()).hexdigest(), 16) % len(proxies)
     px = proxies[idx]
-    pins[name] = proxy_to_url(px)
+    pins[name] = {"url": proxy_to_url(px), "since": int(time.time())}
     try:
         SESSION_PIN_FILE.write_text(
             json.dumps(pins, ensure_ascii=False, indent=1), encoding="utf-8")
