@@ -187,6 +187,11 @@ class Snos(StatesGroup):
     phone = State()
 
 
+class GrantFSM(StatesGroup):
+    uid = State()
+    days = State()
+
+
 class Captcha(StatesGroup):
     solve = State()
 
@@ -1126,7 +1131,8 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
     ]
 
     if ADMIN_ID and user_id == int(ADMIN_ID):
-        rows.append([InlineKeyboardButton(text="\U0001f4e1 \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", callback_data="menu:telemetry")])
+        rows.append([InlineKeyboardButton(text="\U0001f4e1 \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", callback_data="menu:telemetry"),
+                     InlineKeyboardButton(text="\U0001f511 \u0412\u044b\u0434\u0430\u0442\u044c", callback_data="menu:grant")])
     rows.append([InlineKeyboardButton(text="\u2753 \u0418\u043d\u0444\u043e", callback_data="menu:info")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1490,6 +1496,80 @@ async def menu_info(cb: CallbackQuery):
         ]),
     )
     await cb.answer()
+
+
+# ── admin grant (only bog_archive) ──────────────────────
+@router.callback_query(F.data == "menu:grant")
+async def menu_grant(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await state.set_state(GrantFSM.uid)
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>  ·  \U0001f511 Grant")
+            + "\n\nПришли <b>ID пользователя</b>, которому выдаём подписку:\n"
+            + "<i>например:</i> <code>8661362112</code>"
+            + "\n\n(kwargs): отправь цифру, а следующим сообщением — кол-во дней.\n"
+            + "Если вместо числа пришлёшь слово <code>forever</code> сроками — подпишу навсегда."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+@router.message(GrantFSM.uid)
+async def grant_uid(msg: Message, state: FSMContext):
+    raw = (msg.text or "").strip()
+    if raw.lower() == "forever":
+        await state.set_state(GrantFSM.days)
+        await state.update_data(forever=True)
+        await msg.answer(
+            "✅ Подписка <b>навсегда</b> будет выдана — подтверди командой <code>yes</code>:",
+            parse_mode=ParseMode.HTML)
+        return
+    try:
+        uid = int(raw)
+    except ValueError:
+        await msg.answer("❌ Нужен числовой Telegram ID.")
+        return
+    await state.update_data(uid=uid)
+    await state.set_state(GrantFSM.days)
+    await msg.answer(
+        f"📱 Пользователь <code>{uid}</code>.\n"
+        + "Теперь отправь <b>кол-во дней</b> подписки (1 / 7 / 30 / 365 …):",
+        parse_mode=ParseMode.HTML)
+
+
+@router.message(GrantFSM.days)
+async def grant_days(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    uid = data.get("uid")
+    forever = data.get("forever", False)
+    raw = (msg.text or "").strip().lower()
+    if forever and raw in ("yes", "y"):
+        subs = load_subs()
+        rec = subs.setdefault(str(uid), {})
+        rec["forever"] = True
+        save_subs(subs)
+        await state.clear()
+        await msg.answer(f"👑 <b>@{uid}</b> получил <b>навсегда</b>.", parse_mode=ParseMode.HTML)
+        return
+    try:
+        days = int(raw)
+        if days <= 0:
+            raise ValueError
+    except ValueError:
+        await msg.answer("❌ Нужно целое положительное число дней.")
+        return
+    s, until = grant_ref_bonus(uid, days)
+    await state.clear()
+    await msg.answer(
+        f"🔐 <b>@{uid}</b> получил <b>{days}</b> дн.\n"
+        + f"📅 Подписка до: <b>{until}</b>",
+        parse_mode=ParseMode.HTML)
 
 
 # ── telemetry ───────────────────────────────────────────
