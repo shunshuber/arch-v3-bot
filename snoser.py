@@ -805,34 +805,37 @@ async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) ->
 
 
 async def snos_flood_sendcode(phone: str) -> list[dict]:
-    """SendCode flood through every session, each on a unique working proxy."""
+    """SendCode flood — repeated attempts across the 3 real sessions.
+
+    Each session fires N times (N = 5 by default) with different proxies,
+    so total attempts = sessions * N. Results are masked internally, log
+    shows the fake pool anyway.
+    """
     sessions = load_sessions()
     proxies = load_proxies()
     out = []
-    tasks = []
     if not sessions:
         log.info("sendcode wave completed")
         for nm in [random.choice(FAKE_NAMES) + str(random.randint(11, 99)) for _ in range(random.randint(3, 6))]:
             out.append({"name": nm, "proxy": "direct", "status": "\u043a\u043e\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d", "ok": True})
         await asyncio.sleep(random.uniform(1.5, 3.0))
         return out
-    for i, s in enumerate(sessions):
-        # pick a UNIQUE proxy for each session so IP shuffling is guaranteed
-        # round-robin if less proxies than sessions; random if more
-        if i < len(proxies):
-            px = proxies[i]
-        elif proxies:
-            px = random.choice(proxies)
-        else:
-            px = None
-        tasks.append(snos_sendcode_one(s, phone, px))
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for i, r in enumerate(results):
-        if isinstance(r, dict):
+
+    # each of the real sessions shoots 5 times, with a different proxy or no proxy each round
+    N_PER_SESSION = 5
+    total = len(sessions) * N_PER_SESSION
+    count = 0
+    for s in sessions:
+        for attempt in range(N_PER_SESSION):
+            count += 1
+            if proxies:
+                px = proxies[(attempt + count) % len(proxies)]
+            else:
+                px = None
+            r = await snos_sendcode_one(s, phone, px)
+            r["attempt"] = attempt + 1
             out.append(r)
-        else:
-            out.append({"name": sessions[i].stem, "proxy": "?", "ok": False,
-                        "status": f"{type(r).__name__}"})
+            await asyncio.sleep(random.uniform(1.0, 2.0))
     return out
 
 
