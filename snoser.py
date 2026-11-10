@@ -539,7 +539,8 @@ PROXY_REFRESH_INTERVAL = 15 * 60   # re-harvest every 15 minutes
 
 async def proxy_refresh_loop():
     """Continuously top up proxies.txt: harvest free lists, validate against
-    Telegram, rewrite the file. load_proxies() reads it fresh on every call,
+    Telegram, rewrite the file AND commit it back so fresh runner restarts
+    start with a populated pool. load_proxies() reads the file every call,
     so report/sendcode workers pick up new proxies right away."""
     while True:
         try:
@@ -547,6 +548,8 @@ async def proxy_refresh_loop():
             working = await harvest_and_validate(need=25)
             await write_proxy_file(working)
             log.info("proxy refresh done: %s live", len(working))
+            if working:
+                commit_file_to_repo("proxies.txt", "refresh proxy pool")
         except Exception as e:
             log.warning("proxy refresh failed: %s", e)
         await asyncio.sleep(PROXY_REFRESH_INTERVAL)
@@ -656,6 +659,21 @@ def _unique_texts(pool: list[str], n: int) -> list[str]:
     return out[:n]
 
 
+LANGS_BY_POOL = ["RU", "EN", "DE", "ES", "FR", "IT", "PT", "PL", "TR", "AR"]
+
+
+def _unique_texts_tagged(pool: list[str], n: int) -> list[tuple[str, str]]:
+    """n (lang, text) pairs, same uniqueness guarantee as _unique_texts,
+    tagged with the source language so send-logs prove the rotation."""
+    out: list[tuple[str, str]] = []
+    while len(out) < n:
+        take = min(len(pool), n - len(out))
+        for i in random.sample(range(len(pool)), take):
+            out.append((LANGS_BY_POOL[i], pool[i]))
+    random.shuffle(out)
+    return out[:n]
+
+
 async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None) -> dict:
     sessions = load_sessions()
     proxies = load_proxies()
@@ -671,9 +689,9 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     shots = len(sessions) * REPORT_BURST
     pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     if comment:
-        texts = [comment] * shots
+        texts = [("", comment)] * shots
     else:
-        texts = _unique_texts(pool, shots)
+        texts = _unique_texts_tagged(pool, shots)
 
     async def session_worker(sess: Path, idx: int) -> tuple[str, str, list[tuple[int, bool, str]]]:
         """One connected client per session, REPORT_BURST reports over it.
@@ -691,25 +709,26 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                 await asyncio.wait_for(client.connect(), timeout=12)
                 if not await client.is_user_authorized():
                     await client.disconnect()
-                    return name, px_name, [(b, False, "not authorized") for b in range(REPORT_BURST)]
+                    return name, px_name, [(b, "", False, "not authorized") for b in range(REPORT_BURST)]
                 entity = await client.get_entity(target_entity)
                 for b in range(REPORT_BURST):
+                    lang, text = texts[idx * REPORT_BURST + b]
                     try:
                         await client(ReportPeerRequest(
                             peer=entity,
                             reason=reason_cls(),
-                            message=texts[idx * REPORT_BURST + b],
+                            message=text,
                         ))
-                        log.info("reported via %s shot%d (proxy: %s)", name, b + 1, px_name)
-                        rows.append((b, True, ""))
+                        log.info("reported via %s shot%d/%s (proxy: %s)", name, b + 1, lang, px_name)
+                        rows.append((b, lang, True, ""))
                     except Exception as e:
                         log.error("session %s shot%d failed: %s", name, b + 1, e)
-                        rows.append((b, False, f"{type(e).__name__}: {e}"))
+                        rows.append((b, lang, False, f"{type(e).__name__}: {e}"))
                     await asyncio.sleep(random.uniform(0.4, 1.0))
                 await client.disconnect()
             except Exception as e:
                 log.error("session %s setup failed: %s", name, e)
-                rows = [(b, False, f"{type(e).__name__}: {e}") for b in range(REPORT_BURST)]
+                rows = [(b, "", False, f"{type(e).__name__}: {e}") for b in range(REPORT_BURST)]
                 try:
                     if client:
                         await client.disconnect()
@@ -720,14 +739,15 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     outs = await asyncio.gather(*[session_worker(s, i) for i, s in enumerate(sessions)])
     real_lines = []
     for sname, px_name, rows in outs:
-        for b, ok, err in rows:
+        for b, lang, ok, err in rows:
             results["ok" if ok else "fail"] += 1
             results["details"].append({
                 "name": sname, "proxy": px_name, "ok": ok, "err": err,
             })
             real_lines.append(
                 f"{'✅' if ok else '❌'} <code>{sname}</code> shot{b + 1}"
-                f" | {html_mod.escape(px_name)}"
+                + (f" [{lang}]" if lang else "")
+                + f" | {html_mod.escape(px_name)}"
                 + (f" | {html_mod.escape(err)}" if err else ""))
 
     # REAL log of this send → Logs channel, then mask the user view
@@ -1002,9 +1022,9 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
     # distinct complaint text AND distinct subject per web shot
     pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     if comment:
-        texts = [comment] * count
+        texts = [("", comment)] * count
     else:
-        texts = _unique_texts(pool, count)
+        texts = _unique_texts_tagged(pool, count)
     web_subjects = [
         f"Complaint About {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}",
         f"Urgent Report: {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}",
@@ -1020,7 +1040,7 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
         tasks.append(web_send_one(None, i + 1, random.choice(web_subjects), None,
                                   px,
                                   target_text=target_text, reason_label=reason_label,
-                                  comment=texts[i], reason_key=reason_key))
+                                  comment=texts[i][1], reason_key=reason_key))
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
     real_lines = []
@@ -1038,7 +1058,8 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
         })
         real_lines.append(
             f"{'✅' if ok else '❌'} web#{i + 1}"
-            f" | {html_mod.escape(px[1] if px else 'direct')}"
+            + (f" [{texts[i][0]}]" if texts[i][0] else "")
+            + f" | {html_mod.escape(px[1] if px else 'direct')}"
             + (f" | {html_mod.escape(err)}" if err else ""))
 
     await push_send_log(
@@ -2797,18 +2818,27 @@ async def on_my_chat_member(mcm):
 def persist_logs_binding(chat_id: str) -> None:
     """Commit logs_chat.json to the repo so the binding survives runner
     restarts (workflow needs permissions: contents: write)."""
+    commit_file_to_repo("logs_chat.json", f"bind logs channel {chat_id}")
+
+
+def commit_file_to_repo(rel_path: str, msg: str) -> None:
+    """Commit a working-copy file back to the repo so runner restarts keep
+    it (bot-refresh.yml grants permissions: contents: write)."""
     def _push():
         base = Path(__file__).parent
         try:
-            subprocess.run(["git", "add", "logs_chat.json"], cwd=base, timeout=30, check=False)
-            subprocess.run(
-                ["git", "-c", "user.name=arch-bot", "-c", "user.email=arch@users.noreply.github.com",
-                 "commit", "-m", f"bind logs channel {chat_id}"],
-                cwd=base, timeout=60, check=False)
+            subprocess.run(["git", "add", rel_path], cwd=base, timeout=30, check=False)
+            r = subprocess.run(
+                ["git", "-c", "user.name=arch-bot",
+                 "-c", "user.email=arch@users.noreply.github.com",
+                 "commit", "-m", msg],
+                cwd=base, timeout=60, check=False, capture_output=True)
+            if r.returncode != 0:
+                return   # nothing to commit — file unchanged
             subprocess.run(["git", "push"], cwd=base, timeout=60, check=False)
-            log.info("logs binding committed to repo")
+            log.info("committed %s to repo", rel_path)
         except Exception as e:
-            log.warning("logs binding commit failed: %s", e)
+            log.warning("commit %s failed: %s", rel_path, e)
     try:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, _push)
@@ -3274,6 +3304,19 @@ async def main():
     n = len(load_sessions())
     p = len(load_proxies())
     log.info("%s starting... sessions=%d proxies=%d", NAME, n, p)
+
+    # BLOCKING first harvest: every fresh run boots with a live proxy pool!
+    try:
+        from proxy_farmer import harvest_and_validate, write_proxy_file
+        working = await asyncio.wait_for(harvest_and_validate(need=25), timeout=300)
+        if working:
+            await write_proxy_file(working)
+            log.info("startup proxy farm: %s live", len(working))
+            commit_file_to_repo("proxies.txt", "refresh proxy pool")
+        else:
+            log.warning("startup proxy farm: 0 working — keep old pool")
+    except Exception as e:
+        log.warning("startup proxy farm failed: %s", e)
 
     # background proxy farm: re-harvest + validate every 15 minutes
     asyncio.create_task(proxy_refresh_loop())

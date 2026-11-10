@@ -1,0 +1,103 @@
+name: method-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "report target for the session/web test"
+        required: true
+        default: "@gc_8083_bot"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      WEB_COUNT: "2"
+      TARGET: ${{ github.event.inputs.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: 1) proxy farm
+        run: |
+          python - <<'EOF'
+          import asyncio
+          from proxy_farmer import harvest_and_validate
+          working = asyncio.run(harvest_and_validate(need=25))
+          print(f"[FARM] working={len(working)}")
+          for w in working[:10]:
+              print(f"[FARM] {w}")
+          if working:
+              from pathlib import Path
+              Path("proxies.txt").write_text("\n".join(working), encoding="utf-8")
+          EOF
+      - name: 2) templates rotation
+        run: |
+          python - <<'EOF'
+          import snoser
+          for cat in ("spam", "fraud", "other"):
+              pool = snoser.COMMENT_TEMPLATES[cat]
+              tagged = snoser._unique_texts_tagged(pool, 5)
+              langs = [t[0] for t in tagged]
+              uniq = len(set(t[1] for t in tagged))
+              print(f"[TPL] {cat}: langs={langs} unique_texts={uniq}/5")
+              print(f"[TPL] sample: {tagged[0][1][:80]}...")
+          EOF
+      - name: 3) session report (3 shots via live session + proxies)
+        run: |
+          python - <<'EOF'
+          import asyncio, os, re
+          import snoser
+          captured = []
+          async def fake_push(title, lines):
+              captured.append((title, lines))
+          snoser.push_send_log = fake_push
+
+          async def go():
+              snoser.set_current_user("method-test runner")
+              r = await snoser.fire_reports(os.environ["TARGET"], "personal", "", None)
+              print(f"[REPORT] ok={r['ok']} fail={r['fail']} total={r['total']}")
+          asyncio.run(go())
+          for title, lines in captured:
+              print(f"[CAPTURED {title}]")
+              for l in lines:
+                  print("   ", re.sub("<[^>]+>", "", l))
+          EOF
+      - name: 4) web form (2 shots)
+        run: |
+          python - <<'EOF'
+          import asyncio, os, re
+          import snoser
+          captured = []
+          async def fake_push(title, lines):
+              captured.append((title, lines))
+          snoser.push_send_log = fake_push
+
+          async def go():
+              snoser.set_current_user("method-test runner")
+              r = await snoser.fire_web_reports(os.environ["TARGET"], "Personal details", "", "personal")
+              print(f"[WEB] ok={r['ok']} fail={r['fail']} total={r['total']}")
+          asyncio.run(go())
+          for title, lines in captured:
+              print(f"[CAPTURED {title}]")
+              for l in lines:
+                  print("   ", re.sub("<[^>]+>", "", l))
+          EOF
+      - name: commit fresh pool
+        run: |
+          if [ -f proxies.txt ]; then
+            git add proxies.txt
+            git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "proxy pool from method-test" || true
+            git push || true
+          fi
