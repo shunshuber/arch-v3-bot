@@ -1,0 +1,121 @@
+name: logs-bind
+
+on:
+  workflow_dispatch:
+    inputs:
+      invite:
+        description: "invite link (https://t.me/+hash) of the Logs channel"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      INVITE_LINK: ${{ github.event.inputs.invite }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install telethon python-socks
+      - name: Resolve + bind
+        run: |
+          python - <<'EOF'
+          import asyncio, json, os, random
+          from pathlib import Path
+          from telethon import TelegramClient
+          from telethon.utils import get_peer_id
+          from telethon.tl.functions.messages import ImportChatInviteRequest, GetDialogsRequest
+
+          invite = os.environ["INVITE_LINK"].strip()
+          api_id = int(os.environ["API_ID"])
+          api_hash = os.environ["API_HASH"]
+          sdir = Path("sessions")
+          sessions = sorted(sdir.glob("*.session"))
+          hash_part = invite.rsplit("/+", 1)[-1].strip()
+          bot_chat_id = None
+
+          try:
+              for sp in sessions:
+                  try:
+                      client = TelegramClient(str(sp.with_suffix("")), api_id, api_hash)
+                      await asyncio.wait_for(client.connect(), timeout=20)
+                      if not await client.is_user_authorized():
+                          print(f"[BIND] {sp.stem}: dead session, skip", flush=True)
+                          try:
+                              await client.disconnect()
+                          except Exception:
+                              pass
+                          continue
+                      # already a member → resolve entity straight away
+                      try:
+                          entity = await client.get_entity(invite)
+                          ch = await client.get_entity(entity.id)
+                          marked = get_peer_id(ch)
+                          print(f"[BIND] resolved-by-entity {sp.stem}: "
+                                f"title={ch.title!r} "
+                                f"bot_chat_id={marked}", flush=True)
+                          bot_chat_id = str(marked)
+                      except Exception as ee:
+                          print(f"[BIND] {sp.stem}: direct resolve failed "
+                                f"({type(ee).__name__}), trying import…", flush=True)
+                          try:
+                              upd = await client(ImportChatInviteRequest(hash_part))
+                              chats = getattr(upd, "chats", []) or []
+                              if chats:
+                                  marked = get_peer_id(chats[0])
+                                  title = getattr(chats[0], "title", "?")
+                                  print(f"[BIND] joined {sp.stem}: title={title!r} "
+                                        f"bot_chat_id={marked}", flush=True)
+                                  bot_chat_id = str(marked)
+                              else:
+                                  print(f"[BIND] {sp.stem}: import ok but empty chats", flush=True)
+                          except Exception as ie:
+                              print(f"[BIND] {sp.stem}: import failed "
+                                    f"{type(ie).__name__}: {ie}", flush=True)
+                              # hint: list dialogs with channel ids to grep manually
+                              try:
+                                  dlg = await client(GetDialogsRequest(
+                                      offset_date=None, offset_id=0, offset_peer=None,
+                                      limit=50))
+                                  for c in dlg.chats:
+                                      t = getattr(c, "title", None)
+                                      if t and isinstance(t, str) and "log" in t.lower():
+                                          print(f"[HINT] dialog: {t!r} "
+                                                f"bot_chat_id={get_peer_id(c)}", flush=True)
+                              except Exception:
+                                  pass
+                      try:
+                          await client.disconnect()
+                      except Exception:
+                          pass
+                      if bot_chat_id:
+                          break
+                  except Exception as e:
+                      print(f"[BIND] {sp.stem}: {type(e).__name__}: {e}", flush=True)
+          except Exception as e:
+              print(f"[BIND] fatal: {type(e).__name__}: {e}", flush=True)
+
+          if bot_chat_id:
+              Path("logs_chat.json").write_text(json.dumps({"chat_id": bot_chat_id}), encoding="utf-8")
+              print(f"[BIND] OK — appending logs_chat.json chat_id={bot_chat_id}", flush=True)
+          else:
+              print("[BIND] FAIL — no chat resolved", flush=True)
+          EOF
+      - name: Commit binding
+        run: |
+          if [ -f logs_chat.json ]; then
+            git add logs_chat.json
+            git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "bind logs channel from session" || true
+            git push || true
+            echo "BIDDEN"
+          else
+            echo "no binding file"
+          fi

