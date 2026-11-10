@@ -1,4 +1,4 @@
-name: method-test
+﻿name: method-test
 
 on:
   workflow_dispatch:
@@ -88,6 +88,8 @@ jobs:
               snoser.set_current_user("method-test runner")
               r = await snoser.fire_web_reports(os.environ["TARGET"], "Personal details", "", "personal")
               print(f"[WEB] ok={r['ok']} fail={r['fail']} total={r['total']}")
+              for d in r['details']:
+                  print(f"[WEB] detail: {d['name']} {d['proxy']} ok={d['ok']} err={d['err']}")
           asyncio.run(go())
           for title, lines in captured:
               print(f"[CAPTURED {title}]")
@@ -101,3 +103,4 @@ jobs:
             git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "proxy pool from method-test" || true
             git push || true
           fi
+
