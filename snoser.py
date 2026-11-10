@@ -9,6 +9,7 @@ import random
 import re
 import subprocess
 import time
+import uuid
 from contextlib import asynccontextmanager
 import random
 from datetime import datetime
@@ -192,6 +193,14 @@ class Snos(StatesGroup):
 class GrantFSM(StatesGroup):
     uid = State()
     days = State()
+
+
+class AddSession(StatesGroup):
+    choose = State()
+    file = State()
+    phone = State()
+    code = State()
+    password = State()
 
 
 class Captcha(StatesGroup):
@@ -1653,6 +1662,7 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
     if ADMIN_ID and user_id == int(ADMIN_ID):
         rows.append([InlineKeyboardButton(text="\U0001f4e1 \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", callback_data="menu:telemetry"),
                      InlineKeyboardButton(text="\U0001f511 \u0412\u044b\u0434\u0430\u0442\u044c", callback_data="menu:grant")])
+        rows.append([InlineKeyboardButton(text="➕ Сессия", callback_data="menu:addsess")])
     rows.append([InlineKeyboardButton(text="\u2753 \u0418\u043d\u0444\u043e", callback_data="menu:info")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2092,7 +2102,246 @@ async def grant_days(msg: Message, state: FSMContext):
         parse_mode=ParseMode.HTML)
 
 
-# ── telemetry ───────────────────────────────────────────
+# ── admin: add session (file | code, with 2FA) ───────────
+@router.callback_query(F.data == "menu:addsess")
+async def menu_addsess(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    alive_line = ""
+    sessions = load_sessions()
+    if sessions:
+        alive_line = f"\n🧷 Сейчас в пуле: <b>{len(sessions)}</b>"
+    await state.set_state(AddSession.choose)
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>  ·  ➕ Добавить сессию")
+            + alive_line
+            + "\n\nВыбери формат:"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📄 Файлом", callback_data="addsess:file"),
+             InlineKeyboardButton(text="📱 Кодом (вход по SMS)", callback_data="addsess:code")],
+            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+@router.callback_query(AddSession.choose, F.data == "addsess:file")
+async def addsess_file(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AddSession.file)
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>  ·  📄 Сессия файлом")
+            + "\n\nПришли <b>.session документ</b>.\n"
+            + "Файл сохранится в пул и закоммитится в репу (переживёт рестарты)."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+@router.message(AddSession.file, F.document)
+async def addsess_file_recv(msg: Message, state: FSMContext):
+    doc = msg.document
+    name = doc.file_name or "pasted.session"
+    if not name.endswith(".session") or not (0 < doc.file_size < 5 * 1024 * 1024):
+        await msg.answer("❌ Нужен документ <code>.session</code> до 5 МБ.",
+                         parse_mode=ParseMode.HTML)
+        return
+    tg_file = await msg.bot.get_file(doc.file_id)
+    base = Path(__file__).parent / "sessions"
+    base.mkdir(exist_ok=True)
+    dest = base / name
+    await msg.bot.download_file(tg_file, dest)
+    # quick liveness probe so the admin knows what landed
+    from telethon import TelegramClient as _TC
+    probe_api_id, probe_api_hash = API_ID, API_HASH
+    ok, why = False, ""
+    try:
+        px = load_proxies()
+        client = _TC(str(dest.with_suffix("")), probe_api_id, probe_api_hash,
+                     proxy=random.choice(px) if px else None)
+        await asyncio.wait_for(client.connect(), timeout=15)
+        ok = bool(await client.is_user_authorized())
+        why = "" if ok else "not authorized"
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    except Exception as e:
+        why = type(e).__name__
+    commit_file_to_repo(f"sessions/{name}", f"add session {name} (file)")
+    await state.clear()
+    await msg.answer(
+        bq(f"<b>{NAME}</b>  ·  ✅ Сессия добавлена")
+        + f"\n\n🧷 <code>{html_mod.escape(name)}</code> → пул"
+        + f"\n🔌 проб: {'✅ живая' if ok else '❌ ' + why}"
+        + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий",
+        parse_mode=ParseMode.HTML)
+
+
+@router.message(AddSession.file)
+async def addsess_file_wrongtype(msg: Message, state: FSMContext):
+    await msg.answer("❌ Это не документ .session. Жду файл.", parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(AddSession.choose, F.data == "addsess:code")
+async def addsess_code(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AddSession.phone)
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>  ·  📱 Вход кодом")
+            + "\n\n1/3 — Пришли <b>номер телефона</b> в формате <code>+7...</code>.\n"
+            + "Я отправлю код на номер и попрошу его ввести.\n"
+            + "Если на аккаунте стоит 2FA — запрошу пароль."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+@router.message(AddSession.phone)
+async def addsess_phone(msg: Message, state: FSMContext):
+    phone = (msg.text or "").strip().replace(" ", "").replace("-", "")
+    from telethon import errors as _terr
+    if not re.fullmatch(r"\+?\d{8,15}", phone):
+        await msg.answer("❌ Формат номера: <code>+79991234567</code>",
+                         parse_mode=ParseMode.HTML)
+        return
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    px = load_proxies()
+    from telethon import TelegramClient as _TC2
+    client = _TC2(str(uuid.uuid4()), int(API_ID), API_HASH,
+                  proxy=random.choice(px) if px else None,
+                  system_version=SNOS_SYSTEM_VERSION)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15)
+        sent = await asyncio.wait_for(client.send_code_request(phone), timeout=20)
+    except _terr.FloodWaitError as e:
+        await state.clear()
+        await msg.answer(f"⏳ Флудаит: подожди <b>{e.seconds}s</b>.", parse_mode=ParseMode.HTML)
+        return
+    except Exception as e:
+        await state.clear()
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        await msg.answer(f"❌ Код не ушёл: <i>{type(e).__name__}</i>",
+                         parse_mode=ParseMode.HTML)
+        return
+    await state.update_data(client=client, phone=phone,
+                            hash=getattr(sent, "phone_code_hash", None))
+    await state.set_state(AddSession.code)
+    await msg.answer(
+        "📩 Код отправлен на <b>" + html_mod.escape(phone) + "</b>.\n"
+        + "2/3 — пришли <b>код из SMS/Telegram</b>:",
+        parse_mode=ParseMode.HTML)
+
+
+@router.message(AddSession.code)
+async def addsess_code_send(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    client = data.get("client")
+    phone = data.get("phone")
+    code = (msg.text or "").strip().replace(" ", "")
+    if not client or not phone:
+        await state.clear()
+        await msg.answer("⚠️ Сессия входа истекла. Начни заново.", parse_mode=ParseMode.HTML)
+        return
+    from telethon import errors as _terr2
+    try:
+        await asyncio.wait_for(
+            client.sign_in(phone=phone, code=code,
+                           phone_code_hash=data.get("hash")), timeout=20)
+    except _terr2.SessionPasswordNeededError:
+        await state.set_state(AddSession.password)
+        await msg.answer("🔐 На аккаунте стоит <b>2FA</b>.\n"
+                         + "3/3 — пришли <b>пароль 2FA</b>:", parse_mode=ParseMode.HTML)
+        return
+    except _terr2.PhoneCodeInvalidError:
+        await msg.answer("❌ Код неверный. Попробуй ещё раз.", parse_mode=ParseMode.HTML)
+        return
+    except _terr2.PhoneCodeExpiredError:
+        await state.clear()
+        await msg.answer("⌛ Код истёк. Начни заново (/start → ➕ Сессия).",
+                         parse_mode=ParseMode.HTML)
+        return
+    except asyncio.TimeoutError:
+        await state.clear()
+        await msg.answer("⏱ Таймаут входа. Начни заново.", parse_mode=ParseMode.HTML)
+        return
+    except Exception as e:
+        await state.clear()
+        await msg.answer(f"❌ Ошибка входа: <i>{type(e).__name__}</i>",
+                         parse_mode=ParseMode.HTML)
+        return
+    await _finish_session_save(msg, state, client)
+
+
+@router.message(AddSession.password)
+async def addsess_password(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    client = data.get("client")
+    phone = data.get("phone")
+    password = (msg.text or "").strip()
+    if not client:
+        await state.clear()
+        await msg.answer("⚠️ Сессия входа истекла. Начни заново.", parse_mode=ParseMode.HTML)
+        return
+    try:
+        await client.sign_in(password=password)
+    except Exception as e:
+        await msg.answer(f"❌ Пароль не принял: <i>{type(e).__name__}</i>.\n"
+                         + "Пришли пароль ещё раз или /start чтобы отбой.",
+                         parse_mode=ParseMode.HTML)
+        return
+    await _finish_session_save(msg, state, client)
+
+
+async def _finish_session_save(msg: Message, state: FSMContext, client) -> None:
+    data = await state.get_data()
+    phone = (data.get("phone") or "").lstrip("+")
+    me = await client.get_me()
+    uname = f"@{me.username}" if me.username else ""
+    name = f"{phone}.session"
+    if me.username:
+        name = f"{me.username}.session"
+    base = Path(__file__).parent / "sessions"
+    base.mkdir(exist_ok=True)
+    await client.session.save()
+    path = base / name
+    await client.disconnect()
+    # telethon saved its sqlite session into the temp name — move it in place
+    tmp = getattr(client.session, "filename", None)
+    try:
+        import shutil
+        if tmp and str(path.resolve()) != str(tmp):
+            shutil.move(str(tmp), str(path))
+    except Exception:
+        pass
+    commit_file_to_repo(f"sessions/{name}", f"add session {name} (login)")
+    await state.clear()
+    set_current_user(f"{msg.from_user.full_name} ( id {msg.from_user.id} )")
+    await push_send_log(
+        "Добавлена сессия",
+        [f"📱 <code>{html_mod.escape(str(me.phone or phone))}</code>"
+         + f" {uname}" + (f" (2FA ✅)" if data.get("password_ok") else ""),
+         f"🧷<code>{html_mod.escape(name)}</code> → пул | всего: {len(load_sessions())}"])
+    await msg.answer(
+        bq(f"<b>{NAME}</b>  ·  ✅ Сессия создана")
+        + f"\n\n📱 <code>{html_mod.escape(str(me.phone or phone))}</code>  {uname}"
+        + f"\n🧷 <code>{html_mod.escape(name)}</code> → пул"
+        + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий",
+        parse_mode=ParseMode.HTML)
+
 @router.callback_query(F.data == "menu:telemetry")
 async def menu_telemetry(cb: CallbackQuery):
     if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
@@ -2134,6 +2383,13 @@ async def menu_telemetry(cb: CallbackQuery):
 
 @router.callback_query(F.data == "back:home")
 async def back_home(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    cl = data.get("client")   # pending Telethon login (add-session flow)
+    if cl:
+        try:
+            await cl.disconnect()
+        except Exception:
+            pass
     await state.clear()
     caption = hero_caption(cb.from_user.id)
     await cb.message.edit_caption(
