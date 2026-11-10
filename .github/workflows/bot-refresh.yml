@@ -9,6 +9,9 @@ concurrency:
   group: arch-v3
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
