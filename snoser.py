@@ -854,14 +854,11 @@ WEB_UAS = [
 
 
 def proxy_to_socks(px: tuple) -> dict:
+    # python_socks.ProxyType IS the type ProxyConnector expects — no legacy
+    # alias class needed (that was the old SocksProxyType NameError)
     import python_socks as _ps
-    ptype_cls = {
-        _ps.ProxyType.SOCKS5: SocksProxyType.SOCKS5,
-        _ps.ProxyType.SOCKS4: SocksProxyType.SOCKS4,
-        _ps.ProxyType.HTTP:   SocksProxyType.HTTP,
-    }
     ptype, host, port, rdns, user, pwd = px
-    return {"proxy_type": ptype_cls[ptype], "host": host, "port": port,
+    return {"proxy_type": ptype, "host": host, "port": port,
             "rdns": rdns, "username": user, "password": pwd}
 
 
