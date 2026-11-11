@@ -29,7 +29,7 @@ from aiogram.types import (
     BufferedInputFile,
     InputMediaPhoto,
 )
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError
 from aiogram.fsm.context import FSMContext
@@ -2149,6 +2149,32 @@ async def grant_days(msg: Message, state: FSMContext):
         parse_mode=ParseMode.HTML)
 
 
+@router.message(Command("unsub"))
+async def cmd_unsub(msg: Message):
+    """Remove a user's subscription: /unsub <uid>"""
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await msg.answer("Формат: <code>/unsub 8864452428</code>",
+                         parse_mode=ParseMode.HTML)
+        return
+    uid = str(int(parts[1]))
+    subs = load_subs()
+    if uid in subs and not uid.startswith("__"):
+        gone = subs.pop(uid)
+        save_subs(subs)
+        state = "навсегда" if gone.get("forever") else f"до {gone.get('until')}"
+        await msg.answer(
+            f"❎ Подписка <b>{uid}</b> снята (была: {state}).\n"
+            + "Доступ закроется при следующем действии в меню.",
+            parse_mode=ParseMode.HTML)
+    else:
+        await msg.answer(
+            f"⚠️ У <b>{uid}</b> активной записи нет — подписка не числится.",
+            parse_mode=ParseMode.HTML)
+
+
 # ── admin: add session (file | code, with 2FA) ───────────
 @router.callback_query(F.data == "menu:addsess")
 async def menu_addsess(cb: CallbackQuery, state: FSMContext):
@@ -3057,6 +3083,8 @@ def load_subs() -> dict:
 def save_subs(subs: dict) -> None:
     SUBS_FILE.write_text(json.dumps(subs, ensure_ascii=False, indent=1),
                          encoding="utf-8")
+    # grants/payments must survive runner restarts — commit the state back
+    commit_file_to_repo("subs.json", "subs update", cooldown=60)
 
 
 def user_is_admin(user_id: int) -> bool:
