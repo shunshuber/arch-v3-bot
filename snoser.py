@@ -3466,12 +3466,16 @@ async def channel_gate(cb: CallbackQuery, state: FSMContext) -> bool:
 
 
 async def count_valid_refs_async(user_id: int) -> int:
+    """Real channel memberships + manual /refgive credit (never muted)."""
     users = load_users()
     rec = users.get(str(user_id), {})
     refs = rec.get("refs", [])
+    credit = rec.get("ref_credit", 0) or 0
+    if not refs:
+        return credit
     cid = get_channel_id()
-    if not cid or not refs:
-        return 0
+    if not cid:
+        return credit
     good = 0
     for rid in refs:
         try:
@@ -3480,8 +3484,7 @@ async def count_valid_refs_async(user_id: int) -> int:
                 good += 1
         except Exception:
             continue
-    # manual admin credit (/refgive) rides on top of real memberships
-    return good + (rec.get("ref_credit", 0) or 0)
+    return good + credit
 
 
 def sub_quality(subs: dict, user_id: int) -> tuple[str, str]:
