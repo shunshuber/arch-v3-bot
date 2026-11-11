@@ -183,7 +183,11 @@ async def bootstrap(files: dict[str, Path]) -> None:
     for kind, path in files.items():
         fid = (_INDEX.get(kind) or {}).get("file_id")
         if not fid:
-            log.info("store: %s not in index — keeping repo copy", kind)
+            log.info("store: %s not in index — seeding from repo copy", kind)
+            try:
+                push_async(kind, path.read_text(encoding="utf-8"))
+            except Exception as e:
+                log.warning("store seed %s failed: %s", kind, e)
             continue
         text = await _tg_read(kind, fid)
         if text is None:
