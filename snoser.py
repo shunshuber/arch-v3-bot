@@ -1790,6 +1790,7 @@ def summary_text(data: dict) -> str:
 # ── /start ──────────────────────────────────────────────
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext):
+    botRefCtx["bot"] = msg.bot   # referral context ready
     await state.clear()
     uid = msg.from_user.id
 
@@ -1871,6 +1872,7 @@ async def count_valid_refs_async_check():
 # ── main menu ───────────────────────────────────────────
 @router.callback_query(F.data == "menu:launch")
 async def menu_launch(cb: CallbackQuery, state: FSMContext):
+    botRefCtx["bot"] = cb.bot   # ref counting needs the bot anywhere
     if not await channel_gate(cb, state):
         return
     if not await sub_gate(cb, state):
@@ -2175,6 +2177,41 @@ async def cmd_unsub(msg: Message):
         await msg.answer(
             f"⚠️ У <b>{uid}</b> активной записи нет — подписка не числится.",
             parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("refgive"))
+async def cmd_refgive(msg: Message):
+    """Manually credit valid referrals: /refgive <user_id> [count]"""
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await msg.answer("Формат: /refgive 8864452428 [кол-во]",
+                         parse_mode=ParseMode.HTML)
+        return
+    uid = str(int(parts[1]))
+    n = 1
+    if len(parts) > 2 and parts[2].lstrip("-").isdigit():
+        n = max(1, int(parts[2]))
+    users = load_users()
+    rec = users.get(uid)
+    if rec is None:
+        await msg.answer(
+            "⚠️ В базе нет " + uid + " — пусть юзер пискнет боту хотя бы раз.",
+            parse_mode=ParseMode.HTML)
+        return
+    rec["ref_credit"] = (rec.get("ref_credit", 0) or 0) + n
+    users[uid] = rec
+    save_users(users)
+    try:
+        valid = await count_valid_refs_async(int(uid))
+        left = 5 - (valid % 5)
+        tail = "✅ зачтено всего: <b>" + str(valid) + "</b> / до дня: <b>" + str(left) + "</b>"
+    except Exception:
+        tail = "✅ зачтено — проверь в меню «Проверить заново»"
+    await msg.answer(
+        "🎁 <b>" + uid + "</b>: вручную +" + str(n) + " реф.\n" + tail,
+        parse_mode=ParseMode.HTML)
 
 
 # ── admin: add session (file | code, with 2FA) ───────────
@@ -3239,6 +3276,8 @@ def load_users() -> dict:
 def save_users(users: dict) -> None:
     USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=1),
                           encoding="utf-8")
+    # bindings must survive runner restarts — commit the DB back
+    commit_file_to_repo("users.json", "users update", cooldown=120)
 
 
 def touch_user(user) -> dict:
@@ -3437,7 +3476,8 @@ async def count_valid_refs_async(user_id: int) -> int:
                 good += 1
         except Exception:
             continue
-    return good
+    # manual admin credit (/refgive) rides on top of real memberships
+    return good + (rec.get("ref_credit", 0) or 0)
 
 
 def sub_quality(subs: dict, user_id: int) -> tuple[str, str]:
