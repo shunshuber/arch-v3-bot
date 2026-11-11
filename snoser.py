@@ -3075,7 +3075,7 @@ SUB_PLANS = {
 # visible ONLY to this admin id until rolled out to everyone
 PAY_METHODS_ADMIN = 8661362112
 CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
-                   or "674547:AA3dPn33qQgbiMUjIX5wSUnYO56UIfOypvv")
+                   or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
 STARS_PRICES = {"d1": 50, "d7": 150, "d30": 400, "fore": 800}
@@ -3083,8 +3083,9 @@ STARS_PRICES = {"d1": 50, "d7": 150, "d30": 400, "fore": 800}
 
 async def cryptobot_api(method: str, params: dict | None = None) -> dict:
     """Raw Crypto Pay API call. createInvoice-style params -> POST JSON,
-    otherwise GET. Returns the `result` object; raises on api `ok:false`."""
-    headers = {"Authorization": CRYPTOBOT_TOKEN}
+    otherwise GET. Returns the `result` object; raises on api `ok:false`.
+    Auth header is `Crypto-Pay-API-Token` (Authorization is REJECTED)."""
+    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN}
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as s:
         if params:
