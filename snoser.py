@@ -3072,8 +3072,8 @@ SUB_PLANS = {
 }
 
 # ── beta payment methods (CryptoBot + Telegram Stars) ────
-# visible ONLY to this admin id until rolled out to everyone
-PAY_METHODS_ADMIN = 8661362112
+# PAY_METHODS_ADMIN = <uid> enables pilot mode; None opens everything
+PAY_METHODS_ADMIN: int | None = None
 CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
                    or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
@@ -3393,131 +3393,23 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
     if s in ("admin", "forever", "active"):
         return True
     caption = (
-        bq(f"<b>{NAME}</b>  \u2014  \u0422\u0430\u0440\u0438\u0444\u044b")
-        + "\n\n\u270b \u0414\u043e\u0441\u0442\u0443\u043f \u043f\u043e \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0435. \u0426\u0435\u043d\u044b \u0434\u0435\u0448\u043c\u0430\u043d\u0441\u043a\u0438\u0435:\n"
-    )
-    for pk, pl in SUB_PLANS.items():
-        caption += f"\u2022 <b>{pl['label']}</b> \u2014 <b>{pl['price']:g} USDT</b>\n"
-    caption += (
-        "\n\u041e\u043f\u043b\u0430\u0442\u0430 \u2014 xRocket (\u043a\u0440\u0438\u043f\u0442\u043e, USDT). "
-        "\u041f\u043e\u0441\u043b\u0435 \u043e\u043f\u043b\u0430\u0442\u044b \u0436\u043c\u0438 <b>\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c</b>."
-    )
-    rows = []
-    for pk, pl in SUB_PLANS.items():
-        rows.append([InlineKeyboardButton(
-            text=f"\U0001f4b0 {pl['label']} \u2014 {pl['price']:g} USDT",
-            callback_data=f"sub:buy:{pk}")])
-    rows.append([InlineKeyboardButton(text="\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c", callback_data="sub:check")])
-    rows.append([InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")])
-    await state.clear()
-    try:
-        await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
-                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    except Exception:
-        pass
-    await cb.answer()
-    return False
-
-
-async def xrocket_create_invoice(amount: float, payload: dict, description: str) -> dict:
-    headers = {
-        "Authorization": f"Bearer {XROCKET_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "priceAmount": f"{amount:.2f}",
-        "priceCurrency": XROCKET_CURRENCY,
-        "description": description[:1000],
-        "clientInvoiceId": f"archv3_{payload['plan']}_{payload['tgId']}_{int(time.time())}",
-        "data": payload,
-    }
-    async with aiohttp.ClientSession() as s:
-        async with s.post(f"{XROCKET_API}/invoices", json=body, headers=headers,
-                          timeout=aiohttp.ClientTimeout(total=20)) as r:
-            j = await r.json(content_type=None)
-            return j
-
-
-async def xrocket_get_invoice(invoice_id: str) -> dict:
-    headers = {
-        "Authorization": f"Bearer {XROCKET_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"{XROCKET_API}/invoice",
-                         params={"invoiceId": invoice_id},
-                         headers=headers,
-                         timeout=aiohttp.ClientTimeout(total=20)) as r:
-            j = await r.json(content_type=None)
-            return j
-
-
-# ── required channel gate ───────────────────────────────
-def get_channel_id() -> int:
-    raw = os.getenv("SUB_CHANNEL_ID", "").strip()
-    if raw:
-        try:
-            return int(raw)
-        except ValueError:
-            pass
-    subs = load_subs()
-    v = subs.get("__channel_id")
-    try:
-        return int(v or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def set_channel_id(cid: int) -> None:
-    subs = load_subs()
-    subs["__channel_id"] = cid
-    save_subs(subs)
-
-
-@router.my_chat_member()
-async def on_bot_chat_member(cm, ):
-    """Auto-save the private channel id once the bot is added there."""
-    chat = cm.chat
-    if getattr(chat, "type", "") == "channel":
-        if get_channel_id() != chat.id:
-            set_channel_id(chat.id)
-            log.info("sub channel saved: %s (%s)", chat.id, chat.title)
-        return
-
-
-async def channel_gate(cb: CallbackQuery, state: FSMContext) -> bool:
-    """Require membership in the private channel before any flow."""
-    if user_is_admin(cb.from_user.id):
-        return True
-    cid = get_channel_id()
-    if not cid:
-        await cb.answer(
-            "\U0001f512 \u041a\u0430\u043d\u0430\u043b \u043d\u0430 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0435, \u0437\u0430\u0433\u043b\u044f\u043d\u0438 \u043f\u043e\u0437\u0436\u0435",
-            show_alert=True)
-        return False
-    ok = False
-    try:
-        member = await cb.bot.get_chat_member(cid, cb.from_user.id)
-        ok = member.status in ("member", "administrator", "creator")
-    except Exception as e:
-        log.warning("channel check failed: %s", e)
-    if ok:
-        return True
-    caption = (
-        bq(f"<b>{NAME}</b>  \u00b7  \u0434\u043e\u0441\u0442\u0443\u043f")
-        + "\n\n\U0001f512 <b>\u0422\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u043f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u043e\u0432 \u043a\u0430\u043d\u0430\u043b\u0430</b>:"
-        + "\n\u0432\u0441\u0442\u0443\u043f\u0430\u0439 \u2014 \u0438 \u0436\u043c\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c"
+        bq(f"<b>{NAME}</b>  —  Оплата")
+        + f"\n\n✏ Состояние: <b>{s}</b>"
+        + (f" ({until})" if until != "—" else "")
+        + "\n\nДля запуска нужна подписка. Выбери способ оплаты:"
     )
     rows = [
-        [InlineKeyboardButton(text="\U0001f4dd \u0412\u0441\u0442\u0443\u043f\u0438\u0442\u044c \u0432 \u043a\u0430\u043d\u0430\u043b", url=SUB_CHANNEL_LINK)],
-        [InlineKeyboardButton(text="\u2705 \u042f \u043f\u043e\u0434\u043f\u0438\u0441\u0430\u043b\u0441\u044f", callback_data="menu:launch")],
+        [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="sub:pm:xtr")],
+        [InlineKeyboardButton(text="💵 CryptoBot (крипта)", callback_data="sub:pm:cbot")],
+        [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
+        [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
     ]
+    await state.clear()
     try:
         await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
                                       reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except Exception:
         pass
-    await state.clear()
     await cb.answer()
     return False
 
@@ -3540,42 +3432,27 @@ def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
 async def sub_shop(cb: CallbackQuery, state: FSMContext):
     subs = load_subs()
     s, until = sub_quality(subs, cb.from_user.id)
-    if cb.from_user.id == PAY_METHODS_ADMIN:
-        # beta: method chooser FIRST, prices after the choice
-        caption = (
-            bq(f"<b>{NAME}</b>  —  Оплата")
-            + f"\n\n✏ Состояние: <b>{s}</b>"
-            + (f" ({until})" if until != "—" else "")
-            + "\n\nВыбери способ оплаты:"
-        )
-        rows = [
-            [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="sub:pm:xtr")],
-            [InlineKeyboardButton(text="💵 CryptoBot (крипта)", callback_data="sub:pm:cbot")],
-            [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
-            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
-        ]
-    else:
-        caption = (
-            bq(f"<b>{NAME}</b>  —  Тарифы")
-            + f"\n\n✏ Состояние: <b>{s}</b>"
-            + (f" ({until})" if until != "—" else "")
-        )
-        for pk, pl in SUB_PLANS.items():
-            caption += f"\n• <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
-        rows = []
-        for pk, pl in SUB_PLANS.items():
-            rows.append([InlineKeyboardButton(
-                text=f"💰 {pl['label']} — {pl['price']:g} USDT",
-                callback_data=f"sub:buy:{pk}")])
-        rows.append([InlineKeyboardButton(text="◀ Назад", callback_data="back:home")])
+    caption = (
+        bq(f"<b>{NAME}</b>  —  Оплата")
+        + f"\n\n✏ Состояние: <b>{s}</b>"
+        + (f" ({until})" if until != "—" else "")
+        + "\n\nВыбери способ оплаты:"
+    )
+    rows = [
+        [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="sub:pm:xtr")],
+        [InlineKeyboardButton(text="💵 CryptoBot (крипта)", callback_data="sub:pm:cbot")],
+        [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
+        [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+    ]
     await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
 
 def _pilot_only(cb: CallbackQuery) -> bool:
-    """Beta pay methods are visible only to PAY_METHODS_ADMIN."""
-    return cb.from_user.id != PAY_METHODS_ADMIN
+    """PAY_METHODS_ADMIN=None → методы открыты всем; иначе пилот одного id."""
+    return (PAY_METHODS_ADMIN is not None
+            and cb.from_user.id != PAY_METHODS_ADMIN)
 
 
 @router.callback_query(F.data.startswith("sub:pm:"))
@@ -3704,7 +3581,7 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         return
 
-    # ── xrocket (old path, everyone) ──
+    # ── xrocket (USDT, everyone) ──
     if not XROCKET_TOKEN:
         await cb.answer("Оплата не настроена (XROCKET_TOKEN)", show_alert=True)
         return
@@ -3734,13 +3611,12 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         + f"\n🧾 <b>Invoice:</b> <code>{inv_id}</code>\n\n"
         + "Оплати в @xrocket по кнопке,\nзатем вернись и нажми <b>🔍 Проверить</b>."
     )
-    back_cb = "sub:pm:xr" if cb.from_user.id == PAY_METHODS_ADMIN else "sub:shop"
     await cb.message.edit_caption(
         caption=caption, parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
             [InlineKeyboardButton(text="🔍 Проверить", callback_data=f"sub:check:{inv_id}")],
-            [InlineKeyboardButton(text="◀ Назад", callback_data=back_cb)],
+            [InlineKeyboardButton(text="◀ Назад", callback_data="sub:pm:xr")],
         ]),
     )
     await cb.answer()
