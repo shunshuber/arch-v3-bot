@@ -28,6 +28,8 @@ from aiogram.types import (
     FSInputFile,
     BufferedInputFile,
     InputMediaPhoto,
+    LabeledPrice,
+    PreCheckoutQuery,
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
@@ -3069,6 +3071,34 @@ SUB_PLANS = {
     "fore": {"label": "\u041d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 12.0},
 }
 
+# ── beta payment methods (CryptoBot + Telegram Stars) ────
+# visible ONLY to this admin id until rolled out to everyone
+PAY_METHODS_ADMIN = 8661362112
+CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
+                   or "674547:AA3dPn33qQgbiMUjIX5wSUnYO56UIfOypvv")
+CRYPTOBOT_API = "https://pay.crypt.bot/api"
+# 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
+STARS_PRICES = {"d1": 50, "d7": 150, "d30": 400, "fore": 800}
+
+
+async def cryptobot_api(method: str, params: dict | None = None) -> dict:
+    """Raw Crypto Pay API call. createInvoice-style params -> POST JSON,
+    otherwise GET. Returns the `result` object; raises on api `ok:false`."""
+    headers = {"Authorization": CRYPTOBOT_TOKEN}
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        if params:
+            async with s.post(f"{CRYPTOBOT_API}/{method}", json=params,
+                              headers=headers, ssl=False) as r:
+                j = await r.json(content_type=None)
+        else:
+            async with s.get(f"{CRYPTOBOT_API}/{method}", params=params,
+                             headers=headers, ssl=False) as r:
+                j = await r.json(content_type=None)
+    if not j or not j.get("ok"):
+        raise RuntimeError(f"cryptobot {method}: {j}")
+    return j.get("result") or {}
+
 
 def load_subs() -> dict:
     # always re-read subs.json so GH Actions checkout picks up fresh changes per-job run
@@ -3505,15 +3535,177 @@ def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
 
 
 # ── subscriptions UI ────────────────────────────────────
+@router.callback_query(F.data == "sub:shop")
+async def sub_shop(cb: CallbackQuery, state: FSMContext):
+    subs = load_subs()
+    s, until = sub_quality(subs, cb.from_user.id)
+    if cb.from_user.id == PAY_METHODS_ADMIN:
+        # beta: method chooser FIRST, prices after the choice
+        caption = (
+            bq(f"<b>{NAME}</b>  —  Оплата")
+            + f"\n\n✏ Состояние: <b>{s}</b>"
+            + (f" ({until})" if until != "—" else "")
+            + "\n\nВыбери способ оплаты:"
+        )
+        rows = [
+            [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="sub:pm:xtr")],
+            [InlineKeyboardButton(text="💵 CryptoBot (крипта)", callback_data="sub:pm:cbot")],
+            [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
+            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        ]
+    else:
+        caption = (
+            bq(f"<b>{NAME}</b>  —  Тарифы")
+            + f"\n\n✏ Состояние: <b>{s}</b>"
+            + (f" ({until})" if until != "—" else "")
+        )
+        for pk, pl in SUB_PLANS.items():
+            caption += f"\n• <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
+        rows = []
+        for pk, pl in SUB_PLANS.items():
+            rows.append([InlineKeyboardButton(
+                text=f"💰 {pl['label']} — {pl['price']:g} USDT",
+                callback_data=f"sub:buy:{pk}")])
+        rows.append([InlineKeyboardButton(text="◀ Назад", callback_data="back:home")])
+    await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
+
+
+def _pilot_only(cb: CallbackQuery) -> bool:
+    """Beta pay methods are visible only to PAY_METHODS_ADMIN."""
+    return cb.from_user.id != PAY_METHODS_ADMIN
+
+
+@router.callback_query(F.data.startswith("sub:pm:"))
+async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
+    if _pilot_only(cb):
+        await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
+        return
+    m = cb.data.rsplit(":", 1)[1]
+    if m == "xtr":
+        caption = (
+            bq(f"<b>{NAME}</b>  —  ⭐ Telegram Stars")
+            + "\n\nНативная оплата звёздами, без внешних сервисов.\nТарифы:"
+        )
+        for pk, pl in SUB_PLANS.items():
+            caption += f"\n• <b>{pl['label']}</b> — <b>{STARS_PRICES[pk]} ⭐</b>"
+        rows = [[InlineKeyboardButton(
+                    text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
+                    callback_data=f"sub:buy:xtr:{pk}")]
+                for pk, pl in SUB_PLANS.items()]
+    elif m == "cbot":
+        caption = (
+            bq(f"<b>{NAME}</b>  —  💵 CryptoBot")
+            + "\n\nИнвойс в USDT через официальный @CryptoBot.\nТарифы:"
+        )
+        for pk, pl in SUB_PLANS.items():
+            caption += f"\n• <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
+        rows = [[InlineKeyboardButton(
+                    text=f"💰 {pl['label']} — {pl['price']:g} USDT",
+                    callback_data=f"sub:buy:cbot:{pk}")]
+                for pk, pl in SUB_PLANS.items()]
+    else:
+        caption = (
+            bq(f"<b>{NAME}</b>  —  🚀 xRocket")
+            + "\n\nИнвойс в USDT через @xrocket.\nТарифы:"
+        )
+        for pk, pl in SUB_PLANS.items():
+            caption += f"\n• <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
+        rows = [[InlineKeyboardButton(
+                    text=f"💰 {pl['label']} — {pl['price']:g} USDT",
+                    callback_data=f"sub:buy:xrocket:{pk}")]
+                for pk, pl in SUB_PLANS.items()]
+    rows.append([InlineKeyboardButton(text="◀ К способам", callback_data="sub:shop")])
+    await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
+
+
 @router.callback_query(F.data.startswith("sub:buy:"))
 async def sub_buy(cb: CallbackQuery, state: FSMContext):
-    if not XROCKET_TOKEN:
-        await cb.answer("\u041e\u043f\u043b\u0430\u0442\u0430 \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d\u0430 (XROCKET_TOKEN)", show_alert=True)
-        return
-    pk = cb.data.rsplit(":", 1)[1]
+    parts = cb.data.split(":")          # sub:buy:<method>:<plan> | sub:buy:<plan>
+    pk = parts[-1]
+    method = parts[2] if len(parts) == 4 else "xrocket"
     pl = SUB_PLANS.get(pk)
     if not pl:
-        await cb.answer("\u274c", show_alert=True)
+        await cb.answer("❌", show_alert=True)
+        return
+
+    if method == "xtr":
+        if _pilot_only(cb):
+            await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
+            return
+        try:
+            await cb.bot.send_invoice(
+                chat_id=cb.from_user.id,
+                title=f"{NAME} — {pl['label']}"[:32],
+                description=f"Подписка {pl['label']}: все методы сноса"[:255],
+                payload=f"star:{pk}:{cb.from_user.id}",
+                currency="XTR",
+                provider_token="",   # digital goods/service — no provider
+                prices=[LabeledPrice(label=pl["label"][:32],
+                                     amount=STARS_PRICES[pk])],
+            )
+        except Exception as e:
+            log.error("stars invoice failed: %s", e)
+            await cb.answer(f"❌ Инвойс не создан: {type(e).__name__}", show_alert=True)
+            return
+        await cb.answer()
+        return
+
+    if method == "cbot":
+        if _pilot_only(cb):
+            await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
+            return
+        try:
+            me = await cb.bot.get_me()
+            invoice = await cryptobot_api("createInvoice", {
+                "asset": "USDT",
+                "amount": pl["price"],
+                "description": f"{NAME} subscription {pl['label']}"[:1024],
+                "payload": json.dumps({"kind": "sub", "plan": pk,
+                                       "tgId": str(cb.from_user.id)}),
+                "expires_in": 3600,
+                "paid_btn_name": "callback",
+                "paid_btn_url": f"https://t.me/{me.username}",
+            })
+        except Exception as e:
+            log.error("cryptobot invoice failed: %s", e)
+            await cb.answer(f"❌ Инвойс не создан: {type(e).__name__}", show_alert=True)
+            return
+        inv_id = str(invoice.get("invoice_id") or "")
+        pay_url = invoice.get("pay_url") or invoice.get("bot_invoice_url") or ""
+        if not inv_id or not pay_url:
+            log.error("cryptobot bad invoice: %s", invoice)
+            await cb.answer("❌ Инвойс не создан", show_alert=True)
+            return
+        data = await state.get_data()
+        pend = data.get("pend", {})
+        pend[f"cb{inv_id}"] = {"user": cb.from_user.id, "plan": pk,
+                               "ts": time.time(), "method": "cbot"}
+        await state.update_data(pend=pend)
+        caption = (
+            bq(f"<b>{NAME}</b>  —  Оплата CryptoBot")
+            + f"\n\n💳 <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
+            + f"\n🧾 <b>Invoice:</b> <code>{inv_id}</code>\n\n"
+            + "Оплати в @CryptoBot по кнопке,\nзатем вернись и нажми <b>🔍 Проверить</b>."
+        )
+        await cb.message.edit_caption(
+            caption=caption, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
+                [InlineKeyboardButton(text="🔍 Проверить",
+                                      callback_data=f"sub:cc:{inv_id}:{pk}")],
+                [InlineKeyboardButton(text="◀ Назад", callback_data="sub:pm:cbot")],
+            ]),
+        )
+        await cb.answer()
+        return
+
+    # ── xrocket (old path, everyone) ──
+    if not XROCKET_TOKEN:
+        await cb.answer("Оплата не настроена (XROCKET_TOKEN)", show_alert=True)
         return
     payload = {"kind": "sub", "plan": pk, "tgId": str(cb.from_user.id)}
     try:
@@ -3521,58 +3713,114 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
                                          f"{NAME} subscription {pl['label']}")
     except Exception as e:
         log.error("xrocket invoice failed: %s", e)
-        await cb.answer("\u274c \u0421\u0435\u0440\u0432\u0438\u0441 \u043e\u043f\u043b\u0430\u0442\u044b \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d", show_alert=True)
+        await cb.answer("❌ Сервис оплаты недоступен", show_alert=True)
         return
     inv_id = j.get("id")
     pay_url = (j.get("links") or {}).get("telegramBotLink")
     if not inv_id or not pay_url:
         log.error("xrocket bad invoice: %s", j)
-        await cb.answer("\u274c \u0418\u043d\u0432\u043e\u0439\u0441 \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u043d", show_alert=True)
+        await cb.answer("❌ Инвойс не создан", show_alert=True)
         return
     data = await state.get_data()
     pend = data.get("pend", {})
-    pend[str(inv_id)] = {"user": cb.from_user.id, "plan": pk, "ts": time.time()}
+    pend[str(inv_id)] = {"user": cb.from_user.id, "plan": pk, "ts": time.time(),
+                         "method": "xrocket"}
     await state.update_data(pend=pend)
     price_s = f"{pl['price']:g}"
     caption = (
-        bq(f"<b>{NAME}</b>  \u2014  \u041e\u043f\u043b\u0430\u0442\u0430")
-        + f"\n\n\U0001f4b3 <b>{pl['label']}</b> \u2014 <b>{price_s} USDT</b>\n"
-        + f"\U0001f9fe <b>Invoice:</b> <code>{inv_id}</code>\n\n"
-        + "\u041e\u043f\u043b\u0430\u0442\u0438 \u0432 @xrocket \u043f\u043e \u043a\u043d\u043e\u043f\u043a\u0435,\n"
-        + "\u0437\u0430\u0442\u0435\u043c \u0432\u0435\u0440\u043d\u0438\u0441\u044c \u0438 \u043d\u0430\u0436\u043c\u0438 "
-        + "<b>\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c</b>."
+        bq(f"<b>{NAME}</b>  —  Оплата")
+        + f"\n\n💳 <b>{pl['label']}</b> — <b>{price_s} USDT</b>"
+        + f"\n🧾 <b>Invoice:</b> <code>{inv_id}</code>\n\n"
+        + "Оплати в @xrocket по кнопке,\nзатем вернись и нажми <b>🔍 Проверить</b>."
     )
+    back_cb = "sub:pm:xr" if cb.from_user.id == PAY_METHODS_ADMIN else "sub:shop"
     await cb.message.edit_caption(
         caption=caption, parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\U0001f4b3 \u041e\u043f\u043b\u0430\u0442\u0438\u0442\u044c", url=pay_url)],
-            [InlineKeyboardButton(text="\U0001f50d \u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c", callback_data=f"sub:check:{inv_id}")],
-            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="sub:shop")],
+            [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
+            [InlineKeyboardButton(text="🔍 Проверить", callback_data=f"sub:check:{inv_id}")],
+            [InlineKeyboardButton(text="◀ Назад", callback_data=back_cb)],
         ]),
     )
     await cb.answer()
 
 
-@router.callback_query(F.data == "sub:shop")
-async def sub_shop(cb: CallbackQuery, state: FSMContext):
-    subs = load_subs()
-    s, until = sub_quality(subs, cb.from_user.id)
-    caption = (
-        bq(f"<b>{NAME}</b>  \u2014  \u0422\u0430\u0440\u0438\u0444\u044b")
-        + f"\n\n\u270f \u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435: <b>{s}</b>"
-        + (f" ({until})" if until != "\u2014" else "")
-    )
-    for pk, pl in SUB_PLANS.items():
-        caption += f"\n\u2022 <b>{pl['label']}</b> \u2014 <b>{pl['price']:g} USDT</b>"
-    rows = []
-    for pk, pl in SUB_PLANS.items():
-        rows.append([InlineKeyboardButton(
-            text=f"\U0001f4b0 {pl['label']} \u2014 {pl['price']:g} USDT",
-            callback_data=f"sub:buy:{pk}")])
-    rows.append([InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")])
-    await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await cb.answer()
+@router.callback_query(F.data.startswith("sub:cc:"))
+async def sub_cryptobot_check(cb: CallbackQuery, state: FSMContext):
+    """sub:cc:<invoice_id>:<plan> — poll CryptoBot invoice status."""
+    if _pilot_only(cb):
+        await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
+        return
+    parts = cb.data.split(":")
+    inv_id, pk = parts[2], parts[3]
+    if not SUB_PLANS.get(pk):
+        await cb.answer("❌", show_alert=True)
+        return
+    try:
+        res = await cryptobot_api("getInvoices", {"invoice_ids": inv_id})
+    except Exception as e:
+        log.error("cryptobot status failed: %s", e)
+        await cb.answer("❌ Сервис оплаты недоступен", show_alert=True)
+        return
+    items = res.get("items") or []
+    status = (items[0].get("status") or "") if items else ""
+    if status == "paid":
+        subs = load_subs()
+        activate_plan(subs, cb.from_user.id, pk)
+        s, until = sub_quality(subs, cb.from_user.id)
+        await cb.answer("✅ Оплата прошла, подписка активна!", show_alert=True)
+        caption = (
+            bq(f"<b>{NAME}</b>  —  Подписка ок")
+            + f"\n\n✅ Состояние: <b>{s}</b> ({until})\nМожно пользоваться!"
+        )
+        await cb.message.edit_caption(
+            caption=caption, parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+            ]))
+        await push_send_log(
+            "Оплата (CryptoBot)",
+            [f"✅ <code>{cb.from_user.id}</code> — план <b>{pk}</b>"
+             f" invoice <code>{inv_id}</code>"])
+    else:
+        await cb.answer(f"⏳ статус: {status or 'не найден'}", show_alert=True)
+
+
+@router.pre_checkout_query()
+async def pre_checkout(q: PreCheckoutQuery):
+    """Stars invoices are issued per user+plan; nothing else to verify
+    server-side — approve within the 10s deadline."""
+    await q.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def on_successful_payment(msg: Message):
+    sp = msg.successful_payment
+    payload = sp.invoice_payload or ""
+    try:
+        kind, pk, uid_s = payload.split(":")
+        uid = int(uid_s)
+    except Exception:
+        log.warning("stars payload broken: %r", payload)
+        await msg.answer("⚠️ Платёж принят, но план не распознан — напиши админу.")
+        return
+    if pk in SUB_PLANS:
+        subs = load_subs()
+        activate_plan(subs, uid, pk)
+    try:
+        s, until = sub_quality(subs, uid)
+        await msg.answer(
+            bq(f"<b>{NAME}</b>  —  ⭐ Подписка ок")
+            + f"\n\n✅ Состояние: <b>{s}</b> ({until})\nМожно пользоваться!")
+    except Exception:
+        pass
+    log.info("stars paid: uid=%s plan=%s charge=%s amount=%s",
+             uid, pk, sp.telegram_payment_charge_id, sp.total_amount)
+    await push_send_log(
+        "Оплата (Telegram Stars)",
+        [f"✅ <code>{uid}</code> — план <b>{pk}</b>",
+         f"⭐ {sp.total_amount} | charge <code>{sp.telegram_payment_charge_id}</code>"])
+    set_current_user(f"( stars plan {pk} )")
 
 
 @router.callback_query(F.data.startswith("sub:check"))
