@@ -38,6 +38,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
+import store
+
 from telethon import TelegramClient
 from telethon.tl.functions.account import ReportPeerRequest
 from telethon.tl.functions.users import GetFullUserRequest
@@ -3157,6 +3159,7 @@ def save_subs(subs: dict) -> None:
                          encoding="utf-8")
     # grants/payments must survive runner restarts — commit the state back
     commit_file_to_repo("subs.json", "subs update", cooldown=60)
+    store.push_async("subs", SUBS_FILE.read_text(encoding="utf-8"))
 
 
 def user_is_admin(user_id: int) -> bool:
@@ -3278,10 +3281,11 @@ def load_users() -> dict:
 
 
 def save_users(users: dict) -> None:
-    USERS_FILE.write_text(json.dumps(users, ensure_ascii=False, indent=1),
-                          encoding="utf-8")
+    text = json.dumps(users, ensure_ascii=False, indent=1)
+    USERS_FILE.write_text(text, encoding="utf-8")
     # bindings must survive runner restarts — commit the DB back
     commit_file_to_repo("users.json", "users update", cooldown=120)
+    store.push_async("users", text)
 
 
 def touch_user(user) -> dict:
@@ -3927,6 +3931,9 @@ async def main():
         bot = Bot(token=BOT_TOKEN)
         _BOT = bot
         try:
+            # canonical data store: users/subs restored from Telegram
+            store.init(bot, BOT_TOKEN)
+            await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
             await dp.start_polling(bot)
             break
         except TelegramNetworkError as e:
