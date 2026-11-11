@@ -1,0 +1,50 @@
+name: bot-watch
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bot-watch
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - name: Probe bot health via Bot API
+        run: |
+          python3 - <<'EOF'
+          import json, os, urllib.request
+          tok = os.environ["BOT_TOKEN"]
+
+          def api(method):
+              with urllib.request.urlopen(
+                      f"https://api.telegram.org/bot{tok}/{method}",
+                      timeout=10) as r:
+                  return json.loads(r.read())
+
+          try:
+              me = api("getMe")
+              print("[WATCH] getMe ok:", (me.get("result") or {}).get("username"))
+          except Exception as e:
+              print("[WATCH] getMe FAILED:", e)
+          try:
+              wi = api("getWebhookInfo")
+              pending = (wi.get("result") or {}).get("pending_updates_count", 0)
+              hook = (wi.get("result") or {}).get("url", "")
+              print(f"[WATCH] pending_updates: {pending} | webhook: {hook or 'none'}")
+              if hook:
+                  print("[WATCH] !! webhook set — polling blocked by webhook")
+              if pending > 50:
+                  print("[WATCH] !! POLLER STUCK OR DEAD — pending", pending)
+          except Exception as e:
+              print("[WATCH] webhookinfo FAILED:", e)
+          EOF
