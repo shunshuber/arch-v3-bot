@@ -2156,7 +2156,9 @@ async def grant_days(msg: Message, state: FSMContext):
 @router.message(Command("unsub"))
 async def cmd_unsub(msg: Message):
     """Remove a user's subscription: /unsub <uid>"""
-    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+    if not (user_is_admin(msg.from_user.id)
+            or (ADMIN_ID and msg.from_user.id == int(ADMIN_ID))):
+        await msg.answer("⛔️ Команда для админов.")
         return
     parts = (msg.text or "").split()
     if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
@@ -2182,7 +2184,9 @@ async def cmd_unsub(msg: Message):
 @router.message(Command("refgive"))
 async def cmd_refgive(msg: Message):
     """Manually credit valid referrals: /refgive <user_id> [count]"""
-    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+    if not (user_is_admin(msg.from_user.id)
+            or (ADMIN_ID and msg.from_user.id == int(ADMIN_ID))):
+        await msg.answer("⛔️ Команда для админов.")
         return
     parts = (msg.text or "").split()
     if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
