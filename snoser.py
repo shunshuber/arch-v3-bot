@@ -3352,6 +3352,76 @@ def count_valid_refs(user_id: int) -> int:
 botRefCtx: dict = {"bot": None}
 
 
+# ── required channel gate (restored) ──────────────
+def get_channel_id() -> int:
+    raw = os.getenv("SUB_CHANNEL_ID", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    subs = load_subs()
+    v = subs.get("__channel_id")
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_channel_id(cid: int) -> None:
+    subs = load_subs()
+    subs["__channel_id"] = cid
+    save_subs(subs)
+
+
+@router.my_chat_member()
+async def on_bot_chat_member(cm, ):
+    """Auto-save the private channel id once the bot is added there."""
+    chat = cm.chat
+    if getattr(chat, "type", "") == "channel":
+        if get_channel_id() != chat.id:
+            set_channel_id(chat.id)
+            log.info("sub channel saved: %s (%s)", chat.id, chat.title)
+        return
+
+
+async def channel_gate(cb: CallbackQuery, state: FSMContext) -> bool:
+    """Require membership in the private channel before any flow."""
+    if user_is_admin(cb.from_user.id):
+        return True
+    cid = get_channel_id()
+    if not cid:
+        await cb.answer(
+            "\U0001f512 \u041a\u0430\u043d\u0430\u043b \u043d\u0430 \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0435, \u0437\u0430\u0433\u043b\u044f\u043d\u0438 \u043f\u043e\u0437\u0436\u0435",
+            show_alert=True)
+        return False
+    ok = False
+    try:
+        member = await cb.bot.get_chat_member(cid, cb.from_user.id)
+        ok = member.status in ("member", "administrator", "creator")
+    except Exception as e:
+        log.warning("channel check failed: %s", e)
+    if ok:
+        return True
+    caption = (
+        bq(f"<b>{NAME}</b>  \u00b7  \u0434\u043e\u0441\u0442\u0443\u043f")
+        + "\n\n\U0001f512 <b>\u0422\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u043f\u043e\u0434\u043f\u0438\u0441\u0447\u0438\u043a\u043e\u0432 \u043a\u0430\u043d\u0430\u043b\u0430</b>:"
+        + "\n\u0432\u0441\u0442\u0443\u043f\u0430\u0439 \u2014 \u0438 \u0436\u043c\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c"
+    )
+    rows = [
+        [InlineKeyboardButton(text="\U0001f4dd Вступить в канал", url=SUB_CHANNEL_LINK)],
+        [InlineKeyboardButton(text="✅ Я подписался", callback_data="menu:launch")],
+    ]
+    try:
+        await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception:
+        pass
+    await state.clear()
+    await cb.answer()
+    return False
+
+
 async def count_valid_refs_async(user_id: int) -> int:
     users = load_users()
     rec = users.get(str(user_id), {})
