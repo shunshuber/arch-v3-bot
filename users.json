@@ -1,32 +1,10 @@
-﻿{
- "8661362112": {
-  "id": 8661362112,
-  "username": "andimightdiesomeday",
-  "name": "violence",
-  "first_seen": "2026-11-07T02:28:44",
-  "last_seen": "2026-11-10T21:05:00",
-  "ref_by": null,
-  "refs": [],
-  "ref_grants": 0,
-  "deep_refs": 0
- },
+{
  "8901835539": {
   "id": 8901835539,
   "username": "bog_archive",
   "name": "archive",
-  "first_seen": "2026-11-07T15:00:13",
-  "last_seen": "2026-11-10T21:05:00",
-  "ref_by": null,
-  "refs": [],
-  "ref_grants": 0,
-  "deep_refs": 0
- },
- "8813226008": {
-  "id": 8813226008,
-  "username": "TarlSmip",
-  "name": "#2 санкции",
-  "first_seen": "2026-11-10T21:00:00",
-  "last_seen": "2026-11-10T21:05:00",
+  "first_seen": "2026-11-12T00:25:38",
+  "last_seen": "2026-11-12T00:25:38",
   "ref_by": null,
   "refs": [],
   "ref_grants": 0,
