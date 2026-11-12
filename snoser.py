@@ -469,10 +469,173 @@ COMMENT_TEMPLATES = {
 }
 
 
-def pick_comment(reason_key: str) -> str:
-    """Strong auto-template for the category; falls back to 'other' pool."""
+def pick_comment(reason_key: str, method: str = "") -> str:
+    """Strong auto-template for the category; falls back to 'other' pool.
+    The leading entity noun is swapped to match the real target type
+    (bot/channel/account) so a probiv-bot complaint never reads as a
+    complaint about a channel or a person."""
     pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
-    return random.choice(pool)
+    return _swap_entity(random.choice(pool), method)
+
+
+# entity nouns per language, grouped by what they describe — the earliest
+# one in a template is its subject
+_LANG_ENTITY = {
+    "ru": {"channel": ["\u043a\u0430\u043d\u0430\u043b", "\u043a\u0430\u043d\u0430\u043b\u0435"],
+           "account": ["\u0430\u043a\u043a\u0430\u0443\u043d\u0442", "\u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0435"],
+           "resource": ["\u0440\u0435\u0441\u0443\u0440\u0441"],
+           "person": ["\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c", "\u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f"]},
+    "en": {"channel": ["channel"], "account": ["account"],
+           "resource": ["resource"], "person": ["user", "person"]},
+    "de": {"channel": ["kanal"], "account": ["konto"],
+           "resource": ["ressource"], "person": ["nutzer", "person"]},
+    "es": {"channel": ["canal"], "account": ["cuenta"],
+           "resource": ["recurso"], "person": ["usuario", "persona"]},
+    "fr": {"channel": ["canal"], "account": ["compte"],
+           "resource": ["ressource"], "person": ["utilisateur", "personne"]},
+    "it": {"channel": ["canale"], "account": ["account"],
+           "resource": ["risorsa"], "person": ["utente", "persona"]},
+    "pt": {"channel": ["canal"], "account": ["conta"],
+           "resource": ["recurso"], "person": ["usu\u00e1rio", "pessoa"]},
+    "pl": {"channel": ["kana\u0142"], "account": ["konto"],
+           "resource": ["zas\u00f3b"], "person": ["u\u017cytkownik", "osoba"]},
+    "tr": {"channel": ["kanal"], "account": ["hesap"],
+           "resource": ["kaynak"], "person": ["kullan\u0131c\u0131", "ki\u015fi"]},
+    "ar": {"channel": ["\u0627\u0644\u0642\u0646\u0627\u0629", "\u0642\u0646\u0627\u0629"],
+           "account": ["\u0627\u0644\u062d\u0633\u0627\u0628", "\u062d\u0633\u0627\u0628"],
+           "resource": ["\u0627\u0644\u0645\u0648\u0631\u062f", "\u0645\u0648\u0631\u062f"],
+           "person": ["\u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645", "\u0645\u0633\u062a\u062e\u062f\u0645"]},
+}
+
+# method -> what the text should actually describe
+_METHOD_ENTITY = {
+    "bot": "bot", "channel": "channel", "profile": "account",
+    "message": "message", "sticker": "sticker", "web": "",
+}
+
+# correct noun per language per target kind
+_TARGET_NOUN = {
+    "ru": {"bot": "\u0431\u043e\u0442", "channel": "\u043a\u0430\u043d\u0430\u043b",
+           "account": "\u0430\u043a\u043a\u0430\u0443\u043d\u0442", "message": "\u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435",
+           "sticker": "\u0441\u0442\u0438\u043a\u0435\u0440\u043f\u0430\u043a", "resource": "\u0440\u0435\u0441\u0443\u0440\u0441"},
+    "en": {"bot": "bot", "channel": "channel", "account": "account",
+           "message": "message", "sticker": "sticker pack", "resource": "resource"},
+    "de": {"bot": "Bot", "channel": "Kanal", "account": "Konto",
+           "message": "Nachricht", "sticker": "Stickerpaket", "resource": "Ressource"},
+    "es": {"bot": "bot", "channel": "canal", "account": "cuenta",
+           "message": "mensaje", "sticker": "paquete de stickers", "resource": "recurso"},
+    "fr": {"bot": "bot", "channel": "canal", "account": "compte",
+           "message": "message", "sticker": "pack de stickers", "resource": "ressource"},
+    "it": {"bot": "bot", "channel": "canale", "account": "account",
+           "message": "messaggio", "sticker": "pacchetto di sticker", "resource": "risorsa"},
+    "pt": {"bot": "bot", "channel": "canal", "account": "conta",
+           "message": "mensagem", "sticker": "pacote de stickers", "resource": "recurso"},
+    "pl": {"bot": "bot", "channel": "kana\u0142", "account": "konto",
+           "message": "wiadomo\u015b\u0107", "sticker": "zestaw naklejek", "resource": "zas\u00f3b"},
+    "tr": {"bot": "bot", "channel": "kanal", "account": "hesap",
+           "message": "mesaj", "sticker": "sticker paketi", "resource": "kaynak"},
+    "ar": {"bot": "\u0628\u0648\u062a", "channel": "\u0627\u0644\u0642\u0646\u0627\u0629", "account": "\u0627\u0644\u062d\u0633\u0627\u0628",
+           "message": "\u0627\u0644\u0631\u0633\u0627\u0644\u0629", "sticker": "\u062d\u0632\u0645\u0629 \u0627\u0644\u0645\u0644\u0635\u0642\u0627\u062a",
+           "resource": "\u0627\u0644\u0645\u0648\u0631\u062f"},
+}
+
+
+# correct determiner per language per target kind (gender/case agreement)
+_LANG_DET = {
+    "de": {"channel": "Dieser", "account": "Dieses", "resource": "Diese",
+           "bot": "Dieser", "message": "Diese", "sticker": "Dieses"},
+    "es": {"channel": "Este", "account": "Esta", "resource": "Este",
+           "bot": "Este", "message": "Este", "sticker": "Este"},
+    "fr": {"channel": "Ce", "account": "Ce", "resource": "Cette",
+           "bot": "Ce", "message": "Ce", "sticker": "Ce"},
+    "it": {"channel": "Questo", "account": "Questo", "resource": "Questa",
+           "bot": "Questo", "message": "Questo", "sticker": "Questo"},
+    "pt": {"channel": "Este", "account": "Esta", "resource": "Este",
+           "bot": "Este", "message": "Este", "sticker": "Este"},
+    "pl": {"channel": "Ten", "account": "To", "resource": "Ten",
+           "bot": "Ten", "message": "T\\u0119", "sticker": "Ten"},
+}
+
+
+# determiner -> language (for detecting which language a template is in)
+_DET_LANG = {
+    "dieser": "de", "dieses": "de", "diese": "de",
+    "este": "es", "esta": "es",
+    "ce": "fr", "cette": "fr",
+    "questo": "it", "questa": "it",
+    "ten": "pl", "to": "pl",
+    "bu": "tr", "\u0434\u0430\u043d\u043d\u044b\u0439": "ru", "\u044d\u0442\u043e\u0442": "ru",
+    "this": "en", "\u0647\u0630\u0627": "ar",
+}
+
+
+def _swap_entity(text: str, method: str) -> str:
+    """Rewrite the subject noun of a template so it names the real target."""
+    want = _METHOD_ENTITY.get(method or "")
+    if not want or not text:
+        return text
+    low = text.lower()
+    best = None
+    for lg, kinds in _LANG_ENTITY.items():
+        for k, words in kinds.items():
+            for w in words:
+                p = low.find(w)
+                if p != -1 and (best is None or p < best[0]):
+                    best = (p, lg, k)
+    if not best:
+        return text
+    p, _, kind = best
+    # language from the determiner right before the noun — disambiguates
+    # words shared between languages ("kanal" is both de and tr).
+    # whole-word match: "questa" must not match the es determiner "esta"
+    lg = None
+    prefix_tokens = low[max(0, p - 20):p].split()
+    if prefix_tokens:
+        last_tok = prefix_tokens[-1]
+        for det, dlg in _DET_LANG.items():
+            if last_tok == det:
+                lg = dlg
+                break
+    if not lg:
+        lg = best[1]
+        for hint, hlg in (("cuenta", "es"), ("conta", "pt"),
+                          ("hesap", "tr"), ("kana\u0142", "pl")):
+            if hint in low:
+                lg = hlg
+                break
+    if kind == want:
+        return text
+    repl = _TARGET_NOUN.get(lg, {}).get(want)
+    if not repl:
+        return text
+    dets = _LANG_DET.get(lg) or {}
+    det_old = dets.get(kind) or ""
+    det_new = dets.get(want) or ""
+    # every spelling of this entity noun across languages (the matched word
+    # may belong to a different language than the detected determiner)
+    kind_words = [w for kinds in _LANG_ENTITY.values()
+                  for w in kinds.get(kind, [])]
+    out = text
+
+    def _fix(m, r=repl):
+        return r if m.group(0)[0].islower() else r[0].upper() + r[1:]
+
+    # determiner + noun as one unit first (gender/case agreement)
+    if det_old and det_new:
+        for w in kind_words:
+            for d_o, d_n in ((det_old, det_new),
+                             (det_old.lower(), det_new.lower()),
+                             (det_old[0].upper() + det_old[1:],
+                              det_new[0].upper() + det_new[1:])):
+                out = re.sub(re.escape(d_o + " " + w),
+                             lambda m, dn=d_n, r=repl: (
+                                 dn + " " + (r if m.group(0)[len(d_o) + 1].islower()
+                                             else r[0].upper() + r[1:])),
+                             out, flags=re.IGNORECASE)
+    # then any bare leftover noun
+    for w in kind_words:
+        out = re.sub(re.escape(w), _fix, out, flags=re.IGNORECASE)
+    return out
 
 
 LINK_RE = re.compile(
@@ -936,7 +1099,8 @@ def _classify_report_error(e: Exception) -> str | None:
     return None
 
 
-async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None) -> dict:
+async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None,
+                      method: str = "") -> dict:
     """BR-style: ONE report per session with a random text, rationed per
     session per rolling day (anti-sweep). Same fingerprint + sticky IP."""
     ledger = _ledger_load()
@@ -959,7 +1123,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         name = sess.stem
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        text = comment or pick_comment(reason_key)
+        text = comment or pick_comment(reason_key, method)
         async with _session_lock(sess):
             client = None
             try:
@@ -1037,7 +1201,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         [f"🎯 {html_mod.escape(str(target_entity))}"
          + (f" #{msg_id}" if msg_id else "")
          + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}",
-         f"💬 {html_mod.escape((comment or pick_comment(reason_key))[:200])}"]
+         f"💬 {html_mod.escape((comment or pick_comment(reason_key, method))[:200])}"]
         + real_lines)
 
     # mask results in simulate-fake structure — unchanged
@@ -2006,8 +2170,7 @@ def summary_text(data: dict) -> str:
     c = data.get("comment", "")
     if not c:
         # resolve the auto text now so the admin sees the real payload
-        c = (pick_comment(data["reason"]) if data.get("method") == "web"
-             else report_texts.get_random_text(data["reason"]))
+        c = pick_comment(data["reason"], data.get("method"))
         if len(c) > 120:
             c = c[:117] + "..."
     lines = [
@@ -3417,7 +3580,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     # resolved here so the pool log shows the real payload, not "нет"
     c_display = c
     if not c_display:
-        c_display = pick_comment(data["reason"])
+        c_display = pick_comment(data["reason"], data["method"])
     unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a" if is_web else "\u0437\u0430\u043f\u0443\u0441\u043a\u043e\u0432"
     tgt_raw = t["raw"]
     esc_raw = html_mod.escape(tgt_raw)
@@ -3426,7 +3589,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     else:
         report_task = asyncio.create_task(
-            fire_reports(t["entity"], data["reason"], c, t.get("msg_id")))
+            fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
 
     # ── loading animation while workers run ──
     sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
