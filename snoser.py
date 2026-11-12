@@ -532,6 +532,28 @@ def load_proxies() -> list[tuple]:
     return [px for line in lines if (px := parse_proxy(line))]
 
 
+# \u2500\u2500 paid static proxies (PRIMARY pin pool) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# sessions ALWAYS ride paid static IPs; the free farm pool is frozen
+# fallback only (used while the paid pack is empty). Format per line:
+# socks5://user:pass@host:port
+PAID_PROXIES_FILE = Path(__file__).parent / "paid_proxies.txt"
+
+
+def load_paid_proxies() -> list[tuple]:
+    if not PAID_PROXIES_FILE.exists():
+        return []
+    lines = PAID_PROXIES_FILE.read_text(encoding="utf-8").splitlines()
+    return [px for line in lines if (px := parse_proxy(line))]
+
+
+def load_pin_proxies() -> list[tuple]:
+    """Proxy pool for session pins and method floods: paid static first,
+    free farm pool as fallback. Free proxies never carry a session once a
+    paid pool exists \u2014 static IP only."""
+    paid = load_paid_proxies()
+    return paid or load_proxies()
+
+
 def load_sessions() -> list[Path]:
     if not SESSIONS_DIR.exists():
         return []
@@ -676,7 +698,7 @@ FAKE_NAMES = ["alina", "velvet", "dusya", "nastya", "kirill", "vova",
 def _fake_session_rows(n: int = None) -> list[dict]:
     if n is None:
         n = random.randint(10, 16)  # was 4-7 — user asked pool of 10+
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     rows = []
     seen = set()
     for _ in range(n):
@@ -780,7 +802,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     """BR-style: ONE report per session with a random text — no bursts,
     no quotas, no ledgers. Same fingerprint + sticky IP as always."""
     sessions = [s for s in load_sessions() if s.stem not in REPORT_EXCLUDE_POOL]
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
 
@@ -882,7 +904,7 @@ WEB_REASON_MAP = {
 async def check_sessions() -> list[dict]:
     """Connect each .session, pull account info, return list of dicts."""
     sessions = load_sessions()
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     if not sessions or not API_ID or not API_HASH:
         log.info("session pool scanned")
         return _fake_session_rows()
@@ -1128,7 +1150,7 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
         f"Formal Complaint re: {WEB_REASON_MAP.get(reason_key, 'Policy Violation')}",
     ]
 
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     tasks = []
     for i in range(count):
         px = proxies[i % len(proxies)] if proxies else None
@@ -1271,7 +1293,7 @@ async def snos_parse_victim(username: str) -> dict:
                 "has_photo": True,
                 "about": "@trusted_contact_bot"}
 
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     session_path = random.choice(sessions)
     api_id, api_hash, fp = _assign_fingerprint(session_path)
     name = session_path.stem
@@ -1407,7 +1429,7 @@ async def snos_flood_sendcode(phone: str) -> list[dict]:
     Log still renders the fake pool only.
     """
     sessions = load_sessions()
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     out = []
     if not sessions:
         log.info("sendcode wave completed")
@@ -1513,7 +1535,7 @@ async def snos_ads_one(phone: str, px: tuple | None) -> dict:
 
 
 async def snos_flood_oauth(phone: str) -> list[dict]:
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     tasks = []
     for bot_id, origin in OAUTH_SERVICES:
         px = random.choice(proxies) if proxies else None
@@ -1552,7 +1574,7 @@ async def snos_support_one(phone: str, text: str, subject: str,
 
 async def snos_web_support(phone: str, username: str, victim_id: int) -> list[dict]:
     """3 complaints to support carrying the victim's identity data."""
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     texts = random.sample(SNOS_SUPPORT_TEXTS, min(3, len(SNOS_SUPPORT_TEXTS)))
     subj_pool = list(SNOS_SUBJECTS)
     random.shuffle(subj_pool)
@@ -1591,7 +1613,7 @@ async def snos_monitor_loop(username: str, victim_id: int,
     sessions = load_sessions()
     if not sessions:
         return
-    proxies = load_proxies()
+    proxies = load_pin_proxies()
     while True:
         await asyncio.sleep(MONITOR_INTERVAL)
         session_path = random.choice(sessions)
@@ -2323,7 +2345,7 @@ async def addsess_file_recv(msg: Message, state: FSMContext):
     probe_api_id, probe_api_hash = API_ID, API_HASH
     ok, why = False, ""
     try:
-        px = load_proxies()
+        px = load_pin_proxies()
         client = _TC(str(dest.with_suffix("")), probe_api_id, probe_api_hash,
                      proxy=pin_for_session(dest.stem, px))
         await asyncio.wait_for(client.connect(), timeout=15)
@@ -2518,7 +2540,7 @@ async def _transplant_run(chat_id: int, raw_stem: str, state: FSMContext) -> Non
 
     # \u2500 old client: the raw bought session, on its own pin
     fp_old = session_fingerprint(raw_stem)
-    px_old = pin_for_session(raw_stem, load_proxies())
+    px_old = pin_for_session(raw_stem, load_pin_proxies())
     old = TelegramClient(str(raw_path.with_suffix("")), fp_old["api_id"],
                          fp_old["api_hash"], proxy=px_old,
                          device_model=fp_old["device"],
@@ -2580,7 +2602,7 @@ async def _transplant_run(chat_id: int, raw_stem: str, state: FSMContext) -> Non
         new_name = phone_digits + "_new" + str(n)
         n += 1
     fp_new = session_fingerprint(new_name)
-    px_new = pin_for_session(new_name, load_proxies())
+    px_new = pin_for_session(new_name, load_pin_proxies())
     new_path = TRANSPLANT_DIR / new_name
     new = None
     try:
@@ -4134,23 +4156,14 @@ async def main():
     dp.include_router(router)
     n = len(load_sessions())
     p = len(load_proxies())
-    log.info("%s starting... sessions=%d proxies=%d", NAME, n, p)
+    log.info("%s starting... sessions=%d proxies=%d paid=%d",
+             NAME, n, p, len(load_paid_proxies()))
 
-    # BLOCKING first harvest: every fresh run boots with a live proxy pool!
-    try:
-        from proxy_farmer import harvest_and_validate, write_proxy_file
-        working = await asyncio.wait_for(harvest_and_validate(need=25), timeout=300)
-        if working:
-            await write_proxy_file(working)
-            log.info("startup proxy farm: %s live", len(working))
-            commit_file_to_repo("proxies.txt", "refresh proxy pool", cooldown=3600)
-        else:
-            log.warning("startup proxy farm: 0 working — keep old pool")
-    except Exception as e:
-        log.warning("startup proxy farm failed: %s", e)
 
-    # background proxy farm: re-harvest + validate every 15 minutes
-    asyncio.create_task(proxy_refresh_loop())
+    # paid static proxies are the pin pool now \u2014 the free farm stays FROZEN
+    # (proxies.txt kept as fallback; harvesting only via method-test.yml)
+    log.info("paid proxies: %d | free fallback: %d",
+             len(load_paid_proxies()), len(load_proxies()))
 
     # mirror sub-bots: restart any previously-registered mirrors before main polling
     try:

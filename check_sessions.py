@@ -39,7 +39,7 @@ def _load_status() -> dict:
 
 async def check(session_path: Path, status: dict) -> None:
     name = session_path.stem
-    proxies = snoser.load_proxies()
+    proxies = snoser.load_pin_proxies()
     px = snoser.pin_for_session(name, proxies)
     fp = snoser.session_fingerprint(name)
     client = TelegramClient(

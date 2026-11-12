@@ -1,0 +1,4 @@
+# paid static proxies — PRIMARY pin pool (sessions must ride static IPs)
+# free farm pool (proxies.txt) is frozen fallback only
+# format: socks5://user:pass@host:port  (one per line)
+socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417

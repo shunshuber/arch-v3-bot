@@ -27,7 +27,7 @@ EXCLUDE = {"917066653092"}
 async def _live_proxies() -> list[tuple]:
     """Validate the pooled proxies against Telegram right now; keep only
     the ones that can actually carry a connection."""
-    raw = snoser.load_proxies()
+    raw = snoser.load_pin_proxies()
     if not raw:
         return []
     sem = asyncio.Semaphore(15)
@@ -110,7 +110,7 @@ async def main() -> None:
     sessions = snoser.load_sessions()
     print(f"[KICK] pool: {len(sessions)} sessions", flush=True)
     proxies = await _live_proxies()
-    print(f"[KICK] live proxies: {len(proxies)}/{len(snoser.load_proxies())}",
+    print(f"[KICK] live proxies: {len(proxies)}/{len(snoser.load_pin_proxies())}",
           flush=True)
     for s in sessions:
         await kick_one(s, proxies)
