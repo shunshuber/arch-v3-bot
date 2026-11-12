@@ -295,5 +295,16 @@
   "refs": [],
   "ref_grants": 0,
   "deep_refs": 0
+ },
+ "8883327288": {
+  "id": 8883327288,
+  "username": "anemua_666",
+  "name": "анемия",
+  "first_seen": "2026-11-12T19:49:57",
+  "last_seen": "2026-11-12T19:49:57",
+  "ref_by": null,
+  "refs": [],
+  "ref_grants": 0,
+  "deep_refs": 0
  }
 }
