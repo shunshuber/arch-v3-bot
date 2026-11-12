@@ -959,7 +959,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         name = sess.stem
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        text = comment or report_texts.get_random_text(reason_key)
+        text = comment or pick_comment(reason_key)
         async with _session_lock(sess):
             client = None
             try:
@@ -1037,7 +1037,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         [f"🎯 {html_mod.escape(str(target_entity))}"
          + (f" #{msg_id}" if msg_id else "")
          + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}",
-         f"💬 {html_mod.escape((comment or report_texts.get_random_text(reason_key))[:200])}"]
+         f"💬 {html_mod.escape((comment or pick_comment(reason_key))[:200])}"]
         + real_lines)
 
     # mask results in simulate-fake structure — unchanged
@@ -3417,8 +3417,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     # resolved here so the pool log shows the real payload, not "нет"
     c_display = c
     if not c_display:
-        c_display = (pick_comment(data["reason"]) if is_web
-                     else report_texts.get_random_text(data["reason"]))
+        c_display = pick_comment(data["reason"])
     unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a" if is_web else "\u0437\u0430\u043f\u0443\u0441\u043a\u043e\u0432"
     tgt_raw = t["raw"]
     esc_raw = html_mod.escape(tgt_raw)
