@@ -2378,7 +2378,7 @@ def kb_confirm() -> InlineKeyboardMarkup:
 
 
 def summary_text(data: dict) -> str:
-    r = REASONS[data["reason"]]
+    r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
     t = data["target"]
     m = METHODS[data["method"]]
     c = data.get("comment", "")
@@ -2512,6 +2512,9 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
     await state.update_data(method=key)
     m = METHODS[key]
     if key == "code":
+        # code-flood has no reason step — pin a default so the confirm
+        # screen and the pool log can resolve reason-dependent fields
+        await state.update_data(reason="spam")
         await cb.message.edit_caption(
             caption=(
                 bq(f"<b>{NAME}</b>")
@@ -3934,7 +3937,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     data = await state.get_data()
     t = data["target"]
-    r = REASONS[data["reason"]]
+    r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
     m = METHODS[data["method"]]
     c = data.get("comment", "")   # empty = per-session unique templates downstream
     ts = datetime.now().strftime("%H:%M:%S")
