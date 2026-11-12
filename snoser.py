@@ -207,6 +207,7 @@ class AddSession(StatesGroup):
     phone = State()
     code = State()
     password = State()
+    qr_wait = State()
 
 
 class Captcha(StatesGroup):
@@ -2284,6 +2285,7 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📄 Файлом", callback_data="addsess:file"),
              InlineKeyboardButton(text="📱 Кодом (вход по SMS)", callback_data="addsess:code")],
+            [InlineKeyboardButton(text="🔳 Через QR (без SMS)", callback_data="addsess:qr")],
             [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
         ]))
     await cb.answer()
@@ -2303,6 +2305,119 @@ async def addsess_file(cb: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
         ]))
     await cb.answer()
+
+
+@router.callback_query(AddSession.choose, F.data == "addsess:qr")
+async def addsess_qr(cb: CallbackQuery, state: FSMContext):
+    """QR login: no SMS at all — scan with the phone that owns the account."""
+    import base64
+    from telethon import TelegramClient as _TCQ
+    from telethon.tl.functions import auth as _auth
+    client = _TCQ(str(uuid.uuid4()), int(API_ID), API_HASH)
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15)
+        result = await client(_auth.ExportLoginTokenRequest(
+            api_id=int(API_ID), api_hash=API_HASH, except_ids=[]))
+        token = getattr(result, "token", None)
+        if not token:
+            await client.disconnect()
+            await cb.answer("❌ QR не выписан, попробуй позже", show_alert=True)
+            return
+        b64 = base64.urlsafe_b64encode(token).decode().rstrip("=")
+        url = "tg://login?token=" + b64
+        try:
+            import qrcode
+            img = qrcode.make(url)
+            import io as _io
+            buf = _io.BytesIO()
+            img.save(buf, format="PNG")
+            buf.seek(0)
+            photo = BufferedInputFile(buf.getvalue(), "login_qr.png")
+            await cb.message.answer_photo(photo, caption=(
+                bq(f"<b>{NAME}</b>  ·  🔳 Вход по QR")
+                + "\n\nОтсканируй код в Telegram <b>на телефоне, где этот аккаунт уже залогинен</b>:"
+                + "\nНастройки → Устройства → Привязать устройство."
+                + "\n\nОкно активно <b>2 минуты</b>. Отмена — ◀ Назад."),
+                parse_mode=ParseMode.HTML)
+        except ImportError:
+            await client.disconnect()
+            await cb.answer("❌ qrcode не установлен", show_alert=True)
+            return
+        await state.update_data(qr_client=client, qr_chat=cb.message.chat.id)
+        await state.set_state(AddSession.qr_wait)
+        asyncio.create_task(_qr_poll(client, state, cb.message.chat.id))
+        await cb.answer()
+    except Exception as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        await cb.answer(f"❌ QR: {type(e).__name__}", show_alert=True)
+
+
+async def _qr_poll(client, state: FSMContext, chat_id: int) -> None:
+    """Poll exportLoginToken until authorized or 2 minutes pass."""
+    import base64
+    from telethon.tl.functions import auth as _auth
+    from telethon.tl.types import auth as _at
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        await asyncio.sleep(3)
+        data = await state.get_data()
+        if data.get("qr_client") is not client:
+            return   # user backed out
+        try:
+            result = await client(_auth.ExportLoginTokenRequest(
+                api_id=int(API_ID), api_hash=API_HASH, except_ids=[]))
+        except Exception as e:
+            log.warning("qr poll: %s", e)
+            continue
+        # scanned + confirmed on the phone → loginTokenSuccess wraps Authorization
+        if type(result).__name__ in ("LoginTokenSuccess", "Authorization") \
+                and getattr(result, "authorization", None):
+            break
+    # finished — resolve account & save
+    try:
+        me = await client.get_me()
+    except Exception as e:
+        log.warning("qr finish failed: %s", e)
+        return
+    uname = f"@{me.username}" if me.username else ""
+    base_sess = Path(__file__).parent / "sessions"
+    base_sess.mkdir(exist_ok=True)
+    sess_name = f"{me.username or (me.phone or 'qr')}.session"
+    await client.session.save()
+    path = base_sess / sess_name
+    try:
+        import shutil
+        tmp = getattr(client.session, "filename", None)
+        if tmp and str(path.resolve()) != str(tmp):
+            shutil.move(str(tmp), str(path))
+    except Exception:
+        pass
+    await client.disconnect()
+    commit_file_to_repo(f"sessions/{sess_name}", f"add session {sess_name} (QR)")
+    data = await state.get_data()
+    if data.get("qr_client") is not client:
+        return
+    await state.update_data(qr_client=None)
+    await state.clear()
+    set_current_user(f"QR login ({uname or me.phone})")
+    await push_send_log(
+        "Добавлена сессия (QR)",
+        [f"🔳 <code>{session_fingerprint(sess_name)['device']}</code>"
+         f" {html_mod.escape(uname or str(me.phone))}",
+         f"🧷<code>{html_mod.escape(sess_name)}</code> → пул | всего: {len(load_sessions())}"])
+    try:
+        await _BOT.send_message(
+            chat_id,
+            bq(f"<b>{NAME}</b>  ·  ✅ Сессия создана")
+            + f"\n\n🔳 QR вход прошёл: <b>{uname or me.phone}</b>"
+            + f"\n🧷 <code>{html_mod.escape(sess_name)}</code> → пул"
+            + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий",
+            parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log.warning("qr notify failed: %s", e)
 
 
 @router.message(AddSession.file, F.document)
@@ -2378,13 +2493,32 @@ async def addsess_phone(msg: Message, state: FSMContext):
     if not phone.startswith("+"):
         phone = "+" + phone
     px = load_proxies()
+    candidates = list(px[:3]) or [None]
+    sent = None
+    client = None
     from telethon import TelegramClient as _TC2
-    client = _TC2(str(uuid.uuid4()), int(API_ID), API_HASH,
-                  proxy=random.choice(px) if px else None,
-                  system_version=SNOS_SYSTEM_VERSION)
+    for cand in candidates:
+        try:
+            client = _TC2(str(uuid.uuid4()), int(API_ID), API_HASH,
+                          proxy=cand,
+                          system_version=SNOS_SYSTEM_VERSION)
+            await asyncio.wait_for(client.connect(), timeout=12)
+            sent = await asyncio.wait_for(client.send_code_request(phone), timeout=20)
+            break
+        except Exception:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            client = None
+    if sent is None:
+        await state.clear()
+        await msg.answer("❌ Не удалось достучаться до Telegram: все прокси мертвы.",
+                         parse_mode=ParseMode.HTML)
+        return
+    # client is live and code request sent
     try:
-        await asyncio.wait_for(client.connect(), timeout=15)
-        sent = await asyncio.wait_for(client.send_code_request(phone), timeout=20)
+        pass
     except _terr.FloodWaitError as e:
         await state.clear()
         await msg.answer(f"⏳ Флудаит: подожди <b>{e.seconds}s</b>.", parse_mode=ParseMode.HTML)
@@ -2545,7 +2679,7 @@ async def menu_telemetry(cb: CallbackQuery):
 @router.callback_query(F.data == "back:home")
 async def back_home(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    cl = data.get("client")   # pending Telethon login (add-session flow)
+    cl = data.get("client") or data.get("qr_client")
     if cl:
         try:
             await cl.disconnect()
