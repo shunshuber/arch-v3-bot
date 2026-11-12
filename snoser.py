@@ -39,6 +39,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import store
+import report_texts
 
 from telethon import TelegramClient
 from telethon.tl.functions.account import ReportPeerRequest
@@ -782,7 +783,6 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     sessions = [s for s in load_sessions() if s.stem not in REPORT_EXCLUDE_POOL]
     proxies = load_proxies()
     reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
-    pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
 
     if not sessions or not API_ID or not API_HASH:
@@ -793,7 +793,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         name = sess.stem
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        text = comment or random.choice(pool)
+        text = comment or report_texts.get_random_text(reason_key)
         async with _session_lock(sess):
             client = None
             try:
