@@ -2355,13 +2355,43 @@ async def addsess_qr(cb: CallbackQuery, state: FSMContext):
             pass
         await cb.answer(f"❌ QR: {type(e).__name__}", show_alert=True)
 
+@router.message(AddSession.qr_wait)
+async def qr_wait_text(msg: Message, state: FSMContext):
+    """While QR flow waits: a text message is the 2FA password (if asked)."""
+    data = await state.get_data()
+    if not data.get("qr_need_password"):
+        await msg.answer("🔳 QR ждёт скана с телефона — текст не нужен.",
+                         parse_mode=ParseMode.HTML)
+        return
+    await state.update_data(qr_password=(msg.text or "").strip())
+    await msg.answer("🔐 Принял пароль — завершаю вход...")
+    try:
+        await msg.delete()   # keep the password out of the chat history
+    except Exception:
+        pass
+    # photo message gets edited by the poll on completion
+
+
+
+async def _qr_edit_caption(client, state: FSMContext, chat_id: int, text: str) -> None:
+    """Update the standing QR photo message with the flow's current state."""
+    data = await state.get_data()
+    msg_id = data.get("qr_msg_id")
+    try:
+        if msg_id and _BOT:
+            await _BOT.edit_message_caption(chat_id, msg_id, text,
+                                            parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log.warning("qr edit failed: %s", e)
+
 
 async def _qr_poll(client, state: FSMContext, chat_id: int) -> None:
-    """Poll exportLoginToken; on any outcome EDIT the QR message itself."""
+    """Poll exportLoginToken; supports 2FA: asks admin for the password."""
     from telethon.tl.functions import auth as _auth
-    from telethon.tl.types import auth as _at
+    from telethon import errors as _terr
     deadline = time.time() + 240
     ok = False
+    need_pw = False
     while time.time() < deadline:
         await asyncio.sleep(2.5)
         data = await state.get_data()
@@ -2370,14 +2400,82 @@ async def _qr_poll(client, state: FSMContext, chat_id: int) -> None:
         try:
             result = await client(_auth.ExportLoginTokenRequest(
                 api_id=int(API_ID), api_hash=API_HASH, except_ids=[]))
+        except _terr.SessionPasswordNeededError:
+            if not need_pw:
+                need_pw = True
+                await state.update_data(qr_need_password=True, qr_password=None)
+                await _qr_edit_caption(client, state, chat_id,
+                    bq(f"<b>{NAME}</b>  ·  🔐 QR + 2FA")
+                    + "\n\nНа аккаунте стоит <b>двухфакторка</b>."
+                    + "\nПришли сюда <b>пароль 2FA</b> — я доведу вход до конца"
+                    + "\nи сразу удалю твоё сообщение с паролем.")
+            continue
         except Exception as e:
             log.warning("qr poll: %s", e)
             continue
+        if need_pw:
+            # password step handled after exportLoginToken stops complaining
+            pw = data.get("qr_password")
+            if not pw:
+                continue
+            try:
+                await client.sign_in(password=pw)
+                ok = True
+                break
+            except _terr.PasswordHashInvalidError:
+                await state.update_data(qr_password=None)
+                await _qr_edit_caption(client, state, chat_id,
+                    bq(f"<b>{NAME}</b>  ·  🔐 QR + 2FA")
+                    + "\n\n❌ Пароль не принял. Пришли правильный ещё раз.")
+                continue
+            except Exception as e:
+                log.warning("qr password check failed: %s", e)
+                await state.update_data(qr_password=None)
+                await _qr_edit_caption(client, state, chat_id,
+                    bq(f"<b>{NAME}</b>  ·  🔐 QR + 2FA")
+                    + f"\n\n❌ Ошибка: <i>{type(e).__name__}</i>. Пришли пароль снова.")
+                continue
         # scanned + confirmed on the phone → loginTokenSuccess wraps Authorization
         if type(result).__name__ in ("LoginTokenSuccess", "Authorization") \
                 and getattr(result, "authorization", None):
             ok = True
             break
+    # waiting for the password while the QR window may already be closed —
+    # extend silently: the admin is typing the 2FA password
+    if need_pw and not ok:
+        wait_until = time.time() + 180
+        while time.time() < wait_until:
+            await asyncio.sleep(1)
+            data = await state.get_data()
+            if data.get("qr_client") is not client:
+                return
+            pw = data.get("qr_password")
+            if not pw:
+                continue
+            try:
+                await client.sign_in(password=pw)
+                ok = True
+                break
+            except Exception as e:
+                from telethon import errors as _terr2
+                await state.update_data(qr_password=None)
+                await _qr_edit_caption(client, state, chat_id,
+                    bq(f"<b>{NAME}</b>  ·  🔐 QR + 2FA")
+                    + (f"\n\n❌ Пароль не принял. Ещё раз." if
+                       isinstance(e, _terr2.PasswordHashInvalidError) else
+                       f"\n\n❌ Ошибка {type(e).__name__}. Пришли пароль снова."))
+        if not ok:
+            data = await state.get_data()
+            if data.get("qr_client") is not client:
+                return
+            await _qr_edit_caption(client, state, chat_id,
+                bq(f"<b>{NAME}</b>  ·  ⌳ QR не завершили")
+                + "\n\nОкно истекло без подтверждения 2FA."
+                + "\nПодними заново: ➕ Сессия → 🔳")
+            await state.update_data(qr_client=None)
+            await state.clear()
+            return
+
     # finished — resolve account & save
     try:
         me = await client.get_me()
