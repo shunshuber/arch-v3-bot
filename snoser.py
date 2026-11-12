@@ -1036,7 +1036,8 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         "Report (сессии)",
         [f"🎯 {html_mod.escape(str(target_entity))}"
          + (f" #{msg_id}" if msg_id else "")
-         + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}"]
+         + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}",
+         f"💬 {html_mod.escape((comment or report_texts.get_random_text(reason_key))[:200])}"]
         + real_lines)
 
     # mask results in simulate-fake structure — unchanged
@@ -2002,7 +2003,13 @@ def summary_text(data: dict) -> str:
     r = REASONS[data["reason"]]
     t = data["target"]
     m = METHODS[data["method"]]
-    c = data.get("comment", "") or "<i>🤖 авто: сильный шаблон</i>"
+    c = data.get("comment", "")
+    if not c:
+        # resolve the auto text now so the admin sees the real payload
+        c = (pick_comment(data["reason"]) if data.get("method") == "web"
+             else report_texts.get_random_text(data["reason"]))
+        if len(c) > 120:
+            c = c[:117] + "..."
     lines = [
         bq(f"<b>{NAME}</b>  \u2014  \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435"),
         "",
@@ -3406,6 +3413,12 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     await cb.answer("\u23f3 \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430...")
 
     is_web = data["method"] == "web"
+    # what actually goes out when the admin skipped the comment step —
+    # resolved here so the pool log shows the real payload, not "нет"
+    c_display = c
+    if not c_display:
+        c_display = (pick_comment(data["reason"]) if is_web
+                     else report_texts.get_random_text(data["reason"]))
     unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a" if is_web else "\u0437\u0430\u043f\u0443\u0441\u043a\u043e\u0432"
     tgt_raw = t["raw"]
     esc_raw = html_mod.escape(tgt_raw)
@@ -3504,7 +3517,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     )
 
     if POOL_CHAT_ID:
-        comment_text = c if c else "\u043d\u0435\u0442"
+        comment_text = c_display if c_display else "\u043d\u0435\u0442"
         me = m["e"]
         ml = m["l"]
         re_ = r["e"]
