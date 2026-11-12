@@ -983,6 +983,99 @@ def _assign_fingerprint(session_path: Path) -> tuple[int, str, dict]:
     return fp["api_id"], fp["api_hash"], fp
 
 
+# \u2500\u2500 BR bot-method: target whitelist + probe \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+WHITELIST_FILE = Path(__file__).parent / "target_whitelist.json"
+
+# what a captcha-gated bot answers on /start (BR FAST_KD_KEYWORD)
+BOT_CAPTCHA_KEYWORDS = [
+    "\u043fо\u0436алу\u0439\u0441т\u0430, \u0440\u0435\u0448\u0438\u0442\u0435 \u043a\u0430\u043f\u0447\u0443",
+    "\u0440\u0435\u0448\u0438\u0442\u0435 \u043a\u0430\u043f\u0447\u0443",
+    "solve the captcha",
+    "captcha",
+]
+
+
+def _wl_load() -> list:
+    try:
+        if WHITELIST_FILE.exists():
+            return json.loads(WHITELIST_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return []
+
+
+def _wl_save(patterns: list) -> None:
+    try:
+        WHITELIST_FILE.write_text(
+            json.dumps(sorted(set(p.lower() for p in patterns if p)),
+                       ensure_ascii=False, indent=1),
+            encoding="utf-8")
+        commit_file_to_repo(WHITELIST_FILE.name, "whitelist update",
+                            cooldown=5)
+    except Exception:
+        pass
+
+
+def is_target_whitelisted(target: str) -> str | None:
+    """BR-style gate: exact or prefix match; returns the matched pattern."""
+    t = (target or "").strip().lstrip("@").lower()
+    if not t:
+        return None
+    for p in _wl_load():
+        pl = p.strip().lstrip("@").lower()
+        if not pl:
+            continue
+        if t == pl or t.startswith(pl):
+            return p
+    return None
+
+
+async def bot_probe_target(bot_username: str) -> dict:
+    """BR detect_bot_type: one pinned session writes /start to the target
+    bot and reads its last messages. Flags captcha-gated bots (their 5-min
+    cooldown) and returns a preview of what the bot answered."""
+    sessions = [s for s in load_sessions()
+                if s.stem not in (_status_load().get("dead") or [])]
+    if not sessions:
+        return {"ok": False, "found": False, "error": "\u043d\u0435\u0442 \u0436\u0438\u0432\u044b\u0445 \u0441\u0435\u0441\u0441\u0438\u0439"}
+    sess = random.choice(sessions)
+    name = sess.stem
+    fp = session_fingerprint(name)
+    px = pin_for_session(name, load_pin_proxies())
+    client = None
+    try:
+        async with _session_lock(sess):
+            client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
+                                    fp["api_hash"], proxy=px,
+                                    device_model=fp["device"],
+                                    system_version=fp["system_version"],
+                                    app_version=fp["app_version"],
+                                    lang_code=fp["lang_code"])
+            await asyncio.wait_for(client.connect(), timeout=10)
+            if not await client.is_user_authorized():
+                return {"ok": False, "found": False,
+                        "error": "\u0441\u0435\u0441\u0441\u0438\u044f \u043c\u0435\u0440\u0442\u0432\u0430"}
+            entity = await client.get_entity(bot_username.lstrip("@"))
+            await client.send_message(entity, "/start")
+            await asyncio.sleep(2)
+            msgs = await client.get_messages(entity, limit=3)
+            texts = [m.text or "" for m in msgs if not m.out]
+            joined = " ".join(texts).lower()
+            captcha = any(k in joined for k in BOT_CAPTCHA_KEYWORDS)
+            return {"ok": True, "found": True, "captcha": captcha,
+                    "preview": (texts[0][:160] if texts else ""),
+                    "bot_id": entity.id, "via": name}
+    except Exception as e:
+        return {"ok": False, "found": False,
+                "error": f"{type(e).__name__}: {e}"}
+    finally:
+        try:
+            if client:
+                await client.disconnect()
+        except Exception:
+            pass
+
+
 # \u2500\u2500 anti-sweep rationing \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 # Telegram now triggers on mass-report waves and logs out the session
 # that fired. Counter: ration every session (rolling-day quota), drop
@@ -2582,6 +2675,57 @@ async def cmd_unsub(msg: Message):
             parse_mode=ParseMode.HTML)
 
 
+@router.message(Command("wl"))
+async def cmd_wl(msg: Message):
+    """Target whitelist (BR-style): /wl add @name | /wl del @name | /wl list"""
+    if not (user_is_admin(msg.from_user.id)
+            or (ADMIN_ID and msg.from_user.id == int(ADMIN_ID))):
+        await msg.answer("\u26d4\ufe0f \u041a\u043e\u043c\u0430\u043d\u0434\u0430 \u0434\u043b\u044f \u0430\u0434\u043c\u0438\u043d\u043e\u0432.")
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.answer(
+            "\u0424\u043e\u0440\u043c\u0430\u0442:\n"
+            "<code>/wl add @username</code>\n"
+            "<code>/wl del @username</code>\n"
+            "<code>/wl list</code>",
+            parse_mode=ParseMode.HTML)
+        return
+    action = parts[1].lower()
+    cur = _wl_load()
+    if action == "list":
+        if not cur:
+            await msg.answer("\U0001f6e1 \u0411\u0435\u043b\u044b\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u043f\u0443\u0441\u0442.")
+        else:
+            body = "\n".join(
+                f"\u2022 <code>{html_mod.escape(p)}</code>"
+                for p in sorted(set(cur)))
+            await msg.answer(
+                f"\U0001f6e1 <b>\u0411\u0435\u043b\u044b\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u0446\u0435\u043b\u0435\u0439:</b>\n{body}",
+                parse_mode=ParseMode.HTML)
+        return
+    if len(parts) < 3:
+        await msg.answer("\u041d\u0443\u0436\u0435\u043d \u043f\u0430\u0442\u0442\u0435\u0440\u043d: <code>/wl add @username</code>",
+                         parse_mode=ParseMode.HTML)
+        return
+    pat = parts[2].strip().lstrip("@").lower()
+    if action == "add":
+        if pat and pat not in [p.lower() for p in cur]:
+            cur.append(pat)
+            _wl_save(cur)
+        await msg.answer(
+            f"\U0001f6e1 <code>{html_mod.escape(pat)}</code> \u0432 \u0431\u0435\u043b\u043e\u043c \u0441\u043f\u0438\u0441\u043a\u0435.",
+            parse_mode=ParseMode.HTML)
+    elif action == "del":
+        cur = [p for p in cur if p.lower() != pat]
+        _wl_save(cur)
+        await msg.answer(
+            f"\u274e <code>{html_mod.escape(pat)}</code> \u0443\u0431\u0440\u0430\u043d \u0438\u0437 \u0431\u0435\u043b\u043e\u0433\u043e \u0441\u043f\u0438\u0441\u043a\u0430.",
+            parse_mode=ParseMode.HTML)
+    else:
+        await msg.answer("\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435. add / del / list")
+
+
 @router.message(Command("refgive"))
 async def cmd_refgive(msg: Message):
     """Manually credit valid referrals: /refgive <user_id> [count]"""
@@ -3585,6 +3729,49 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     tgt_raw = t["raw"]
     esc_raw = html_mod.escape(tgt_raw)
 
+    # ── BR bot-method gates (method=bot only) ──
+    probe_note = ""
+    if data["method"] == "bot":
+        hit = is_target_whitelisted(tgt_raw)
+        if hit:
+            await cb.answer("\u26d4 \u0426\u0435\u043b\u044c \u0432 \u0431\u0435\u043b\u043e\u043c \u0441\u043f\u0438\u0441\u043a\u0435!",
+                            show_alert=True)
+            await push_send_log(
+                "\u041f\u043e\u043f\u044b\u0442\u043a\u0430 \u0441\u043d\u0435\u0441\u0442\u0438 \u0446\u0435\u043b\u044c \u0438\u0437 \u0431\u0435\u043b\u043e\u0433\u043e \u0441\u043f\u0438\u0441\u043a\u0430",
+                [f"\U0001f3af <code>{esc_raw}</code> (\u043f\u0430\u0442\u0442\u0435\u0440\u043d: <code>{html_mod.escape(hit)}</code>)",
+                 f"\U0001f464 {html_mod.escape(cb.from_user.full_name)} (<code>{cb.from_user.id}</code>) | \u043c\u0435\u0442\u043e\u0434: \u0431\u043e\u0442"])
+            await state.clear()
+            return
+        try:
+            await cb.message.edit_caption(
+                caption=(bq(f"<b>{NAME}</b>  \u00b7  \U0001f916 \u041f\u0440\u043e\u0431\u0430 \u0446\u0435\u043b\u0438")
+                         + "\n\n\u23f3 \u041e\u0434\u043d\u0430 \u0441\u0435\u0441\u0441\u0438\u044f \u043f\u0438\u0448\u0435\u0442 \u0431\u043e\u0442\u0443 /start..."),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        pr = await bot_probe_target(tgt_raw)
+        if not pr.get("found") and pr.get("error"):
+            await cb.answer("\u26a0\ufe0f \u0426\u0435\u043b\u044c \u043d\u0435 \u043e\u0442\u0432\u0435\u0447\u0430\u0435\u0442: "
+                            + pr["error"][:120], show_alert=True)
+            await state.clear()
+            return
+        if pr.get("ok"):
+            probe_note = ("\n\U0001f916 <b>\u041f\u0440\u043e\u0431\u0430:</b> "
+                          + ("\u26a1 \u043a\u0430\u043f\u0447\u0430-\u0431\u043e\u0442 (\u041a\u0414 5 \u043c\u0438\u043d)"
+                             if pr.get("captcha") else "\u2705 \u043e\u0442\u0432\u0435\u0447\u0430\u0435\u0442")
+                          + (f" | <i>{html_mod.escape(pr.get('preview', '')[:90])}</i>"
+                             if pr.get("preview") else ""))
+        else:
+            probe_note = ("\n\U0001f916 <b>\u041f\u0440\u043e\u0431\u0430:</b> \u26a0\ufe0f "
+                          + html_mod.escape(pr.get("error", "\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d")))
+        try:
+            await cb.message.edit_caption(
+                caption=(bq(f"<b>{NAME}</b>  \u00b7  \U0001f916 \u041f\u0440\u043e\u0431\u0430 \u0446\u0435\u043b\u0438")
+                         + "\n\n" + probe_note.lstrip("\n")),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+
     if is_web:
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     else:
@@ -3694,6 +3881,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             + f"\n\U0001f3af <b>\u0426\u0435\u043b\u044c:</b> <code>{traw}</code>"
             + f"\n\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> {re_} {rl}"
             + f"\n\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b> {comment_text}"
+            + (probe_note.replace("\n", "", 1) if probe_note else "")
             + f"\n\U0001f4e6 {ok}/{total}"
             + f"\n\U0001f552 {ts}"
         )
