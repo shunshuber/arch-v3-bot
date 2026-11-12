@@ -1594,7 +1594,7 @@ async def snos_flood_sendcode(phone: str) -> list[dict]:
     Dead sessions are filtered once (single probe) instead of failing 5x.
     Log still renders the fake pool only.
     """
-    sessions = load_sessions()
+    sessions = [s for s in load_sessions() if s.stem not in (_status_load().get("dead") or [])]
     proxies = load_pin_proxies()
     out = []
     if not sessions:
