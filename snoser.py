@@ -732,26 +732,8 @@ def _unique_texts_tagged(pool: list[str], n: int) -> list[tuple[str, str]]:
     return out[:n]
 
 
-# ── per-session report quota + client fingerprints ──────
+# ── session reports (BR-style) ────────────────────
 REPORT_EXCLUDE_POOL = {"917066653092"}
-SESSION_SHOTS_24H = 36          # max successful report shots per session/24h
-_LEDGER_FILE = Path(__file__).parent / "sessions_ledger.json"
-_LEDGER: dict | None = None
-_FP_CACHE: dict[str, dict] = {}
-_FP_API_POOL: list[tuple[int, str]] = [
-    (24565698, "5a084b434f8505ace703485b9da85040"),
-    (27904162, "e7cba879b1c643ba77490bf328df5eab"),
-    (23037915, "50f06f5b2223586fde0d1379ea91ebc7"),
-    (29512095, "0b29a7d42fff002856b9bed64f7ec919"),
-    (25055016, "25edf5b7becebe91a2d61fe8d9d9931b"),
-    (2040, "b18441a1ff607e10a989891a5462e627"),
-]
-_FP_DEVICE_POOL = [
-    ("POFHXHK-PREMIUM", "Windows 10", "7.3.3 x64", "tdesktop", "en"),
-    ("Desktop PC", "Windows 11", "5.16.5 x64", "tdesktop", "ru"),
-    ("MacBook Pro 16", "macOS 14.6", "8.4.4", "tdesktop", "en"),
-    ("PC 64bit", "Linux", "4.16.8 x64", "tdesktop", "ru"),
-]
 
 
 def session_fingerprint(name: str) -> dict:
@@ -794,84 +776,28 @@ def _assign_fingerprint(session_path: Path) -> tuple[int, str, dict]:
     return fp["api_id"], fp["api_hash"], fp
 
 
-def _ledger_load() -> dict:
-    global _LEDGER
-    if _LEDGER is None:
-        try:
-            _LEDGER = json.loads(_LEDGER_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            _LEDGER = {}
-    return _LEDGER
-
-
-def _ledger_trim(rec: dict, now: float) -> None:
-    rec["shots"] = [t for t in (rec.get("shots") or []) if now - t < 86400]
-
-
-def _ledger_shot_count(name: str) -> int:
-    now = time.time()
-    rec = _ledger_load().get(name) or {}
-    _ledger_trim(rec, now)
-    return len(rec.get("shots") or [])
-
-
-def _ledger_add_shots(name: str, times: list[float]) -> None:
-    led = _ledger_load()
-    rec = led.setdefault(name, {})
-    _ledger_trim(rec, time.time())
-    rec["shots"] = list(rec.get("shots") or []) + list(times)
-    try:
-        _LEDGER_FILE.write_text(json.dumps(led, ensure_ascii=False, indent=1),
-                                encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _quota_filter_sessions(sessions: list[Path]) -> list[Path]:
-    keep = [s for s in sessions
-            if s.stem not in REPORT_EXCLUDE_POOL
-            and _ledger_shot_count(s.stem) < SESSION_SHOTS_24H]
-    return keep or sessions
-
-
-def _ledger_flush_async() -> None:
-    commit_file_to_repo("sessions_ledger.json", "session ledger", cooldown=300)
-
-
 async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None) -> dict:
-    sessions = _quota_filter_sessions(load_sessions())
-    sessions.sort(key=lambda s: _ledger_shot_count(s.stem))
+    """BR-style: ONE report per session with a random text — no bursts,
+    no quotas, no ledgers. Same fingerprint + sticky IP as always."""
+    sessions = [s for s in load_sessions() if s.stem not in REPORT_EXCLUDE_POOL]
     proxies = load_proxies()
     reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
+    pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
 
     if not sessions or not API_ID or not API_HASH:
         log.info("blast page completed")
         return fake_results()
 
-    # every (session, burst-shot) pair gets its OWN template — Telegram sees
-    # a distinct complaint from each author, never a duplicate
-    shots = len(sessions) * REPORT_BURST
-    pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
-    if comment:
-        texts = [("", comment)] * shots
-    else:
-        texts = _unique_texts_tagged(pool, shots)
-
-    async def session_worker(sess: Path, idx: int) -> tuple[str, str, list[tuple[int, bool, str]]]:
-        """One connected client per session, REPORT_BURST reports over it.
-        Per-session lock removes 'database is locked' when two methods hit
-        the same session concurrently."""
+    async def session_worker(sess: Path, idx: int) -> tuple[str, str, bool, str]:
         name = sess.stem
-        # sticky single-IP pin — same proxy for this session on every run
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        rows = []
-        ok_shots: list[float] = []
-        fp = session_fingerprint(name)
+        text = comment or random.choice(pool)
         async with _session_lock(sess):
             client = None
             try:
+                fp = session_fingerprint(name)
                 client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
                                         fp["api_hash"], proxy=proxy,
                                         device_model=fp["device"],
@@ -881,62 +807,52 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                 await asyncio.wait_for(client.connect(), timeout=12)
                 if not await client.is_user_authorized():
                     await client.disconnect()
-                    return name, px_name, [(b, "", False, "not authorized") for b in range(REPORT_BURST)]
+                    return name, px_name, False, "not authorized"
                 entity = await client.get_entity(target_entity)
-                for b in range(REPORT_BURST):
-                    lang, text = texts[idx * REPORT_BURST + b]
-                    try:
-                        await client(ReportPeerRequest(
-                            peer=entity,
-                            reason=reason_cls(),
-                            message=text,
-                        ))
-                        log.info("reported via %s shot%d/%s (proxy: %s)", name, b + 1, lang, px_name)
-                        rows.append((b, lang, True, ""))
-                        ok_shots.append(time.time())
-                    except Exception as e:
-                        log.error("session %s shot%d failed: %s", name, b + 1, e)
-                        rows.append((b, lang, False, f"{type(e).__name__}: {e}"))
-                    await asyncio.sleep(random.uniform(0.4, 1.0))
+                try:
+                    await client(ReportPeerRequest(
+                        peer=entity,
+                        reason=reason_cls(),
+                        message=text,
+                    ))
+                    log.info("reported via %s (proxy: %s)", name, px_name)
+                    ok, err = True, ""
+                except Exception as e:
+                    log.error("session %s report failed: %s", name, e)
+                    ok, err = False, f"{type(e).__name__}: {e}"
                 await client.disconnect()
+                return name, px_name, ok, err
             except Exception as e:
                 log.error("session %s setup failed: %s", name, e)
-                rows = [(b, "", False, f"{type(e).__name__}: {e}") for b in range(REPORT_BURST)]
                 try:
                     if client:
                         await client.disconnect()
                 except Exception:
                     pass
-        if ok_shots:
-            _ledger_add_shots(name, ok_shots)
-        return name, px_name, rows
+                return name, px_name, False, f"{type(e).__name__}: {e}"
 
     outs = await asyncio.gather(*[session_worker(s, i) for i, s in enumerate(sessions)])
-    _ledger_flush_async()
+
     real_lines = []
-    for sname, px_name, rows in outs:
-        for b, lang, ok, err in rows:
-            results["ok" if ok else "fail"] += 1
-            results["details"].append({
-                "name": sname, "proxy": px_name, "ok": ok, "err": err,
-            })
-            real_lines.append(
-                f"{'✅' if ok else '❌'} <code>{sname}</code> shot{b + 1}"
-                + (f" [{lang}]" if lang else "")
-                + f" | {html_mod.escape(px_name)}"
-                + (f" | {html_mod.escape(err)}" if err else ""))
+    for name, px_name, ok, err in outs:
+        results["ok" if ok else "fail"] += 1
+        results["details"].append({
+            "name": name, "proxy": px_name, "ok": ok, "err": err,
+        })
+        real_lines.append(
+            f"{'✅' if ok else '❌'} <code>{name}</code>"
+            f" | {html_mod.escape(px_name)}"
+            + (f" | {html_mod.escape(err)}" if err else ""))
 
     # REAL log of this send → Logs channel, then mask the user view
     await push_send_log(
         "Report (сессии)",
         [f"🎯 {html_mod.escape(str(target_entity))}"
          + (f" #{msg_id}" if msg_id else "")
-         + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}"
-         + f"  💬 шаблон: {'своя' if comment else 'авто-пул'}"
-         ] + real_lines)
+         + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}"]
+        + real_lines)
 
-    # mask results in simulate-fake structure: keep "total" real but pad out details to 10-16 fake entries
-    # while keeping counts consistent with names+errors stripped
+    # mask results in simulate-fake structure — unchanged
     fake = _fake_session_rows()
     results["details"] = [
         {"name": fk["name"], "proxy": fk["proxy"], "ok": True, "err": ""}
