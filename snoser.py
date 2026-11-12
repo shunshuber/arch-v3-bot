@@ -2346,6 +2346,7 @@ async def addsess_file_wrongtype(msg: Message, state: FSMContext):
     await msg.answer("❌ Это не документ .session. Жду файл.", parse_mode=ParseMode.HTML)
 
 
+@router.callback_query(F.data == "back:home")
 async def back_home(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     cl = data.get("client")
