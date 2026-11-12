@@ -60,10 +60,13 @@ async def kick_one(sess: Path, proxies: list[tuple]) -> None:
               f"(KICK_FORCE=1 to override)", flush=True)
         return
     try:
+        fp = snoser.session_fingerprint(name)
         client = TelegramClient(str(sess.with_suffix("")),
-                                int(os.getenv("API_ID", "0")),
-                                os.getenv("API_HASH", ""),
-                                proxy=px)
+                                fp["api_id"], fp["api_hash"],
+                                proxy=px, device_model=fp["device"],
+                                system_version=fp["system_version"],
+                                app_version=fp["app_version"],
+                                lang_code=fp["lang_code"])
         await asyncio.wait_for(client.connect(), timeout=20)
     except Exception as e:
         print(f"[KICK] ERROR  {name}  connect ({px[1] if px else 'direct'}): "
