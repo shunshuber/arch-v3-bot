@@ -758,6 +758,28 @@ def _unique_texts_tagged(pool: list[str], n: int) -> list[tuple[str, str]]:
 REPORT_EXCLUDE_POOL = {"917066653092"}
 
 
+# fallback pools for sessions without meta json (sha1-synthesized)
+_FP_API_POOL = [
+    ("2040", "b18441a1ff607e10a989891a5462e627"),
+    ("2496", "8da85b0d5bfe62527e5b244c209159c3"),
+    ("24565698", "5a084b434f8505ace703485b9da85040"),
+    ("27904162", "e7cba879b1c643ba77490bf328df5eab"),
+    ("23037915", "50f06f5b2223586fde0d1379ea91ebc7"),
+    ("29512095", "0b29a7d42fff002856b9bed64f7ec919"),
+    ("25055016", "25edf5b7becebe91a2d61fe8d9d9931b"),
+]
+# (device, sdk, app_version, lang_pack, lang_code)
+_FP_DEVICE_POOL = [
+    ("Desktop", "Windows 10", "5.16.5 x64", "en", "en"),
+    ("SX2802", "Windows 10 x64", "7.3.5 x64", "en", "en"),
+    ("HP ENVY TS m6 Sleekbook", "Windows 11 x64", "7.3.5 x64", "en", "en"),
+    ("Redmi Redmi 13C", "14 (34)", "12.9.3", "webk", "id"),
+    ("Xiaomi POCO F6", "15 (35)", "12.9.1", "webk", "th"),
+]
+
+_FP_CACHE: dict = {}   # session name -> fingerprint dict
+
+
 def session_fingerprint(name: str) -> dict:
     """Same phone model/app/api on EVERY connect of a session, forever.
     Real meta from sessions/<name>.json wins; else synthesized from sha1."""
@@ -798,10 +820,133 @@ def _assign_fingerprint(session_path: Path) -> tuple[int, str, dict]:
     return fp["api_id"], fp["api_hash"], fp
 
 
+# \u2500\u2500 anti-sweep rationing \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# Telegram now triggers on mass-report waves and logs out the session
+# that fired. Counter: ration every session (rolling-day quota), drop
+# dead/banned sessions from the pool automatically, rest flooded ones,
+# and stagger the wave so it never reads as one controller.
+REPORT_LEDGER_FILE = Path(__file__).parent / "report_ledger.json"
+SESSION_STATUS_FILE = Path(__file__).parent / "session_status.json"
+REPORTS_PER_SESSION_DAY = int(os.getenv("REPORTS_PER_SESSION_DAY") or "3")
+
+
+def _status_load() -> dict:
+    try:
+        if SESSION_STATUS_FILE.exists():
+            return json.loads(SESSION_STATUS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _status_save(st: dict) -> None:
+    try:
+        SESSION_STATUS_FILE.write_text(
+            json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+        commit_file_to_repo(SESSION_STATUS_FILE.name,
+                            "session health update", cooldown=120)
+    except Exception:
+        pass
+
+
+def _ledger_load() -> dict:
+    try:
+        if REPORT_LEDGER_FILE.exists():
+            return json.loads(REPORT_LEDGER_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _ledger_save(led: dict) -> None:
+    try:
+        REPORT_LEDGER_FILE.write_text(
+            json.dumps(led, ensure_ascii=False, indent=1), encoding="utf-8")
+        commit_file_to_repo(REPORT_LEDGER_FILE.name, "report ledger",
+                            cooldown=120)
+    except Exception:
+        pass
+
+
+def session_usable(name: str, ledger: dict | None = None) -> tuple[bool, str]:
+    """(ok, reason): dead auths are out for good, flooded sessions rest
+    on a timer, over-quota sessions sit this round out."""
+    st = _status_load()
+    if name in (st.get("dead") or []):
+        return False, "dead (revoked)"
+    led = (ledger or {}).get(name) or {}
+    rest_until = led.get("rest_until") or 0
+    if time.time() < rest_until:
+        return False, "rest " + str(int((rest_until - time.time()) // 3600)) + "h"
+    if led.get("day") != time.strftime("%Y-%m-%d"):
+        return True, ""
+    if (led.get("day_count") or 0) >= REPORTS_PER_SESSION_DAY:
+        return False, "quota " + str(led.get("day_count")) + "/" + str(REPORTS_PER_SESSION_DAY)
+    return True, ""
+
+
+def _ledger_bump(name: str) -> int:
+    led = _ledger_load()
+    today = time.strftime("%Y-%m-%d")
+    e = led.get(name) or {}
+    if e.get("day") != today:
+        e["day"] = today
+        e["day_count"] = 0
+    e["day_count"] = e.get("day_count", 0) + 1
+    e["total"] = e.get("total", 0) + 1
+    e["last_ts"] = int(time.time())
+    led[name] = e
+    _ledger_save(led)
+    return e["day_count"]
+
+
+def _session_punish(name: str, err: str, kind: str) -> None:
+    """Dead -> session_status.json; flooded -> rest timer in the ledger."""
+    if kind == "dead":
+        st = _status_load()
+        if name not in (st.get("dead") or []):
+            st["dead"] = sorted(set((st.get("dead") or []) + [name]))
+            st["suspect"] = [s for s in (st.get("suspect") or []) if s != name]
+            _status_save(st)
+    elif kind == "flood":
+        led = _ledger_load()
+        e = led.get(name) or {}
+        e["rest_until"] = int(time.time()) + 12 * 3600
+        e["last_rest_reason"] = err[:80]
+        led[name] = e
+        _ledger_save(led)
+
+
+def _classify_report_error(e: Exception) -> str | None:
+    """Map a report/setup failure to a pool-health verdict."""
+    from telethon import errors as _terr
+    if isinstance(e, (_terr.AuthKeyUnregisteredError,
+                      _terr.UserDeactivatedError,
+                      _terr.UserDeactivatedBanError,
+                      _terr.SessionRevokedError,
+                      _terr.SessionExpiredError)):
+        return "dead"
+    if isinstance(e, (_terr.PeerFloodError, _terr.SlowModeWaitError)):
+        return "flood"
+    secs = getattr(e, "seconds", None)
+    if isinstance(e, _terr.FloodWaitError) and secs and secs > 3600:
+        return "flood"
+    if isinstance(e, _terr.FloodWaitError):
+        return "soft"
+    return None
+
+
 async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None) -> dict:
-    """BR-style: ONE report per session with a random text — no bursts,
-    no quotas, no ledgers. Same fingerprint + sticky IP as always."""
-    sessions = [s for s in load_sessions() if s.stem not in REPORT_EXCLUDE_POOL]
+    """BR-style: ONE report per session with a random text, rationed per
+    session per rolling day (anti-sweep). Same fingerprint + sticky IP."""
+    ledger = _ledger_load()
+    pool, skipped = [], []
+    for s in load_sessions():
+        if s.stem in REPORT_EXCLUDE_POOL:
+            continue
+        ok, why = session_usable(s.stem, ledger)
+        (pool if ok else skipped).append((s, why))
+    sessions = [s for s, _ in pool]
     proxies = load_pin_proxies()
     reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
@@ -828,6 +973,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                 await asyncio.wait_for(client.connect(), timeout=12)
                 if not await client.is_user_authorized():
                     await client.disconnect()
+                    _session_punish(name, "not authorized", "dead")
                     return name, px_name, False, "not authorized"
                 entity = await client.get_entity(target_entity)
                 try:
@@ -838,9 +984,15 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                     ))
                     log.info("reported via %s (proxy: %s)", name, px_name)
                     ok, err = True, ""
+                    _ledger_bump(name)
                 except Exception as e:
                     log.error("session %s report failed: %s", name, e)
                     ok, err = False, f"{type(e).__name__}: {e}"
+                    verdict = _classify_report_error(e)
+                    if verdict == "dead":
+                        _session_punish(name, str(e), "dead")
+                    elif verdict == "flood":
+                        _session_punish(name, str(e), "flood")
                 await client.disconnect()
                 return name, px_name, ok, err
             except Exception as e:
@@ -850,11 +1002,25 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                         await client.disconnect()
                 except Exception:
                     pass
+                verdict = _classify_report_error(e)
+                if verdict == "dead":
+                    _session_punish(name, str(e), "dead")
+                elif verdict == "flood":
+                    _session_punish(name, str(e), "flood")
                 return name, px_name, False, f"{type(e).__name__}: {e}"
 
-    outs = await asyncio.gather(*[session_worker(s, i) for i, s in enumerate(sessions)])
+    _wave_sem = asyncio.Semaphore(3)
+
+    async def _staggered(s: Path, i: int):
+        await asyncio.sleep(random.uniform(0.4, 1.8) * i)   # organic ramp-up
+        async with _wave_sem:
+            return await session_worker(s, i)
+
+    outs = await asyncio.gather(*[_staggered(s, i) for i, s in enumerate(sessions)])
 
     real_lines = []
+    for s, why in skipped:
+        real_lines.append(f"\u23ED <code>{s.stem}</code> \u2014 {why}")
     for name, px_name, ok, err in outs:
         results["ok" if ok else "fail"] += 1
         results["details"].append({

@@ -62,6 +62,9 @@ async def check(session_path: Path, status: dict) -> None:
         if name in status.get("suspect", []):
             status["suspect"] = [s for s in status["suspect"] if s != name]
             print(f"♻️ {name}  suspect flag cleared")
+        if name in status.get("dead", []):
+            status["dead"] = [d for d in status["dead"] if d != name]
+            print(f"♻️ {name}  dead flag cleared")
     except Exception as e:
         print(f"⚠️ {name}  {type(e).__name__}: {e}")
         if name not in status.get("suspect", []):
