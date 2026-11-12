@@ -2344,8 +2344,6 @@ def kb_methods() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=short[b], callback_data=f"method:{b}"),
         ])
     rows.append([InlineKeyboardButton(
-        text=short["bank"], callback_data="method:bank")])
-    rows.append([InlineKeyboardButton(
         text=short["session"], callback_data="method:session")])
     rows.append([InlineKeyboardButton(
         text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")])
