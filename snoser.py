@@ -1978,7 +1978,7 @@ def kb_reasons() -> InlineKeyboardMarkup:
         row = []
         for k, v in items[i:i + 2]:
             row.append(InlineKeyboardButton(
-                text=f"{v['e']} {v['l']}", callback_data=f"reason:{k}"))
+                text=v['l'], callback_data=f"reason:{k}"))
         rows.append(row)
     rows.append([InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:methods")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
