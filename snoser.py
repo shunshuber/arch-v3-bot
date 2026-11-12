@@ -2395,10 +2395,15 @@ def summary_text(data: dict) -> str:
     ]
     if t.get("msg_id"):
         lines.append(f"\U0001f4e8 <b>ID:</b>  <code>#{t['msg_id']}</code>")
-    lines += [
-        f"\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b>  {r['e']} {r['l']}",
-        f"\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b>  {c}",
-    ]
+    if data["method"] == "code":
+        # code-flood sends login codes, not complaints — no reason/text here
+        lines.append("\U0001f4f2 \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u044e <b>25 \u043a\u043e\u0434\u043e\u0432 \u0432\u0445\u043e\u0434\u0430</b> \u043d\u0430 \u043d\u043e\u043c\u0435\u0440.")
+        lines.append("\U0001f501 \u0427\u0435\u0440\u0435\u0437 \u0430\u043d\u043e\u043d\u0438\u043c\u043d\u044b\u0435 \u0441\u0435\u0441\u0441\u0438\u0438 + \u043f\u043b\u0430\u0442\u043d\u044b\u0435 \u043f\u0440\u043e\u043a\u0441\u0438 — \u043f\u0443\u043b \u043d\u0435 \u0436\u0436\u0451\u0442\u0441\u044f.")
+    else:
+        lines += [
+            f"\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b>  {r['e']} {r['l']}",
+            f"\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b>  {c}",
+        ]
     return "\n".join(lines)
 
 
@@ -3952,7 +3957,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     # resolved here so the pool log shows the real payload, not "нет"
     c_display = c
     if not c_display:
-        c_display = pick_comment(data["reason"], data["method"])
+        if data["method"] == "code":
+            c_display = "\u043a\u043e\u0434\u044b \u0432\u0445\u043e\u0434\u0430 (\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430 \u0436\u0430\u043b\u043e\u0431\u044b)"
+        else:
+            c_display = pick_comment(data["reason"], data["method"])
     unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a" if is_web else "\u0437\u0430\u043f\u0443\u0441\u043a\u043e\u0432"
     tgt_raw = t["raw"]
     esc_raw = html_mod.escape(tgt_raw)
@@ -4009,6 +4017,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
 
     # ── loading animation while workers run ──
+    is_code = data["method"] == "code"
+    act_label = ("\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u043a\u043e\u0434\u043e\u0432 \u0432\u0445\u043e\u0434\u0430..."
+                 if is_code else "\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u0436\u0430\u043b\u043e\u0431\u044b...")
     sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
     started = asyncio.get_event_loop().time()
     i = 0
@@ -4018,9 +4029,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         anim = (
             bq(f"<b>{NAME}</b>  \u2014  \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430")
             + "\n\n"
-            + f"<b>{frame}</b> \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u0436\u0430\u043b\u043e\u0431\u044b...\n\n"
+            + f"<b>{frame}</b> {act_label}\n\n"
             + f"\U0001f3af <code>{esc_raw}</code>\n"
-            + f"\u26a0\ufe0f {r['e']} {r['l']}\n"
+            + ("" if is_code else f"\u26a0\ufe0f {r['e']} {r['l']}\n")
             + f"\u23f1 {elapsed}s"
         )
         try:
@@ -4064,16 +4075,22 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         if not d["ok"] and d["err"]:
             line += f" | {d['err']}"
         log_lines.append(line)
+    if data["method"] == "code":
+        log_lines = [ln for ln in log_lines
+                     if not (ln.startswith("\u041f\u0440\u0438\u0447\u0438\u043d\u0430:")
+                             or ln.startswith("\u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439:"))]
     log_path.write_text("\n".join(log_lines), encoding="utf-8")
 
     # ── final screen ──
-    head = "\u2705 <b>\u0416\u0430\u043b\u043e\u0431\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0430</b>"
+    head = ("\u2705 <b>\u041a\u043e\u0434\u044b \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u044b</b>"
+            if is_code else
+            "\u2705 <b>\u0416\u0430\u043b\u043e\u0431\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0430</b>")
     text = (
         bq(f"<b>{NAME}</b>  \u2014  \u0413\u043e\u0442\u043e\u0432\u043e")
         + "\n\n"
         + head + "\n\n"
         + f"\U0001f3af <code>{esc_raw}</code>\n"
-        + f"\u26a0\ufe0f {r['e']} {r['l']}\n"
+        + ("" if is_code else f"\u26a0\ufe0f {r['e']} {r['l']}\n")
         + f"\u26a1 \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u043e \u0443\u0441\u043f\u0435\u0448\u043d\u043e\n"
         + f"\U0001f552 {ts}"
     )
@@ -4104,13 +4121,16 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         traw = t["raw"]
         uname = cb.from_user.full_name
         uid = cb.from_user.id
+        pool_head = ("\u041a\u043e\u0434-\u0444\u043b\u0443\u0434"
+                     if is_code else "\u041d\u043e\u0432\u0430\u044f \u0436\u0430\u043b\u043e\u0431\u0430")
         pool_text = (
-            bq(f"<b>{NAME}</b>  \u2014  \u041d\u043e\u0432\u0430\u044f \u0436\u0430\u043b\u043e\u0431\u0430")
+            bq(f"<b>{NAME}</b>  \u2014  {pool_head}")
             + f"\n\n\U0001f464 <b>\u041e\u0442:</b> {uname} (<code>{uid}</code>)"
             + f"\n{me} <b>\u041c\u0435\u0442\u043e\u0434:</b> {ml}"
             + f"\n\U0001f3af <b>\u0426\u0435\u043b\u044c:</b> <code>{traw}</code>"
-            + f"\n\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> {re_} {rl}"
-            + f"\n\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b> {comment_text}"
+            + ("" if is_code else
+               f"\n\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> {re_} {rl}"
+               + f"\n\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b> {comment_text}")
             + (probe_note.replace("\n", "", 1) if probe_note else "")
             + f"\n\U0001f4e6 {ok}/{total}"
             + f"\n\U0001f552 {ts}"
