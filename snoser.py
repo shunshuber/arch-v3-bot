@@ -2333,17 +2333,18 @@ async def addsess_qr(cb: CallbackQuery, state: FSMContext):
             img.save(buf, format="PNG")
             buf.seek(0)
             photo = BufferedInputFile(buf.getvalue(), "login_qr.png")
-            await cb.message.answer_photo(photo, caption=(
+            sent = await cb.message.answer_photo(photo, caption=(
                 bq(f"<b>{NAME}</b>  ·  🔳 Вход по QR")
                 + "\n\nОтсканируй код в Telegram <b>на телефоне, где этот аккаунт уже залогинен</b>:"
                 + "\nНастройки → Устройства → Привязать устройство."
-                + "\n\nОкно активно <b>2 минуты</b>. Отмена — ◀ Назад."),
+                + "\n\nОкно активно <b>4 минуты</b>. Отмена — ◀ Назад."),
                 parse_mode=ParseMode.HTML)
         except ImportError:
             await client.disconnect()
             await cb.answer("❌ qrcode не установлен", show_alert=True)
             return
-        await state.update_data(qr_client=client, qr_chat=cb.message.chat.id)
+        await state.update_data(qr_client=client, qr_chat=cb.message.chat.id,
+                                qr_msg_id=getattr(sent, "message_id", None))
         await state.set_state(AddSession.qr_wait)
         asyncio.create_task(_qr_poll(client, state, cb.message.chat.id))
         await cb.answer()
@@ -2356,13 +2357,13 @@ async def addsess_qr(cb: CallbackQuery, state: FSMContext):
 
 
 async def _qr_poll(client, state: FSMContext, chat_id: int) -> None:
-    """Poll exportLoginToken until authorized or 2 minutes pass."""
-    import base64
+    """Poll exportLoginToken; on any outcome EDIT the QR message itself."""
     from telethon.tl.functions import auth as _auth
     from telethon.tl.types import auth as _at
-    deadline = time.time() + 120
+    deadline = time.time() + 240
+    ok = False
     while time.time() < deadline:
-        await asyncio.sleep(3)
+        await asyncio.sleep(2.5)
         data = await state.get_data()
         if data.get("qr_client") is not client:
             return   # user backed out
@@ -2375,6 +2376,7 @@ async def _qr_poll(client, state: FSMContext, chat_id: int) -> None:
         # scanned + confirmed on the phone → loginTokenSuccess wraps Authorization
         if type(result).__name__ in ("LoginTokenSuccess", "Authorization") \
                 and getattr(result, "authorization", None):
+            ok = True
             break
     # finished — resolve account & save
     try:
@@ -2402,22 +2404,27 @@ async def _qr_poll(client, state: FSMContext, chat_id: int) -> None:
         return
     await state.update_data(qr_client=None)
     await state.clear()
+    # reflect the outcome ON the QR photo itself (no stale "scan me" left)
+    try:
+        msg_id = data.get("qr_msg_id")
+        if msg_id and _BOT:
+            cap = (bq(f"<b>{NAME}</b>  ·  ✅ Сессия создана")
+                   + f"\n\n🔳 QR вход прошёл: <b>{uname or me.phone}</b>"
+                   + f"\n🧷 <code>{html_mod.escape(sess_name)}</code> → пул"
+                   + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий")                   if ok else (
+                   bq(f"<b>{NAME}</b>  ·  ⌳ QR не подтвердили")
+                   + "\n\nОкно истекло, пока ждали подтверждение с телефона."
+                   + "\nПодними заново: ➕ Сессия → 🔳")
+            await _BOT.edit_message_caption(chat_id, msg_id, cap,
+                                            parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log.warning("qr edit failed: %s", e)
     set_current_user(f"QR login ({uname or me.phone})")
     await push_send_log(
         "Добавлена сессия (QR)",
         [f"🔳 <code>{session_fingerprint(sess_name)['device']}</code>"
          f" {html_mod.escape(uname or str(me.phone))}",
          f"🧷<code>{html_mod.escape(sess_name)}</code> → пул | всего: {len(load_sessions())}"])
-    try:
-        await _BOT.send_message(
-            chat_id,
-            bq(f"<b>{NAME}</b>  ·  ✅ Сессия создана")
-            + f"\n\n🔳 QR вход прошёл: <b>{uname or me.phone}</b>"
-            + f"\n🧷 <code>{html_mod.escape(sess_name)}</code> → пул"
-            + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий",
-            parse_mode=ParseMode.HTML)
-    except Exception as e:
-        log.warning("qr notify failed: %s", e)
 
 
 @router.message(AddSession.file, F.document)
