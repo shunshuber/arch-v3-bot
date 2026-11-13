@@ -647,28 +647,12 @@ LINK_RE = re.compile(
 )
 
 METHODS = {
-    "message":  {"e": "\U0001f4e8", "l": "\u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435",
-                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u043d\u0430 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435:\n\u2022 <code>t.me/channel/123</code>"},
-    "bot":      {"e": "\U0001f916", "l": "\u0411\u043e\u0442",
-                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 @username \u0431\u043e\u0442\u0430:\n\u2022 <code>@botname</code>"},
-    "profile":  {"e": "\U0001f464", "l": "\u041f\u0440\u043e\u0444\u0438\u043b\u044c",
-                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 @username \u0438\u043b\u0438 \u0441\u0441\u044b\u043b\u043a\u0443:\n\u2022 <code>@username</code>\n\u2022 <code>t.me/username</code>"},
-    "channel":  {"e": "\U0001f4e2", "l": "\u041a\u0430\u043d\u0430\u043b / \u0413\u0440\u0443\u043f\u043f\u0430",
-                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 @:\n\u2022 <code>t.me/channelname</code>\n\u2022 <code>@groupname</code>"},
-    "sticker":  {"e": "\U0001f3ad", "l": "\u0421\u0442\u0438\u043a\u0435\u0440\u043f\u0430\u043a",
-                 "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u043d\u0430 \u0441\u0442\u0438\u043a\u0435\u0440\u043f\u0430\u043a:\n\u2022 <code>t.me/addstickers/name</code>"},
-    "web":      {"e": "\U0001f310", "l": "\u0412\u0435\u0431 (telegram.org/support)",
-                 "hint": "\u0416\u0430\u043b\u043e\u0431\u0430 \u043f\u043e\u0439\u0434\u0451\u0442 \u0447\u0435\u0440\u0435\u0437 \u0432\u0435\u0431-\u0444\u043e\u0440\u043c\u0443 telegram.org/support.\n\u0426\u0435\u043b\u044c \u2014 \u0441\u0441\u044b\u043b\u043a\u0430 \u0438\u043b\u0438 @username:\n\u2022 <code>t.me/channelname</code>\n\u2022 <code>@username</code>"},
     "web":      {"e": "\U0001f310", "l": "Web",
                  "hint": "\u0412\u0441\u0442\u0430\u0432\u044c\u0442\u0435 \u0441\u0441\u044b\u043b\u043a\u0443 \u0438\u043b\u0438 @username:\n\u2022 <code>t.me/username</code>\n\u2022 <code>@username</code>"},
-    "session":  {"e": "\U0001f480", "l": "\u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
-                  "hint": "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 username \u0438 \u043d\u043e\u043c\u0435\u0440 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430 \u0436\u0435\u0440\u0442\u0432\u044b."},
-    "code":     {"e": "\U0001f4f1", "l": "\u041a\u043e\u0434-\u0444\u043b\u0443\u0434",
-                  "hint": "\u0412\u0432\u0435\u0434\u0438 \u043d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b:\n\u2022 <code>+79991234567</code>"},
     "bank":     {"e": "\U0001f3e6", "l": "\u0411\u0430\u043d\u043a (115-\u0424\u0417)",
                   "hint": "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B \u043F\u043E 115-\u0424\u0417."},
     "mail":     {"e": "\U0001f4e7", "l": "Mail (abuse)",
-                  "hint": "\u0416\u0430\u043b\u043e\u0431\u044b \u043F\u0438\u0441\u044C\u043C\u0430\u043C\u0438 \u043D\u0430 abuse/support/dmca/stopCA@telegram.org\n\u2022 \u0442\u0435\u043C\u0430 \u043F\u0438\u0441\u044C\u043C\u0430\n\u2022 \u0442\u0435\u043A\u0441\u0442 \u043F\u0438\u0441\u044C\u043C\u0430"},
+                  "hint": "\u0416\u0430\u043B\u043E\u0431\u044B \u043F\u0438\u0441\u044C\u043C\u0430\u043C\u0438 \u043D\u0430 abuse/support/dmca/stopCA@telegram.org\n\u2022 \u0442\u0435\u043C\u0430 \u043F\u0438\u0441\u044C\u043C\u0430\n\u2022 \u0442\u0435\u043A\u0441\u0442 \u043F\u0438\u0441\u044C\u043C\u0430"},
 }
 
 
@@ -2519,33 +2503,19 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
 
 
 def kb_methods() -> InlineKeyboardMarkup:
-    grid_pairs = [("message", "bot"), ("profile", "sticker"),
-                  ("channel", "web"), ("code", "bank")]
     short = {
-        "message":  "\U0001f4e8 \u0421\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435",
-        "bot":      "\U0001f916 \u0411\u043e\u0442",
-        "profile":  "\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c",
-        "sticker":  "\U0001f3ad \u0421\u0442\u0438\u043a\u0435\u0440",
-        "channel":  "\U0001f4e2 \u041a\u0430\u043d\u0430\u043B",
         "web":      "\U0001f310 Web",
-        "session":  "\U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
-        "code":     "\U0001f4f1 \u041a\u043e\u0434-\u0444\u043b\u0443\u0434",
         "bank":     "\U0001f3e6 \u0411\u0430\u043d\u043a",
         "mail":     "\U0001f4e7 Mail",
     }
-    rows = []
-    for a, b in grid_pairs:
-        rows.append([
-            InlineKeyboardButton(text=short[a], callback_data=f"method:{a}"),
-            InlineKeyboardButton(text=short[b], callback_data=f"method:{b}"),
-        ])
-    rows.append([InlineKeyboardButton(
-        text=short["mail"], callback_data="method:mail")])
-    rows.append([InlineKeyboardButton(
-        text=short["session"], callback_data="method:session")])
-    rows.append([InlineKeyboardButton(
-        text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")])
+    rows = [
+        [InlineKeyboardButton(text=short["web"], callback_data="method:web"),
+         InlineKeyboardButton(text=short["mail"], callback_data="method:mail")],
+        [InlineKeyboardButton(text=short["bank"], callback_data="method:bank")],
+        [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 
 def kb_reasons() -> InlineKeyboardMarkup:
@@ -2717,24 +2687,6 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
         return
     await state.update_data(method=key)
     m = METHODS[key]
-    if key == "code":
-        # code-flood has no reason step — pin a default so the confirm
-        # screen and the pool log can resolve reason-dependent fields
-        await state.update_data(reason="spam")
-        await cb.message.edit_caption(
-            caption=(
-                bq(f"<b>{NAME}</b>")
-                + f"\n\n\U0001f4f1 <b>{m['l']}</b>\n\n"
-                + "\U0001f4f2 \u041f\u0440\u0438\u0448\u043B\u0438 <b>\u043D\u043E\u043C\u0435\u0440</b> \u0436\u0435\u0440\u0442\u0432\u044B:\n\u2022 <code>+79991234567</code>"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
-            ]),
-        )
-        await state.set_state(Report.target)
-        await cb.answer()
-        return
     if key == "mail":
         await state.update_data(reason="spam")
         await cb.message.edit_caption(
@@ -2768,19 +2720,6 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
             ]),
         )
         await state.set_state(Report.bank)
-        await cb.answer()
-        return
-    if key == "session":
-        await cb.message.edit_caption(
-            caption=(
-                bq(f"<b>{NAME}</b>")
-                + "\n\n\U0001f480 <b>\u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439</b>\n\n"
-                + "\U0001f4f1 \u041e\u0442\u043f\u0440\u0430\u0432\u044c <b>\u043d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b:</b>\n\u2022 <code>+79991234567</code>"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_snos_back(),
-        )
-        await state.set_state(Snos.phone)
         await cb.answer()
         return
     await cb.message.edit_caption(
