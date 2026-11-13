@@ -77,8 +77,21 @@ async def kick_one(sess: Path, proxies: list[tuple]) -> None:
             print(f"[KICK] DEAD   {name}  not authorized", flush=True)
             return
         auths = await client(functions.account.GetAuthorizationsRequest())
-        foreign = [a for a in auths.authorizations
-                   if not getattr(a, "current", False)]
+        # never kick our own pool sessions/twins (same account, other
+        # api_id/device) — the twin is the watchdog's revive channel
+        keep_devs = set()
+        for s in snoser.load_sessions():
+            sfp = snoser.session_fingerprint(s.stem)
+            keep_devs.add(sfp["device"])
+        foreign = []
+        for a in auths.authorizations:
+            if getattr(a, "current", False):
+                continue
+            if getattr(a, "device_model", "") in keep_devs:
+                print(f"[KICK] KEEP   {getattr(a, 'device_model', '?')} "
+                      f"(pool session/twin)", flush=True)
+                continue
+            foreign.append(a)
         print(f"[KICK] {name}: {len(auths.authorizations)} auth(s) total, "
               f"{len(foreign)} foreign", flush=True)
         for a in foreign:
