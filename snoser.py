@@ -1294,13 +1294,13 @@ async def mail_bulk_send(subject: str, text: str, from_user) -> dict:
          f"✅ {ok_n}/{len(rows)} доставлено"]
         + real_rows)
 
-    fake = _fake_session_rows(random.randint(10, 16))
-    return {"ok": len(fake), "fail": 0, "total": len(fake),
-            "details": [{"name": f["name"], "proxy": f["proxy"], "ok": True,
-                         "err": ""} for f in fake]}
+    # real counts — mail delivery is the payload, user sees the truth
+    return {"ok": ok_n, "fail": len(rows) - ok_n, "total": len(rows),
+            "details": [{"name": r["from"], "proxy": r["to"],
+                         "ok": r["ok"], "err": r["err"]} for r in rows]}
 
 
-# ── BR bot-method: target whitelist + probe ──\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# ── BR bot-method: target whitelist + probe ───────────
 WHITELIST_FILE = Path(__file__).parent / "target_whitelist.json"
 
 # what a captcha-gated bot answers on /start (BR FAST_KD_KEYWORD)
@@ -4211,7 +4211,12 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             c_display = "\u043a\u043e\u0434\u044b \u0432\u0445\u043e\u0434\u0430 (\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430 \u0436\u0430\u043b\u043e\u0431\u044b)"
         else:
             c_display = pick_comment(data["reason"], data["method"])
-    unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a" if is_web else "\u0437\u0430\u043f\u0443\u0441\u043a\u043e\u0432"
+    if is_web:
+        unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a"
+    elif data["method"] == "mail":
+        unit_name = "\u043f\u0438\u0441\u0435\u043c"
+    else:
+        unit_name = "\u0437\u0430\u043f\u0443\u0441\u043a\u043e\u0432"
     tgt_raw = t["raw"]
     esc_raw = html_mod.escape(tgt_raw)
 
@@ -4331,7 +4336,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         if not d["ok"] and d["err"]:
             line += f" | {d['err']}"
         log_lines.append(line)
-    if data["method"] == "code":
+    if data["method"] in ("code", "mail"):
         log_lines = [ln for ln in log_lines
                      if not (ln.startswith("\u041f\u0440\u0438\u0447\u0438\u043d\u0430:")
                              or ln.startswith("\u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439:"))]
