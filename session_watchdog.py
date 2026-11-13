@@ -364,16 +364,19 @@ async def watch_once(revive_dead: bool = True) -> dict:
     report = {"alive": [], "dead": [], "suspect": [],
               "revived": [], "twin_created": [], "errors": []}
 
-    # 1) probe everything
+    # 1) probe everything (parallel, throttled)
     verdicts: dict[str, str] = {}
     info: dict[str, str] = {}
-    for s in snoser.load_sessions():
-        name = s.stem
-        if name.startswith("."):
-            continue
-        if name in TWIN_EXCLUDE:
-            continue
-        v, i = await probe(name)
+    sess_names = [s.stem for s in snoser.load_sessions()
+                  if not s.stem.startswith(".")]
+    sem = asyncio.Semaphore(6)
+
+    async def _probe_one(name: str):
+        async with sem:
+            return name, await probe(name)
+
+    for name, (v, i) in await asyncio.gather(*[_probe_one(n)
+                                              for n in sess_names]):
         verdicts[name], info[name] = v, i
         if v == "alive":
             report["alive"].append(name)
