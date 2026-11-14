@@ -25,12 +25,17 @@ jobs:
           tok = os.environ["BOT_TOKEN"]
           chat = os.environ["LOGS_CHAT_ID"]
           eid = "5357069174512303778"   # ✅ from tgmacicons
-          text = '<tg-emoji emoji-id="%s">✅</tg-emoji> test custom emoji send' % eid
+          text = "✅ test custom emoji send"
 
           payload = {
               "chat_id": chat,
               "text": text,
-              "parse_mode": "HTML",
+              "entities": [{
+                  "type": "custom_emoji",
+                  "offset": 0,
+                  "length": 1,
+                  "custom_emoji_id": eid,
+              }],
           }
           req = urllib.request.Request(
               f"https://api.telegram.org/bot{tok}/sendmessage",
