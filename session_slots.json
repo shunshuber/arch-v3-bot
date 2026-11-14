@@ -1,6 +1,12 @@
 {
  "version": 1,
- "accounts": {},
+ "accounts": {
+  "+255670074052": [
+   "272120931"
+  ]
+ },
  "last_revive": {},
- "last_bootstrap": {}
+ "last_bootstrap": {
+  "+255670074052": 1794643334.5512064
+ }
 }
