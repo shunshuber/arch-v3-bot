@@ -44,4 +44,20 @@ jobs:
           with urllib.request.urlopen(req, timeout=30) as r:
               res = json.load(r)
           print("RESULT:", json.dumps(res, ensure_ascii=False)[:600])
+
+          # forward echo: does the stored message keep the custom entity?
+          fwd = {
+              "chat_id": chat,
+              "from_chat_id": chat,
+              "message_id": res["result"]["message_id"],
+          }
+          req2 = urllib.request.Request(
+              f"https://api.telegram.org/bot{tok}/forwardmessage",
+              data=json.dumps(fwd).encode(),
+              headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(req2, timeout=30) as r:
+              res2 = json.load(r)
+          ent = res2.get("result", {}).get("entities")
+          print("FORWARD entities:", json.dumps(ent, ensure_ascii=False))
+          print("FORWARD full:", json.dumps(res2, ensure_ascii=False)[:400])
           PY
