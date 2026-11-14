@@ -10,50 +10,51 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Find xRocket Pay API docs and endpoints
+      - name: Extract xRocket Pay API endpoints from docs
         run: |
           python - <<'PY'
-          import json, os, re, urllib.request, urllib.error
+          import re, urllib.request
 
-          def get(url, headers=None):
-              req = urllib.request.Request(url, headers=headers or
-                                           {"User-Agent": "Mozilla/5.0"})
+          def get(url):
+              req = urllib.request.Request(url,
+                                           headers={"User-Agent":
+                                                    "Mozilla/5.0"})
+              with urllib.request.urlopen(req, timeout=25) as r:
+                  return r.read().decode("utf-8", errors="replace")
+
+          print("=== sitemap pages ===")
+          sm = get("https://docs.xrocket.tg/sitemap.xml")
+          urls = re.findall(r"<loc>(.*?)</loc>", sm)
+          for u in urls:
+              print("-", u)
+
+          print()
+          print("=== pay/api related pages: endpoint lines ===")
+          for u in urls:
+              if not re.search(r"pay|api", u, re.I):
+                  continue
               try:
-                  with urllib.request.urlopen(req, timeout=25) as r:
-                      return r.status, r.read().decode("utf-8",
-                                                       errors="replace")
-              except urllib.error.HTTPError as e:
-                  return e.code, e.read().decode("utf-8",
-                                                 errors="replace")
+                  page = get(u)
               except Exception as e:
-                  return 0, repr(e)
-
-          print("=== docs candidates ===")
-          for url in ["https://pay.api.xrocket.exchange/docs-json",
-                      "https://pay.api.xrocket.exchange/docs",
-                      "https://pay.xrocket.tg/docs-json",
-                      "https://pay.xrocket.tg/docs",
-                      "https://wiki.xrocket.tg/",
-                      "https://docs.xrocket.tg/"]:
-              s, b = get(url)
-              print(url, "->", s, "len:", len(b))
-              if s == 200 and len(b) < 400000:
-                  print(b[:600].replace("\n", " ")[:600])
-              print("---")
-
-          print("=== DDG: xrocket pay api ===")
-          s, b = get("https://html.duckduckgo.com/html/?q=" +
-                     "xrocket+pay+api+create+invoice+documentation")
-          for m in re.finditer(r'result__a[^>]*>(.*?)</a>', b):
-              print("-", re.sub(r"<[^>]+>", "", m.group(1))[:110])
-          for m in re.finditer(r'class="result__snippet"[^>]*>(.*?)</a>',
-                               b, re.S):
-              t = re.sub(r"<[^>]+>", " ", m.group(1))
-              print("  ", re.sub(r"\s+", " ", t)[:180])
+                  print("FAIL", u, e)
+                  continue
+              text = re.sub(r"<script.*?</script>", " ", page, flags=re.S)
+              text = re.sub(r"<[^>]+>", " ", text)
+              text = re.sub(r"\s+", " ", text)
+              keep = []
+              for m in re.finditer(
+                      r".{80}(https://[^\s]*api[^\s]*|/api/v\d[^\s]*"
+                      r"|Bearer|Authorization|GET |POST |base.?url)"
+                      r".{140}", text, re.I):
+                  w = m.group(0).strip()
+                  if w not in keep:
+                      keep.append(w)
+              if keep:
+                  print("PAGE", u)
+                  for w in keep[:18]:
+                      print("  ...", w, "...")
           PY
