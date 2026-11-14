@@ -2567,8 +2567,8 @@ def kb_snos_back() -> InlineKeyboardMarkup:
 
 def kb_snos_confirm() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\U0001f480 \u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c", callback_data="snosrun:yes"),
-         InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="snosrun:no")],
+        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5267123797600783095", callback_data="snosrun:yes"),
+         InlineKeyboardButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", icon_custom_emoji_id="5267123797600783095", callback_data="snosrun:no")],
     ])
 
 
@@ -2606,31 +2606,36 @@ def parse_target(text: str) -> dict:
 
 def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="\U0001f680 \u0417\u0430\u043f\u0443\u0441\u043a", callback_data="menu:launch")],
-        [InlineKeyboardButton(text="\U0001f464 \u041f\u0440\u043e\u0444\u0438\u043b\u044c", callback_data="menu:profile"),
-         InlineKeyboardButton(text="\U0001f4b3 \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", callback_data="menu:subs")],
-        [InlineKeyboardButton(text="\U0001f381 \u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", callback_data="menu:refs")],
-        [InlineKeyboardButton(text="\U0001f76c \u0417\u0435\u0440\u043a\u0430\u043b\u0430", callback_data="menu:mirror_list")],
+        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u043a", icon_custom_emoji_id="5323404142809467476", callback_data="menu:launch")],
+        [InlineKeyboardButton(text="\u041f\u0440\u043e\u0444\u0438\u043b\u044c", icon_custom_emoji_id="5256143829672672750", callback_data="menu:profile"),
+         InlineKeyboardButton(text="\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", icon_custom_emoji_id="5258204546391351475", callback_data="menu:subs")],
+        [InlineKeyboardButton(text="\u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", icon_custom_emoji_id="5298988357538328017", callback_data="menu:refs")],
+        [InlineKeyboardButton(text="\u0417\u0435\u0440\u043a\u0430\u043b\u0430", icon_custom_emoji_id="5258254475386167466", callback_data="menu:mirror_list")],
     ]
 
     if ADMIN_ID and user_id == int(ADMIN_ID):
         rows.append([InlineKeyboardButton(text="\U0001f4e1 \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", callback_data="menu:telemetry"),
                      InlineKeyboardButton(text="\U0001f511 \u0412\u044b\u0434\u0430\u0442\u044c", callback_data="menu:grant")])
-        rows.append([InlineKeyboardButton(text="➕ Сессия", callback_data="menu:addsess")])
-    rows.append([InlineKeyboardButton(text="\u2753 \u0418\u043d\u0444\u043e", callback_data="menu:info")])
+        rows.append([InlineKeyboardButton(text="Сессия", icon_custom_emoji_id="5359529383319084413", callback_data="menu:addsess")])
+    rows.append([InlineKeyboardButton(text="\u0418\u043d\u0444\u043e", icon_custom_emoji_id="5258503720928288433", callback_data="menu:info")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_methods() -> InlineKeyboardMarkup:
     short = {
-        "web":      "\U0001f310 Web",
-        "bank":     "\U0001f3e6 \u0411\u0430\u043d\u043a",
-        "mail":     "\U0001f4e7 Mail",
+        "web":      "Web",
+        "bank":     "Банк",
+        "mail":     "Mail",
+    }
+    short_icons = {
+        "web":      "5258423306255604960",
+        "bank":     "5258204546391351475",
+        "mail":     "5260268501515377807",
     }
     rows = [
-        [InlineKeyboardButton(text=short["web"], callback_data="method:web"),
-         InlineKeyboardButton(text=short["mail"], callback_data="method:mail")],
-        [InlineKeyboardButton(text=short["bank"], callback_data="method:bank")],
+        [InlineKeyboardButton(text=short["web"], icon_custom_emoji_id=short_icons["web"], callback_data="method:web"),
+         InlineKeyboardButton(text=short["mail"], icon_custom_emoji_id=short_icons["mail"], callback_data="method:mail")],
+        [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank")],
         [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -2659,8 +2664,8 @@ def kb_skip() -> InlineKeyboardMarkup:
 
 def kb_confirm() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u2705 \u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c", callback_data="confirm:yes"),
-         InlineKeyboardButton(text="\u274c \u041e\u0442\u043c\u0435\u043d\u0430", callback_data="confirm:no")],
+        [InlineKeyboardButton(text="\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c", icon_custom_emoji_id="5357069174512303778", callback_data="confirm:yes"),
+         InlineKeyboardButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", icon_custom_emoji_id="5267123797600783095", callback_data="confirm:no")],
     ])
 
 
@@ -2883,10 +2888,10 @@ async def menu_refs(cb: CallbackQuery, state: FSMContext):
         + "\n\n<i>Твоя ссылка:</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📤 Поделиться ссылкой",
+        InlineKeyboardButton(text="Поделиться ссылкой", icon_custom_emoji_id="5260268501515377807",
                              url=f"https://t.me/share/url?url={link}&text=Arch%20V3%20-%20жалобы%20и%20сброс%20сессий"),
     ], [
-        InlineKeyboardButton(text="🔄 Проверить заново", callback_data="menu:refs"),
+        InlineKeyboardButton(text="Проверить заново", icon_custom_emoji_id="5260687119092817530", callback_data="menu:refs"),
         InlineKeyboardButton(text="◀ Назад", callback_data="back:home"),
     ]])
     await cb.message.edit_caption(caption=_cx(text), parse_mode=ParseMode.HTML,
@@ -3207,9 +3212,9 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📄 Загрузить файлом",
+            [InlineKeyboardButton(text="Загрузить файлом", icon_custom_emoji_id="5258477770735885832",
                                   callback_data="addsess:file")],
-            [InlineKeyboardButton(text="🧬 Пересадка (мойка BR)",
+            [InlineKeyboardButton(text="Пересадка (мойка BR)", icon_custom_emoji_id="5258486128742244085",
                                   callback_data="addsess:trans")],
             [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
         ]))
@@ -3764,7 +3769,7 @@ async def menu_mirror_list(cb: CallbackQuery, state: FSMContext):
     mirrors = list_mirrors_for(cb.from_user.id)
     kb_rows = [[InlineKeyboardButton(
         text=f"🪞 @{m['username']}", url=f"https://t.me/{m['username']}")] for m in mirrors]
-    kb_rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="menu:mirror_add")])
+    kb_rows.append([InlineKeyboardButton(text="Добавить", icon_custom_emoji_id="5359529383319084413", callback_data="menu:mirror_add")])
     kb_rows.append([InlineKeyboardButton(text="◀ Назад", callback_data="back:home")])
     text = (
         bq(f"<b>{NAME}</b>  ·  🪞 Зеркала")
@@ -4794,8 +4799,8 @@ async def channel_gate(cb: CallbackQuery, state: FSMContext) -> bool:
         + "\n\u0432\u0441\u0442\u0443\u043f\u0430\u0439 \u2014 \u0438 \u0436\u043c\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c"
     )
     rows = [
-        [InlineKeyboardButton(text="\U0001f4dd Вступить в канал", url=SUB_CHANNEL_LINK)],
-        [InlineKeyboardButton(text="✅ Я подписался", callback_data="menu:launch")],
+        [InlineKeyboardButton(text="Вступить в канал", icon_custom_emoji_id="5370546867786523009", url=SUB_CHANNEL_LINK)],
+        [InlineKeyboardButton(text="Я подписался", icon_custom_emoji_id="5357069174512303778", callback_data="menu:launch")],
     ]
     try:
         await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
@@ -4858,8 +4863,8 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
         + "\n\nДля запуска нужна подписка. Выбери способ оплаты:"
     )
     rows = [
-        [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="sub:pm:xtr")],
-        [InlineKeyboardButton(text="💵 CryptoBot (крипта)", callback_data="sub:pm:cbot")],
+        [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
+        [InlineKeyboardButton(text="CryptoBot (крипта)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:cbot")],
         [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
         [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
     ]
@@ -4898,8 +4903,8 @@ async def sub_shop(cb: CallbackQuery, state: FSMContext):
         + "\n\nВыбери способ оплаты:"
     )
     rows = [
-        [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="sub:pm:xtr")],
-        [InlineKeyboardButton(text="💵 CryptoBot (крипта)", callback_data="sub:pm:cbot")],
+        [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
+        [InlineKeyboardButton(text="CryptoBot (крипта)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:cbot")],
         [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
         [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
     ]
@@ -5031,8 +5036,8 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         await cb.message.edit_caption(
             caption=_cx(caption), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
-                [InlineKeyboardButton(text="🔍 Проверить",
+                [InlineKeyboardButton(text="Оплатить", icon_custom_emoji_id="5258204546391351475", url=pay_url)],
+                [InlineKeyboardButton(text="Проверить", icon_custom_emoji_id="5429571366384842791",
                                       callback_data=f"sub:cc:{inv_id}:{pk}")],
                 [InlineKeyboardButton(text="◀ Назад", callback_data="sub:pm:cbot")],
             ]),
@@ -5073,8 +5078,8 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_caption(
         caption=_cx(caption), parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
-            [InlineKeyboardButton(text="🔍 Проверить", callback_data=f"sub:check:{inv_id}")],
+            [InlineKeyboardButton(text="Оплатить", icon_custom_emoji_id="5258204546391351475", url=pay_url)],
+            [InlineKeyboardButton(text="Проверить", icon_custom_emoji_id="5429571366384842791", callback_data=f"sub:check:{inv_id}")],
             [InlineKeyboardButton(text="◀ Назад", callback_data="sub:pm:xr")],
         ]),
     )
@@ -5228,6 +5233,7 @@ async def stale_cb(cb: CallbackQuery):
 
 # ── premium custom emoji (pack: t.me/addemoji/tgmacicons) ──
 _CUSTOM_EMOJI = {
+    "🚀": '5323404142809467476', "🝬": '5258254475386167466',
     '👨\u200d🎨': '5258450450448915742',
     '👩\u200d🎨': '5258215635996908355',
     '✈️': '5258115571848846212',
@@ -5247,6 +5253,72 @@ _CUSTOM_EMOJI = {
     'ℹ️': '5258503720928288433',
     '☀️': '5258089153505009279',
     '⛔️': '5275969776668134187',
+    '⛔': '5275969776668134187',
+    '⭐': '5258165702707125574',
+    '✈': '5258115571848846212',
+    '⚽': '5258169263235013408',
+    '✍': '5258331647358540449',
+    '↔': '5260233433107407649',
+    '➡': '5204189706237004154',
+    '↗': '5257991477358763590',
+    '⬆': '5258043150110301407',
+    '⬇': '5258336354642697821',
+    '⬅': '5258132936401624790',
+    '❗': '5258474669769497337',
+    '❤': '5258179403652801593',
+    '☀': '5258089153505009279',
+    '☁': '5280867942056108177',
+    '⚠': '5258474669769497337',
+    '🎯': '5258509201306557640',
+    '⏳': '5258258882022612173',
+    '💳': '5258204546391351475',
+    '🌐': '5258423306255604960',
+    '🔍': '5429571366384842791',
+    '🛡': '5258476306152038031',
+    '🔪': '5258278668936945760',
+    '💀': '5267123797600783095',
+    '🎁': '5298988357538328017',
+    '🔐': '5258476306152038031',
+    '🔌': '5258096772776991776',
+    '🪞': '5258254475386167466',
+    '🧷': '5258461531464539536',
+    '🟢': '5357069174512303778',
+    '❓': '5258503720928288433',
+    '🧾': '5258477770735885832',
+    '⏱': '5258258882022612173',
+    '✏': '5370546867786523009',
+    '🎨': '5258450450448915742',
+    '💸': '5258204546391351475',
+    '💢': '5258474669769497337',
+    '💊': '5323585953070074710',
+    '⏭': '5204189706237004154',
+    '⏩': '5204189706237004154',
+    '🔔': '5260325873688518261',
+    '⏰': '5258419835922030550',
+    '🛰': '5258212268742549391',
+    '📢': '5260268501515377807',
+    '👑': '5298988357538328017',
+    '📅': '5258105663359294787',
+    '📊': '5258391025281408576',
+    '👨': '5256143829672672750',
+    '👩': '5256143829672672750',
+    '🛠': '5258096772776991776',
+    '❎': '5267123797600783095',
+    '🧬': '5258486128742244085',
+    '🧝': '5258093637450866522',
+    '🎉': '5258165702707125574',
+    '💵': '5258204546391351475',
+    '🆔': '5226513232549664618',
+    '🧰': '5258096772776991776',
+    '✉': '5260268501515377807',
+    '📧': '5260268501515377807',
+    '📨': '5260268501515377807',
+    '📫': '5260268501515377807',
+    '📤': '5260268501515377807',
+    '📥': '5452165780579843515',
+    '📱': '5258020476977946656',
+    '📲': '5258020476977946656',
+    '🏦': '5258204546391351475',
     '🔢': '5226513232549664618',
     '🖼': '5258254475386167466',
     '👤': '5256143829672672750',
@@ -5337,7 +5409,8 @@ def _cx(text: str) -> str:
                 part = part.replace(
                     ch, f'<tg-emoji emoji-id="{eid}">{ch}</tg-emoji>')
         parts[i] = part
-    return "".join(parts)
+    return re.sub(r"</tg-emoji>\ufe0f", "</tg-emoji>",
+                   "".join(parts))
 
 
 MAINTENANCE_ADMIN_IDS = {8661362112}
