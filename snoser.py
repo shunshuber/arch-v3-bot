@@ -27,6 +27,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     FSInputFile,
     BufferedInputFile,
+    InputMediaAnimation,
     InputMediaPhoto,
     LabeledPrice,
     PreCheckoutQuery,
@@ -165,6 +166,29 @@ router = Router()
 
 # ── branding ────────────────────────────────────────────
 NAME = "Arch V3"
+
+GIF_URL = ("https://huggingface.co/datasets/Eraserr/erase-media"
+           "/resolve/main/gifs.gif")
+# file_id cached from a prior send of GIF_URL by this bot
+GIF_FILE_ID = ("CgACAgQAAxkDAAIFSGr32lSWJ9NZz-HVi8Mo7a9dCE-"
+               "tAAJ0CwACwlYNU_ez2iv_Eu5oPQQ")
+
+
+async def send_hero(obj, **kw):
+    """Hero gif: cached file_id first, URL fallback, refresh id."""
+    global GIF_FILE_ID
+    ref = GIF_FILE_ID or GIF_URL
+    try:
+        m = await obj.answer_animation(animation=ref, **kw)
+    except Exception:
+        if ref == GIF_URL:
+            raise
+        GIF_FILE_ID = ""
+        m = await obj.answer_animation(animation=GIF_URL, **kw)
+    anim = getattr(m, "animation", None)
+    if anim and anim.file_id:
+        GIF_FILE_ID = anim.file_id
+    return m
 
 
 def bq(text: str) -> str:
@@ -2770,9 +2794,8 @@ async def cmd_start(msg: Message, state: FSMContext):
                     parse_mode=ParseMode.HTML)
 
     caption = hero_caption(uid)
-    card = await user_card_path(msg.bot, msg.from_user)
-    await msg.answer_photo(
-        photo=FSInputFile(card),
+    await send_hero(
+        msg,
         caption=_cx(caption),
         parse_mode=ParseMode.HTML,
         show_caption_above_media=True,
@@ -3716,9 +3739,8 @@ async def captcha_solve(cb: CallbackQuery, state: FSMContext):
     await cb.answer("\u2705 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e")
     await state.clear()
     # hmm — render the hero card fresh right after pass
-    card = await user_card_path(cb.bot, cb.from_user)
     await cb.message.edit_media(
-        media=InputMediaPhoto(media=FSInputFile(card)),
+        media=InputMediaAnimation(media=GIF_FILE_ID or GIF_URL),
         reply_markup=kb_main(uid),
     )
     await cb.message.edit_caption(
@@ -3889,9 +3911,8 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
             await cb.message.delete()
         except Exception:
             pass
-        card = await user_card_path(cb.bot, cb.from_user)
-        await cb.message.answer_photo(
-            photo=FSInputFile(card),
+        await send_hero(
+            cb.message,
             caption=_cx(caption),
             parse_mode=ParseMode.HTML,
             show_caption_above_media=True,
@@ -4022,9 +4043,8 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         await cb.message.delete()
     except Exception:
         pass
-    card = await user_card_path(cb.bot, cb.from_user)
-    await cb.message.answer_photo(
-        photo=FSInputFile(card), caption=_cx(text),
+    await send_hero(
+        cb.message, caption=_cx(text),
         parse_mode=ParseMode.HTML, reply_markup=kb_main(cb.from_user.id))
 
     await cb.message.answer_document(
@@ -4197,9 +4217,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             await cb.message.delete()
         except Exception:
             pass
-        card = await user_card_path(cb.bot, cb.from_user)
-        await cb.message.answer_photo(
-            photo=FSInputFile(card),
+        await send_hero(
+            cb.message,
             caption=_cx(caption),
             parse_mode=ParseMode.HTML,
             show_caption_above_media=True,
@@ -4380,9 +4399,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         await cb.message.delete()
     except Exception:
         pass
-    card = await user_card_path(cb.bot, cb.from_user)
-    await cb.message.answer_photo(
-        photo=FSInputFile(card),
+    await send_hero(
+        cb.message,
         caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_main(cb.from_user.id),
