@@ -11,30 +11,57 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
+      CRYPTOBOT_TOKEN: ${{ secrets.CRYPTOBOT_TOKEN }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: full cycle probe create and get
+      - name: CryptoBot createInvoice variants
         shell: bash
         run: |
-          echo "=== create invoice (legacy-style body) ==="
-          RESP=$(curl -s -w "\n%{http_code}" -X POST \
-            -H "Authorization: Bearer $XROCKET_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"priceAmount":"0.50","priceCurrency":"USDT","description":"probe cycle","clientInvoiceId":"archv3_probe_1_'$RANDOM'","data":{"kind":"sub","plan":"d1","tgId":"8661362112"}}' \
-            "https://pay.api.xrocket.exchange/api/v1/invoices")
-          echo "$RESP"
-          INV=$(echo "$RESP" | head -c 4000 | grep -o '"id":"[0-9]*"' | head -1 | cut -d'"' -f4)
-          echo
-          echo "=== get invoice $INV ==="
-          curl -s \
-            -H "Authorization: Bearer $XROCKET_TOKEN" \
-            "https://pay.api.xrocket.exchange/api/v1/invoice?invoiceId=$INV"
-          echo
-          echo
-          echo "=== get invoice payments ==="
-          curl -s \
-            -H "Authorization: Bearer $XROCKET_TOKEN" \
-            "https://pay.api.xrocket.exchange/api/v1/invoice/payments?invoiceId=$INV"
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+
+          tok = os.environ["CRYPTOBOT_TOKEN"]
+          URL = "https://pay.crypt.bot/api/createInvoice"
+
+          def call(body):
+              req = urllib.request.Request(
+                  URL, data=json.dumps(body).encode(),
+                  headers={"Content-Type": "application/json",
+                           "Crypto-Pay-API-Token": tok},
+                  method="POST")
+              try:
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      return r.status, r.read().decode()[:500]
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode(errors="replace")[:500]
+              except Exception as e:
+                  return 0, repr(e)[:200]
+
+          full = {
+              "asset": "USDT",
+              "amount": 0.5,
+              "description": "Arch V3 subscription 1 день",
+              "payload": json.dumps({"kind": "sub", "plan": "d1",
+                                     "tgId": "8661362112"}),
+              "expires_in": 3600,
+              "paid_btn_name": "callback",
+              "paid_btn_url": "https://t.me/ArchV3bot",
+          }
+          variants = [
+              ("full bot body", full),
+              ("no paid_btn", {k: v for k, v in full.items()
+                               if not k.startswith("paid_btn")}),
+              ("no expires_in", {k: v for k, v in full.items()
+                                 if k != "expires_in"}),
+              ("amount string", {**{k: v for k, v in full.items()
+                                    if k != "amount"},
+                                 "amount": "0.5"}),
+              ("bare", {"asset": "USDT", "amount": 0.5,
+                        "description": "probe"}),
+          ]
+          for name, body in variants:
+              s, b = call(body)
+              print(f"--- {name}: {s} {b}")
+          PY
