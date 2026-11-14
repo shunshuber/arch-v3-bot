@@ -16,47 +16,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install aiohttp requests
-      - name: CryptoBot client fingerprints + create variants
+      - name: CryptoBot method scope probe
         shell: bash
         run: |
-          echo "=== aiohttp (bot client) ==="
           python3 - <<'PY'
-          import asyncio, json, os
-          import aiohttp
-          async def main():
-              tok = os.environ["CRYPTOBOT_TOKEN"]
-              h = {"Crypto-Pay-API-Token": tok}
-              body = {"asset": "USDT", "amount": 0.5,
-                      "description": "probe", "payload": "probe"}
-              async with aiohttp.ClientSession() as s:
-                  async with s.get("https://pay.crypt.bot/api/getMe",
-                                   headers=h) as r:
-                      print("getMe:", r.status, (await r.text())[:150])
-                  async with s.post("https://pay.crypt.bot/api/createInvoice",
-                                    json=body, headers=h) as r:
-                      print("create:", r.status, (await r.text())[:400])
-          asyncio.run(main())
-          PY
-          echo
-          echo "=== requests ==="
-          python3 - <<'PY'
-          import os, requests
+          import json, os, requests
           tok = os.environ["CRYPTOBOT_TOKEN"]
-          h = {"Crypto-Pay-API-Token": tok}
-          r = requests.get("https://pay.crypt.bot/api/getMe", headers=h,
-                           timeout=20)
-          print("getMe:", r.status_code, r.text[:150])
-          r = requests.post("https://pay.crypt.bot/api/createInvoice",
-                            json={"asset": "USDT", "amount": 0.5,
-                                  "description": "probe",
-                                  "payload": "probe"}, headers=h, timeout=20)
-          print("create:", r.status_code, r.text[:400])
+          H = {"Crypto-Pay-API-Token": tok}
+          B = "https://pay.crypt.bot/api/"
+          tests = [
+              ("getMe", "GET", None),
+              ("getBalance", "GET", None),
+              ("getCurrencies", "GET", None),
+              ("getExchangeRates", "GET", None),
+              ("getInvoices", "GET", {"status": "all", "limit": 3}),
+              ("getStats", "GET", None),
+              ("createInvoice", "POST", {"asset": "USDT", "amount": 0.5,
+                                         "description": "probe"}),
+              ("transfer", "POST", {"asset": "USDT", "amount": 0.5,
+                                    "user_id": 8661362112,
+                                    "spend_id": "probe-scope-test"}),
+          ]
+          for name, m, params in tests:
+              try:
+                  if m == "GET":
+                      r = requests.get(B + name, headers=H, params=params,
+                                       timeout=20)
+                  else:
+                      r = requests.post(B + name, headers=H, json=params,
+                                        timeout=20)
+                  print(name, "->", r.status_code, r.text[:220])
+              except Exception as e:
+                  print(name, "EXC", repr(e)[:120])
           PY
-          echo
-          echo "=== curl full bot body ==="
-          curl -s -w "\nHTTP %{http_code}\n" -X POST \
-            -H "Crypto-Pay-API-Token: $CRYPTOBOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"asset":"USDT","amount":0.5,"description":"Arch V3 subscription 1 day","payload":"{\"kind\":\"sub\",\"plan\":\"d1\",\"tgId\":\"8661362112\"}","expires_in":3600,"paid_btn_name":"callback","paid_btn_url":"https://t.me/ArchV3bot"}' \
-            "https://pay.crypt.bot/api/createInvoice"
