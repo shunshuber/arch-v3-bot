@@ -1,0 +1,42 @@
+name: emoji-api-test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Probe custom_emoji send via Bot API
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+
+          tok = os.environ["BOT_TOKEN"]
+          chat = os.environ["LOGS_CHAT_ID"]
+          eid = "5357069174512303778"   # ✅ from tgmacicons
+          text = '<tg-emoji emoji-id="%s">✅</tg-emoji> test custom emoji send' % eid
+
+          payload = {
+              "chat_id": chat,
+              "text": text,
+              "parse_mode": "HTML",
+          }
+          req = urllib.request.Request(
+              f"https://api.telegram.org/bot{tok}/sendmessage",
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              res = json.load(r)
+          print("RESULT:", json.dumps(res, ensure_ascii=False)[:600])
+          PY

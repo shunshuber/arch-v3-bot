@@ -861,7 +861,7 @@ async def push_send_log(title: str, lines: list[str]) -> None:
         chunks.append(cur)
     for i, ch in enumerate(chunks):
         try:
-            await _BOT.send_message(chat, ch, parse_mode=ParseMode.HTML,
+            await _BOT.send_message(chat, _cx( ch), parse_mode=ParseMode.HTML,
                                     disable_web_page_preview=True)
         except Exception as e:
             log.debug("push_send_log chunk %d/%d failed: %s",
@@ -2494,7 +2494,7 @@ async def snos_monitor_loop(username: str, victim_id: int,
                     + f"\n\n⏰ {ts}"
                 )
                 try:
-                    await bot.send_message(user_id, msg, parse_mode=ParseMode.HTML)
+                    await bot.send_message(user_id, _cx( msg), parse_mode=ParseMode.HTML)
                 except Exception as e:
                     log.warning("monitor notify failed: %s", e)
                 snos_handle_change(changes, username, user_id)
@@ -2730,11 +2730,11 @@ async def cmd_start(msg: Message, state: FSMContext):
             await state.set_state(Captcha.solve)
             await msg.answer_photo(
                 photo=BufferedInputFile(png, filename="captcha.png"),
-                caption=(
+                caption=_cx((
                     bq(f"<b>{NAME}</b>  \u00b7  <i>\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430</i>")
                     + "\n\n\U0001f9dd <b>\u0414\u043e\u043a\u0430\u0436\u0438, \u0447\u0442\u043e \u0442\u044b \u043d\u0435 \u0431\u043e\u0442:</b>"
                     + "\n\u0432\u044b\u0431\u0435\u0440\u0438 \u043a\u043b\u0435\u0442\u043a\u0443 \u0441 \u043d\u0443\u0436\u043d\u044b\u043c \u0441\u043b\u043e\u0432\u043e\u043c"
-                ),
+                )),
                 parse_mode=ParseMode.HTML,
                 show_caption_above_media=True,
                 reply_markup=kb,
@@ -2750,25 +2750,25 @@ async def cmd_start(msg: Message, state: FSMContext):
             if status == "added":
                 try:
                     await msg.bot.send_message(
-                        referrer_id,
+                        referrer_id, _cx(
                         bq(f"\U0001f389 <b>{NAME}</b>")
                         + "\n\n\U0001f465 <b>\u041d\u043e\u0432\u044b\u0439 \u0440\u0435\u0444\u0435\u0440\u0430\u043b!</b>\n"
                         + f"\U0001f464 <b>{html_mod.escape(msg.from_user.full_name)}</b>"
-                        + "\n\n\U0001f4e5 \u0415\u0449\u0451 \u043d\u0435\u043c\u043d\u043e\u0433\u043e \u0440\u0435\u0444\u0435\u0440\u0430\u043b\u043e\u0432 \u2014 <b>+1 \u0434\u0435\u043d\u044c \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438</b>",
+                        + "\n\n\U0001f4e5 \u0415\u0449\u0451 \u043d\u0435\u043c\u043d\u043e\u0433\u043e \u0440\u0435\u0444\u0435\u0440\u0430\u043b\u043e\u0432 \u2014 <b>+1 \u0434\u0435\u043d\u044c \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438</b>"),
                         parse_mode=ParseMode.HTML)
                 except Exception:
                     pass
-                await msg.answer(
+                await msg.answer(_cx(
                     bq(f"<b>{NAME}</b>  \u2014  \u0440\u0435\u0444\u0435\u0440\u0430\u043b")
                     + "\n\n\u2705 <b>\u0422\u044b \u043f\u0440\u0438\u0432\u044f\u0437\u0430\u043d \u043a \u043f\u0440\u0438\u0433\u043b\u0430\u0441\u0438\u0432\u0448\u0435\u043c\u0443!</b>\n"
-                    + "\U0001f4eb \u041f\u043e\u0434\u043f\u0438\u0448\u0438\u0441\u044c \u043d\u0430 \u043a\u0430\u043d\u0430\u043b \u2014 \u044d\u0442\u043e \u0437\u0430\u0447\u0435\u0442\u0451\u0442\u0441\u044f \u0435\u043c\u0443 \u0432 \u0441\u0447\u0451\u0442.",
+                    + "\U0001f4eb \u041f\u043e\u0434\u043f\u0438\u0448\u0438\u0441\u044c \u043d\u0430 \u043a\u0430\u043d\u0430\u043b \u2014 \u044d\u0442\u043e \u0437\u0430\u0447\u0435\u0442\u0451\u0442\u0441\u044f \u0435\u043c\u0443 \u0432 \u0441\u0447\u0451\u0442."),
                     parse_mode=ParseMode.HTML)
 
     caption = hero_caption(uid)
     card = await user_card_path(msg.bot, msg.from_user)
     await msg.answer_photo(
         photo=FSInputFile(card),
-        caption=caption,
+        caption=_cx(caption),
         parse_mode=ParseMode.HTML,
         show_caption_above_media=True,
         reply_markup=kb_main(uid),
@@ -2791,7 +2791,7 @@ async def menu_launch(cb: CallbackQuery, state: FSMContext):
     await refs_check_and_grant(cb)
     await state.clear()
     await cb.message.edit_caption(
-        caption=bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>",
+        caption=_cx(bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>"),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_methods(),
     )
@@ -2809,11 +2809,11 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
     m = METHODS[key]
     if key == "bank":
         await cb.message.edit_caption(
-            caption=(
+            caption=_cx((
                 bq(f"<b>{NAME}</b>")
                 + "\n\n\U0001f3e6 <b>\u0411\u0430\u043d\u043a (115-\u0424\u0417)</b>\n\n"
                 + "\u0412\u044b\u0431\u0435\u0440\u0438 \u0431\u0430\u043d\u043a \u0434\u043b\u044f \u0437\u0430\u044f\u0432\u043a\u0438 \u043d\u0430 \u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B:"
-            ),
+            )),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="\u0422-\u0411\u0430\u043D\u043A", callback_data="bank:tbank"),
@@ -2827,11 +2827,11 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         return
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>")
             + f"\n\n{m['e']} <b>{m['l']}</b>\n\n"
             + "\u26a0\ufe0f \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043f\u0440\u0438\u0447\u0438\u043d\u0443 \u0436\u0430\u043b\u043e\u0431\u044b:"
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_reasons(),
     )
@@ -2843,7 +2843,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
 async def back_methods(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Report.method)
     await cb.message.edit_caption(
-        caption=bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>",
+        caption=_cx(bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>"),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_methods(),
     )
@@ -2889,7 +2889,7 @@ async def menu_refs(cb: CallbackQuery, state: FSMContext):
         InlineKeyboardButton(text="🔄 Проверить заново", callback_data="menu:refs"),
         InlineKeyboardButton(text="◀ Назад", callback_data="back:home"),
     ]])
-    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
+    await cb.message.edit_caption(caption=_cx(text), parse_mode=ParseMode.HTML,
                                   reply_markup=kb)
     await cb.answer()
 
@@ -2917,10 +2917,10 @@ async def refs_check_and_grant(cb: CallbackQuery):
                 users[str(rid)] = r2
                 try:
                     await cb.bot.send_message(
-                        cb.from_user.id,
+                        cb.from_user.id, _cx(
                         bq(f"🎁 <b>{NAME}</b>")
                         + "\n\n🌐 <b>Рефер 2-го уровня!</b>"
-                        + f"\n<b>+1 дн.</b> за то, что твой пригл. сам привёл 5.",
+                        + f"\n<b>+1 дн.</b> за то, что твой пригл. сам привёл 5."),
                         parse_mode=ParseMode.HTML)
                 except Exception:
                     pass
@@ -2930,12 +2930,12 @@ async def refs_check_and_grant(cb: CallbackQuery):
         save_users(users)
         state = "finished"
         await cb.bot.send_message(
-            cb.from_user.id,
+            cb.from_user.id, _cx(
             bq(f"🎁 <b>{NAME}</b>") +
             f"\n\n\U0001f4e5 <b>+{days} дн. подписки начислено!</b>"
             + f"\nПриглашено валидно: <b>{valid}</b>"
             + f"\nПодписка активна до: <b>{until}</b>"
-            + (f"\n🌐 Рефер 2-го уровня: всего {rec.get('deep_refs') or 0}" if rec.get("deep_refs") else ""),
+            + (f"\n🌐 Рефер 2-го уровня: всего {rec.get('deep_refs') or 0}" if rec.get("deep_refs") else "")),
             parse_mode=ParseMode.HTML)
 
 
@@ -2962,7 +2962,7 @@ async def menu_profile(cb: CallbackQuery):
         + "\n\n\U0001f50c \u0434\u0432\u0438\u0436\u043e\u043a \u0430\u043a\u0442\u0438\u0432\u0435\u043d \u00b7 \u043e\u043d\u043b\u0430\u0439\u043d 24/7"
     )
     await cb.message.edit_caption(
-        caption=text,
+        caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
@@ -2987,7 +2987,7 @@ async def menu_info(cb: CallbackQuery):
         + "\n\n<i>v3.1 \u00b7 \u043c\u0438\u043d\u0438\u043c\u0430\u043b</i>"
     )
     await cb.message.edit_caption(
-        caption=text,
+        caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
@@ -3004,13 +3004,13 @@ async def menu_grant(cb: CallbackQuery, state: FSMContext):
         return
     await state.set_state(GrantFSM.uid)
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>  ·  \U0001f511 Grant")
             + "\n\nПришли <b>ID пользователя</b>, которому выдаём подписку:\n"
             + "<i>например:</i> <code>8661362112</code>"
             + "\n\n(kwargs): отправь цифру, а следующим сообщением — кол-во дней.\n"
             + "Если вместо числа пришлёшь слово <code>forever</code> сроками — подпишу навсегда."
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
@@ -3024,8 +3024,8 @@ async def grant_uid(msg: Message, state: FSMContext):
     if raw.lower() == "forever":
         await state.set_state(GrantFSM.days)
         await state.update_data(forever=True)
-        await msg.answer(
-            "✅ Подписка <b>навсегда</b> будет выдана — подтверди командой <code>yes</code>:",
+        await msg.answer(_cx(
+            "✅ Подписка <b>навсегда</b> будет выдана — подтверди командой <code>yes</code>:"),
             parse_mode=ParseMode.HTML)
         return
     try:
@@ -3035,9 +3035,9 @@ async def grant_uid(msg: Message, state: FSMContext):
         return
     await state.update_data(uid=uid)
     await state.set_state(GrantFSM.days)
-    await msg.answer(
+    await msg.answer(_cx(
         f"📱 Пользователь <code>{uid}</code>.\n"
-        + "Теперь отправь <b>кол-во дней</b> подписки (1 / 7 / 30 / 365 …):",
+        + "Теперь отправь <b>кол-во дней</b> подписки (1 / 7 / 30 / 365 …):"),
         parse_mode=ParseMode.HTML)
 
 
@@ -3053,20 +3053,21 @@ async def grant_days(msg: Message, state: FSMContext):
         rec["forever"] = True
         save_subs(subs)
         await state.clear()
-        await msg.answer(f"👑 <b>@{uid}</b> получил <b>навсегда</b>.", parse_mode=ParseMode.HTML)
+        await msg.answer(_cx(f"👑 <b>@{uid}</b> получил <b>навсегда</b>."), parse_mode=ParseMode.HTML)
         return
     try:
         days = int(raw)
         if days <= 0:
             raise ValueError
     except ValueError:
-        await msg.answer("❌ Нужно целое положительное число дней.")
+        await msg.answer(_cx("❌ Нужно целое положительное число дней."),
+                         parse_mode=ParseMode.HTML)
         return
     s, until = grant_ref_bonus(uid, days)
     await state.clear()
-    await msg.answer(
+    await msg.answer(_cx(
         f"🔐 <b>@{uid}</b> получил <b>{days}</b> дн.\n"
-        + f"📅 Подписка до: <b>{until}</b>",
+        + f"📅 Подписка до: <b>{until}</b>"),
         parse_mode=ParseMode.HTML)
 
 
@@ -3075,11 +3076,12 @@ async def cmd_unsub(msg: Message):
     """Remove a user's subscription: /unsub <uid>"""
     if not (user_is_admin(msg.from_user.id)
             or (ADMIN_ID and msg.from_user.id == int(ADMIN_ID))):
-        await msg.answer("⛔️ Команда для админов.")
+        await msg.answer(_cx("⛔️ Команда для админов."),
+                         parse_mode=ParseMode.HTML)
         return
     parts = (msg.text or "").split()
     if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
-        await msg.answer("Формат: <code>/unsub 8864452428</code>",
+        await msg.answer(_cx("Формат: <code>/unsub 8864452428</code>"),
                          parse_mode=ParseMode.HTML)
         return
     uid = str(int(parts[1]))
@@ -3088,13 +3090,13 @@ async def cmd_unsub(msg: Message):
         gone = subs.pop(uid)
         save_subs(subs)
         state = "навсегда" if gone.get("forever") else f"до {gone.get('until')}"
-        await msg.answer(
+        await msg.answer(_cx(
             f"❎ Подписка <b>{uid}</b> снята (была: {state}).\n"
-            + "Доступ закроется при следующем действии в меню.",
+            + "Доступ закроется при следующем действии в меню."),
             parse_mode=ParseMode.HTML)
     else:
-        await msg.answer(
-            f"⚠️ У <b>{uid}</b> активной записи нет — подписка не числится.",
+        await msg.answer(_cx(
+            f"⚠️ У <b>{uid}</b> активной записи нет — подписка не числится."),
             parse_mode=ParseMode.HTML)
 
 
@@ -3107,11 +3109,11 @@ async def cmd_wl(msg: Message):
         return
     parts = (msg.text or "").split()
     if len(parts) < 2:
-        await msg.answer(
+        await msg.answer(_cx(
             "\u0424\u043e\u0440\u043c\u0430\u0442:\n"
             "<code>/wl add @username</code>\n"
             "<code>/wl del @username</code>\n"
-            "<code>/wl list</code>",
+            "<code>/wl list</code>"),
             parse_mode=ParseMode.HTML)
         return
     action = parts[1].lower()
@@ -3123,12 +3125,12 @@ async def cmd_wl(msg: Message):
             body = "\n".join(
                 f"\u2022 <code>{html_mod.escape(p)}</code>"
                 for p in sorted(set(cur)))
-            await msg.answer(
-                f"\U0001f6e1 <b>\u0411\u0435\u043b\u044b\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u0446\u0435\u043b\u0435\u0439:</b>\n{body}",
+            await msg.answer(_cx(
+                f"\U0001f6e1 <b>\u0411\u0435\u043b\u044b\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u0446\u0435\u043b\u0435\u0439:</b>\n{body}"),
                 parse_mode=ParseMode.HTML)
         return
     if len(parts) < 3:
-        await msg.answer("\u041d\u0443\u0436\u0435\u043d \u043f\u0430\u0442\u0442\u0435\u0440\u043d: <code>/wl add @username</code>",
+        await msg.answer(_cx("\u041d\u0443\u0436\u0435\u043d \u043f\u0430\u0442\u0442\u0435\u0440\u043d: <code>/wl add @username</code>"),
                          parse_mode=ParseMode.HTML)
         return
     pat = parts[2].strip().lstrip("@").lower()
@@ -3136,14 +3138,14 @@ async def cmd_wl(msg: Message):
         if pat and pat not in [p.lower() for p in cur]:
             cur.append(pat)
             _wl_save(cur)
-        await msg.answer(
-            f"\U0001f6e1 <code>{html_mod.escape(pat)}</code> \u0432 \u0431\u0435\u043b\u043e\u043c \u0441\u043f\u0438\u0441\u043a\u0435.",
+        await msg.answer(_cx(
+            f"\U0001f6e1 <code>{html_mod.escape(pat)}</code> \u0432 \u0431\u0435\u043b\u043e\u043c \u0441\u043f\u0438\u0441\u043a\u0435."),
             parse_mode=ParseMode.HTML)
     elif action == "del":
         cur = [p for p in cur if p.lower() != pat]
         _wl_save(cur)
-        await msg.answer(
-            f"\u274e <code>{html_mod.escape(pat)}</code> \u0443\u0431\u0440\u0430\u043d \u0438\u0437 \u0431\u0435\u043b\u043e\u0433\u043e \u0441\u043f\u0438\u0441\u043a\u0430.",
+        await msg.answer(_cx(
+            f"\u274e <code>{html_mod.escape(pat)}</code> \u0443\u0431\u0440\u0430\u043d \u0438\u0437 \u0431\u0435\u043b\u043e\u0433\u043e \u0441\u043f\u0438\u0441\u043a\u0430."),
             parse_mode=ParseMode.HTML)
     else:
         await msg.answer("\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435. add / del / list")
@@ -3154,11 +3156,12 @@ async def cmd_refgive(msg: Message):
     """Manually credit valid referrals: /refgive <user_id> [count]"""
     if not (user_is_admin(msg.from_user.id)
             or (ADMIN_ID and msg.from_user.id == int(ADMIN_ID))):
-        await msg.answer("⛔️ Команда для админов.")
+        await msg.answer(_cx("⛔️ Команда для админов."),
+                         parse_mode=ParseMode.HTML)
         return
     parts = (msg.text or "").split()
     if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
-        await msg.answer("Формат: /refgive 8864452428 [кол-во]",
+        await msg.answer(_cx("Формат: /refgive 8864452428 [кол-во]"),
                          parse_mode=ParseMode.HTML)
         return
     uid = str(int(parts[1]))
@@ -3168,8 +3171,8 @@ async def cmd_refgive(msg: Message):
     users = load_users()
     rec = users.get(uid)
     if rec is None:
-        await msg.answer(
-            "⚠️ В базе нет " + uid + " — пусть юзер пискнет боту хотя бы раз.",
+        await msg.answer(_cx(
+            "⚠️ В базе нет " + uid + " — пусть юзер пискнет боту хотя бы раз."),
             parse_mode=ParseMode.HTML)
         return
     rec["ref_credit"] = (rec.get("ref_credit", 0) or 0) + n
@@ -3181,8 +3184,8 @@ async def cmd_refgive(msg: Message):
         tail = "✅ зачтено всего: <b>" + str(valid) + "</b> / до дня: <b>" + str(left) + "</b>"
     except Exception:
         tail = "✅ зачтено — проверь в меню «Проверить заново»"
-    await msg.answer(
-        "🎁 <b>" + uid + "</b>: вручную +" + str(n) + " реф.\n" + tail,
+    await msg.answer(_cx(
+        "🎁 <b>" + uid + "</b>: вручную +" + str(n) + " реф.\n" + tail),
         parse_mode=ParseMode.HTML)
 
 
@@ -3198,10 +3201,10 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
         alive_line = f"\n🧷 В пуле: <b>{len(sessions)}</b>"
     await state.set_state(AddSession.choose)
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>  ·  ➕ Добавить сессию")
             + alive_line
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📄 Загрузить файлом",
@@ -3217,11 +3220,11 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
 async def addsess_file(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AddSession.file)
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>  ·  📄 Сессия файлом")
             + "\n\nПришли <b>.session документ</b>.\n"
             + "Файл сохранится в пул и закоммитится в репу (переживёт рестарты)."
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
@@ -3234,7 +3237,7 @@ async def addsess_file_recv(msg: Message, state: FSMContext):
     doc = msg.document
     name = doc.file_name or "pasted.session"
     if not name.endswith(".session") or not (0 < doc.file_size < 5 * 1024 * 1024):
-        await msg.answer("❌ Нужен документ <code>.session</code> до 5 МБ.",
+        await msg.answer(_cx("❌ Нужен документ <code>.session</code> до 5 МБ."),
                          parse_mode=ParseMode.HTML)
         return
     tg_file = await msg.bot.get_file(doc.file_id)
@@ -3261,17 +3264,17 @@ async def addsess_file_recv(msg: Message, state: FSMContext):
         why = type(e).__name__
     commit_file_to_repo(f"sessions/{name}", f"add session {name} (file)")
     await state.clear()
-    await msg.answer(
+    await msg.answer(_cx(
         bq(f"<b>{NAME}</b>  ·  ✅ Сессия добавлена")
         + f"\n\n🧷 <code>{html_mod.escape(name)}</code> → пул"
         + f"\n🔌 проб: {'✅ живая' if ok else '❌ ' + why}"
-        + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий",
+        + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий"),
         parse_mode=ParseMode.HTML)
 
 
 @router.message(AddSession.file)
 async def addsess_file_wrongtype(msg: Message, state: FSMContext):
-    await msg.answer("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0444\u0430\u0439\u043B.", parse_mode=ParseMode.HTML)
+    await msg.answer(_cx("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0444\u0430\u0439\u043B."), parse_mode=ParseMode.HTML)
 
 
 # \u2500\u2500 BR-style transplant: \u043C\u043E\u0439\u043A\u0430 \u043A\u0443\u043F\u043B\u0435\u043D\u043D\u044B\u0445 \u0441\u0435\u0441\u0441\u0438\u0439 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -3286,14 +3289,14 @@ async def addsess_trans(cb: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AddSession.trans)
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>  \u00B7  \U0001F9EC \u041F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 \u0441\u0435\u0441\u0441\u0438\u0438")
             + "\n\n\u041F\u0440\u0438\u0448\u043B\u0438 <b>\u0421\u042B\u0420\u0423\u042E \u043A\u0443\u043F\u043B\u0435\u043D\u043D\u0443\u044E .session</b> (lolz \u0438 \u0442.\u043F.)."
             + "\n\u042F \u0441\u0430\u043C: \u043A\u0438\u043A\u043D\u0443 \u0447\u0443\u0436\u0438\u0435 \u0441\u0435\u0441\u0441\u0438\u0438, \u0437\u0430\u043F\u0440\u043E\u0448\u0443 \u043A\u043E\u0434,"
             + "\n\u043F\u0440\u043E\u0447\u0438\u0442\u0430\u044E \u0435\u0433\u043E \u0438\u0437 \u0434\u0438\u0430\u043B\u043E\u0433\u0430 \u0441 Telegram (777000) \u0432\u043D\u0443\u0442\u0440\u0438 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u0430,"
             + "\n\u043F\u0435\u0440\u0435\u0441\u0430\u0436\u0443 \u043D\u0430 \u0447\u0438\u0441\u0442\u044B\u0439 \u0444\u0438\u043D\u0433\u0435\u0440\u043F\u0440\u0438\u043D\u0442 + \u043F\u0438\u043D \u0438 \u043F\u043E\u0441\u0442\u0430\u0432\u043B\u044E 2FA."
             + "\n\n\u0421\u044B\u0440\u043E\u0439 \u0444\u0430\u0439\u043B \u043E\u0441\u0442\u0430\u043D\u0435\u0442\u0441\u044F \u0446\u0435\u043B \u043F\u0440\u0438 \u043B\u044E\u0431\u043E\u0439 \u043E\u0448\u0438\u0431\u043A\u0435."
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:home")],
@@ -3304,7 +3307,7 @@ async def addsess_trans(cb: CallbackQuery, state: FSMContext):
 async def _transplant_say(chat_id: int, text: str) -> None:
     try:
         if _BOT:
-            await _BOT.send_message(chat_id, text, parse_mode=ParseMode.HTML,
+            await _BOT.send_message(chat_id, _cx( text), parse_mode=ParseMode.HTML,
                                     disable_web_page_preview=True)
     except Exception as e:
         log.debug("transplant say failed: %s", e)
@@ -3607,7 +3610,7 @@ async def addsess_trans_recv(msg: Message, state: FSMContext):
     doc = msg.document
     name = doc.file_name or "raw.session"
     if not name.endswith(".session") or not (0 < doc.file_size < 5 * 1024 * 1024):
-        await msg.answer("\u274C \u041D\u0443\u0436\u0435\u043D \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 <code>.session</code> \u0434\u043E 5 \u041C\u0411.",
+        await msg.answer(_cx("\u274C \u041D\u0443\u0436\u0435\u043D \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 <code>.session</code> \u0434\u043E 5 \u041C\u0411."),
                          parse_mode=ParseMode.HTML)
         return
     stem = _re.sub(r"[^A-Za-z0-9_]", "_", name[:-8]) or "raw"
@@ -3616,17 +3619,17 @@ async def addsess_trans_recv(msg: Message, state: FSMContext):
     tg_file = await msg.bot.get_file(doc.file_id)
     await msg.bot.download_file(tg_file, dest)
     await state.update_data(trans_active=True)
-    await msg.answer(
+    await msg.answer(_cx(
         bq(f"<b>{NAME}</b>  \u00B7  \U0001F9EC \u041F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 \u0437\u0430\u043F\u0443\u0449\u0435\u043D\u0430")
         + "\n\n\U0001F52A \u043A\u0438\u043A \u0447\u0443\u0436\u0438\u0445 \u2192 \U0001F4E8 \u043A\u043E\u0434 \u0438\u0437 777000 \u2192 \U0001F510 \u043F\u0435\u0440\u0435\u0441\u0430\u0434\u043A\u0430 + 2FA"
-        + "\n\u0421\u0442\u0430\u0442\u0443\u0441 \u043F\u0440\u0438\u0448\u043B\u044E \u0441\u044E\u0434\u0430. \u041E\u0442\u043C\u0435\u043D\u0430 \u2014 \u25C0 \u041D\u0430\u0437\u0430\u0434.",
+        + "\n\u0421\u0442\u0430\u0442\u0443\u0441 \u043F\u0440\u0438\u0448\u043B\u044E \u0441\u044E\u0434\u0430. \u041E\u0442\u043C\u0435\u043D\u0430 \u2014 \u25C0 \u041D\u0430\u0437\u0430\u0434."),
         parse_mode=ParseMode.HTML)
     asyncio.create_task(_transplant_run(msg.chat.id, stem, state))
 
 
 @router.message(AddSession.trans)
 async def addsess_trans_wrongtype(msg: Message, state: FSMContext):
-    await msg.answer("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0441\u044B\u0440\u043E\u0439 \u0444\u0430\u0439\u043B.",
+    await msg.answer(_cx("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0441\u044B\u0440\u043E\u0439 \u0444\u0430\u0439\u043B."),
                      parse_mode=ParseMode.HTML)
 
 
@@ -3661,7 +3664,7 @@ async def trans_pw_recv(msg: Message, state: FSMContext):
 
 @router.message(AddSession.trans_pw)
 async def trans_pw_wrongtype(msg: Message, state: FSMContext):
-    await msg.answer("\u274C \u0416\u0434\u0443 \u043F\u0430\u0440\u043E\u043B\u044C \u0442\u0435\u043A\u0441\u0442\u043E\u043C.", parse_mode=ParseMode.HTML)
+    await msg.answer(_cx("\u274C \u0416\u0434\u0443 \u043F\u0430\u0440\u043E\u043B\u044C \u0442\u0435\u043A\u0441\u0442\u043E\u043C."), parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data == "back:home")
@@ -3677,7 +3680,7 @@ async def back_home(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     caption = hero_caption(cb.from_user.id)
     await cb.message.edit_caption(
-        caption=caption,
+        caption=_cx(caption),
         parse_mode=ParseMode.HTML,
         show_caption_above_media=True,
         reply_markup=kb_main(cb.from_user.id),
@@ -3714,7 +3717,7 @@ async def captcha_solve(cb: CallbackQuery, state: FSMContext):
         reply_markup=kb_main(uid),
     )
     await cb.message.edit_caption(
-        caption=hero_caption(uid),
+        caption=_cx(hero_caption(uid)),
         parse_mode=ParseMode.HTML,
         show_caption_above_media=True,
     )
@@ -3739,11 +3742,11 @@ async def menu_mirror_add(cb: CallbackQuery, state: FSMContext):
         return
     await state.set_state(MirrorCreateFSM.token)
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>  \u00b7  🪞 Зеркало")
             + "\n\n\U0001f4e5 Пришли <b>BotFather token</b> зеркала:"
             + "\n<i>формат:</i> <code>1234:ABC...</code>"
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="◀ Назад", callback_data="menu:mirror_list")],
@@ -3768,7 +3771,7 @@ async def menu_mirror_list(cb: CallbackQuery, state: FSMContext):
         + f"\n\nВаши зеркала: <b>{len(mirrors)}</b> / {MIRROR_MAX}"
         + "\n<i>каждое зеркало работает как отдельный Arch V3</i>"
     )
-    await cb.message.edit_caption(caption=text, parse_mode=ParseMode.HTML,
+    await cb.message.edit_caption(caption=_cx(text), parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
     await cb.answer()
 
@@ -3782,7 +3785,7 @@ async def mirror_token(msg: Message, state: FSMContext):
     except ImportError:
         return
     if ":" not in raw or len(raw) < 30:
-        await msg.answer("❌ Неверный формат токена. `1234:ABC...`", parse_mode=ParseMode.HTML)
+        await msg.answer(_cx("❌ Неверный формат токена. `1234:ABC...`"), parse_mode=ParseMode.HTML)
         return
     wait = await msg.answer("⏳ Проверяю токен...")
     bot_username = await validate_token(raw)
@@ -3796,12 +3799,13 @@ async def mirror_token(msg: Message, state: FSMContext):
     ok = register_mirror(msg.from_user.id, raw, bot_username)
     if not ok:
         n = count_mirrors(msg.from_user.id)
-        await msg.answer(f"❌ Токен уже есть / лимит ({n})")
+        await msg.answer(_cx(f"❌ Токен уже есть / лимит ({n})"),
+                         parse_mode=ParseMode.HTML)
         return
     start_mirror(raw)
     n = count_mirrors(msg.from_user.id)
-    await msg.answer(
-        f"✅ Зеркало работает!\n🤖 @{bot_username}\n📊 Всего зеркал: {n}",
+    await msg.answer(_cx(
+        f"✅ Зеркало работает!\n🤖 @{bot_username}\n📊 Всего зеркал: {n}"),
         parse_mode=ParseMode.HTML)
 
 
@@ -3814,7 +3818,7 @@ async def promo_enter(msg: Message, state: FSMContext):
     except ImportError:
         return
     ok, reply = apply_promo(msg.from_user.id, code)
-    await msg.answer(f"{'✅' if ok else '❌'} {reply}", parse_mode=ParseMode.HTML)
+    await msg.answer(_cx(f"{'✅' if ok else '❌'} {reply}"), parse_mode=ParseMode.HTML)
 
 
 @router.message(F.text.regexp(r"^/promo\s+(\S+)$"))
@@ -3825,7 +3829,7 @@ async def promo_any(msg: Message, state: FSMContext):
     except ImportError:
         return
     ok, reply = apply_promo(msg.from_user.id, code)
-    await msg.answer(f"{'✅' if ok else '❌'} {reply}", parse_mode=ParseMode.HTML)
+    await msg.answer(_cx(f"{'✅' if ok else '❌'} {reply}"), parse_mode=ParseMode.HTML)
 
 
 @router.message(Snos.phone)
@@ -3837,14 +3841,14 @@ async def got_snos_phone(msg: Message, state: FSMContext):
     if digits and not digits.startswith("+"):
         digits = "+" + digits
     if not re.match(r"^\+\d{8,15}$", digits):
-        await msg.answer("\u274c \u0424\u043e\u0440\u043c\u0430\u0442: <code>+79991234567</code>. \u0415\u0449\u0451 \u0440\u0430\u0437:",
+        await msg.answer(_cx("\u274c \u0424\u043e\u0440\u043c\u0430\u0442: <code>+79991234567</code>. \u0415\u0449\u0451 \u0440\u0430\u0437:"),
                          parse_mode=ParseMode.HTML)
         return
     await state.update_data(phone=digits)
-    await msg.answer(
+    await msg.answer(_cx(
         bq(f"<b>{NAME}</b>  \u2014  \U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439")
         + f"\n\n\U0001f4f1 \u041d\u043e\u043c\u0435\u0440 \u0436\u0435\u0440\u0442\u0432\u044b: <code>{html_mod.escape(digits)}</code>\n\n"
-        + "\U0001f3af <b>\u041e\u0442\u043f\u0440\u0430\u0432\u044c username \u0436\u0435\u0440\u0442\u0432\u044b:</b>\n\u2022 <code>@username</code>\n\u2022 <code>t.me/username</code>",
+        + "\U0001f3af <b>\u041e\u0442\u043f\u0440\u0430\u0432\u044c username \u0436\u0435\u0440\u0442\u0432\u044b:</b>\n\u2022 <code>@username</code>\n\u2022 <code>t.me/username</code>"),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_snos_back(),
     )
@@ -3863,8 +3867,8 @@ async def got_snos_target(msg: Message, state: FSMContext):
         return
     await state.update_data(username=uname)
     data = await state.get_data()
-    await msg.answer(
-        snos_summary_text(data),
+    await msg.answer(_cx(
+        snos_summary_text(data)),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_snos_confirm(),
     )
@@ -3883,7 +3887,7 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         card = await user_card_path(cb.bot, cb.from_user)
         await cb.message.answer_photo(
             photo=FSInputFile(card),
-            caption=caption,
+            caption=_cx(caption),
             parse_mode=ParseMode.HTML,
             show_caption_above_media=True,
             reply_markup=kb_main(cb.from_user.id))
@@ -4015,7 +4019,7 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         pass
     card = await user_card_path(cb.bot, cb.from_user)
     await cb.message.answer_photo(
-        photo=FSInputFile(card), caption=text,
+        photo=FSInputFile(card), caption=_cx(text),
         parse_mode=ParseMode.HTML, reply_markup=kb_main(cb.from_user.id))
 
     await cb.message.answer_document(
@@ -4038,7 +4042,7 @@ async def got_target(msg: Message, state: FSMContext):
     if _m == "code":
         phone = _norm_phone(msg.text or "")
         if not phone:
-            await msg.answer("\u274c \u041D\u0443\u0436\u0435\u043D \u043D\u043E\u043C\u0435\u0440: <code>+79991234567</code>",
+            await msg.answer(_cx("\u274c \u041D\u0443\u0436\u0435\u043D \u043D\u043E\u043C\u0435\u0440: <code>+79991234567</code>"),
                              parse_mode=ParseMode.HTML)
             return
         await state.update_data(target={"raw": phone, "entity": phone,
@@ -4046,7 +4050,7 @@ async def got_target(msg: Message, state: FSMContext):
         data = await state.get_data()
         data["comment"] = ""
         await state.update_data(comment="")
-        await msg.answer(summary_text(data), parse_mode=ParseMode.HTML,
+        await msg.answer(_cx(summary_text(data)), parse_mode=ParseMode.HTML,
                          reply_markup=kb_confirm())
         await state.set_state(Report.confirm)
         return
@@ -4059,8 +4063,8 @@ async def got_target(msg: Message, state: FSMContext):
     data = await state.get_data()
     data["comment"] = ""   # will be substituted by template at send time
     await state.update_data(comment="")
-    await msg.answer(
-        summary_text(data), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
+    await msg.answer(_cx(
+        summary_text(data)), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
     await state.set_state(Report.confirm)
 
 
@@ -4072,12 +4076,12 @@ async def got_bank(cb: CallbackQuery, state: FSMContext):
         return
     await state.update_data(bank=key)
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>")
             + f"\n\n\U0001f3e6 <b>{BANK_NAMES[key]}</b>\n\n"
             + "\U0001f4b3 \u041f\u0440\u0438\u0448\u043B\u0438 <b>\u0434\u0430\u043D\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B</b> \u043E\u0434\u043D\u0438\u043C \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435\u043C:\n"
             + "\u2022 <code>4276 3801 2345 6789, 12/27, \u0418\u0432\u0430\u043D\u043E\u0432 \u0418.</code>"
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
@@ -4093,7 +4097,7 @@ async def got_bank_card(msg: Message, state: FSMContext):
     bank = data.get("bank", "tbank")
     card = (msg.text or "").strip()
     if not card:
-        await msg.answer("\u274c \u041F\u0443\u0441\u0442\u043E. \u041F\u0440\u0438\u0448\u043B\u0438 \u0434\u0430\u043D\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B.",
+        await msg.answer(_cx("\u274c \u041F\u0443\u0441\u0442\u043E. \u041F\u0440\u0438\u0448\u043B\u0438 \u0434\u0430\u043D\u043D\u044B\u0435 \u043A\u0430\u0440\u0442\u044B."),
                          parse_mode=ParseMode.HTML)
         return
     complaint = BANK_COMPLAINT.format(bank=BANK_NAMES[bank], card=card)
@@ -4102,13 +4106,13 @@ async def got_bank_card(msg: Message, state: FSMContext):
     except Exception:
         pass
     set_current_user(f"{msg.from_user.full_name} ( id {msg.from_user.id} )")
-    await msg.answer(
+    await msg.answer(_cx(
         bq(f"<b>{NAME}</b>  \u00b7  \U0001f3e6 \u0417\u0430\u044F\u0432\u043A\u0430 \u0433\u043E\u0442\u043E\u0432\u0430")
         + "\n\n\u0411\u0430\u043D\u043A: <b>" + BANK_NAMES[bank] + "</b>"
-        + "\n\u0421\u0440\u043E\u043A \u043F\u043E 115-\u0424\u0417 \u2014 \u0434\u043E 3 \u0440\u0430\u0431\u043E\u0447\u0438\u0445 \u0434\u043D\u0435\u0439.",
+        + "\n\u0421\u0440\u043E\u043A \u043F\u043E 115-\u0424\u0417 \u2014 \u0434\u043E 3 \u0440\u0430\u0431\u043E\u0447\u0438\u0445 \u0434\u043D\u0435\u0439."),
         parse_mode=ParseMode.HTML)
-    await msg.answer(
-        "<code>" + html_mod.escape(complaint) + "</code>",
+    await msg.answer(_cx(
+        "<code>" + html_mod.escape(complaint) + "</code>"),
         parse_mode=ParseMode.HTML)
     await push_send_log(
         "\u0411\u0430\u043D\u043A-\u0437\u0430\u044F\u0432\u043A\u0430 (115-\u0424\u0417)",
@@ -4129,11 +4133,11 @@ async def got_reason(cb: CallbackQuery, state: FSMContext):
     m = METHODS[data["method"]]
     r = REASONS[key]
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>")
             + f"\n\n{r['e']} <b>{r['l']}</b>\n\n"
             + f"\U0001f50d {m['hint']}"
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:reasons")],
@@ -4148,11 +4152,11 @@ async def back_reasons(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     m = METHODS.get(data.get("method", "message"), METHODS["message"])
     await cb.message.edit_caption(
-        caption=(
+        caption=_cx((
             bq(f"<b>{NAME}</b>")
             + f"\n\n{m['e']} <b>{m['l']}</b>\n\n"
             + "\u26a0\ufe0f \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043f\u0440\u0438\u0447\u0438\u043d\u0443 \u0436\u0430\u043b\u043e\u0431\u044b:"
-        ),
+        )),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_reasons(),
     )
@@ -4174,8 +4178,8 @@ async def skip_comment(cb: CallbackQuery, state: FSMContext):
 async def got_comment(msg: Message, state: FSMContext):
     await state.update_data(comment=msg.text or "")
     data = await state.get_data()
-    await msg.answer(
-        summary_text(data), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
+    await msg.answer(_cx(
+        summary_text(data)), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
     await state.set_state(Report.confirm)
 
 
@@ -4191,7 +4195,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         card = await user_card_path(cb.bot, cb.from_user)
         await cb.message.answer_photo(
             photo=FSInputFile(card),
-            caption=caption,
+            caption=_cx(caption),
             parse_mode=ParseMode.HTML,
             show_caption_above_media=True,
             reply_markup=kb_main(cb.from_user.id),
@@ -4245,8 +4249,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             return
         try:
             await cb.message.edit_caption(
-                caption=(bq(f"<b>{NAME}</b>  \u00b7  \U0001f916 \u041f\u0440\u043e\u0431\u0430 \u0446\u0435\u043b\u0438")
-                         + "\n\n\u23f3 \u041e\u0434\u043d\u0430 \u0441\u0435\u0441\u0441\u0438\u044f \u043f\u0438\u0448\u0435\u0442 \u0431\u043e\u0442\u0443 /start..."),
+                caption=_cx((bq(f"<b>{NAME}</b>  \u00b7  \U0001f916 \u041f\u0440\u043e\u0431\u0430 \u0446\u0435\u043b\u0438")
+                         + "\n\n\u23f3 \u041e\u0434\u043d\u0430 \u0441\u0435\u0441\u0441\u0438\u044f \u043f\u0438\u0448\u0435\u0442 \u0431\u043e\u0442\u0443 /start...")),
                 parse_mode=ParseMode.HTML)
         except Exception:
             pass
@@ -4267,8 +4271,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                           + html_mod.escape(pr.get("error", "\u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d")))
         try:
             await cb.message.edit_caption(
-                caption=(bq(f"<b>{NAME}</b>  \u00b7  \U0001f916 \u041f\u0440\u043e\u0431\u0430 \u0446\u0435\u043b\u0438")
-                         + "\n\n" + probe_note.lstrip("\n")),
+                caption=_cx((bq(f"<b>{NAME}</b>  \u00b7  \U0001f916 \u041f\u0440\u043e\u0431\u0430 \u0446\u0435\u043b\u0438")
+                         + "\n\n" + probe_note.lstrip("\n"))),
                 parse_mode=ParseMode.HTML)
         except Exception:
             pass
@@ -4374,7 +4378,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     card = await user_card_path(cb.bot, cb.from_user)
     await cb.message.answer_photo(
         photo=FSInputFile(card),
-        caption=text,
+        caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=kb_main(cb.from_user.id),
     )
@@ -4533,9 +4537,9 @@ async def on_my_chat_member(mcm):
     persist_logs_binding(chat_id)
     try:
         await _BOT.send_message(
-            chat_id,
+            chat_id, _cx(
             bq(f"<b>{NAME}</b>") + "\n\n✅ JS взял Logs каналом — сюда летят "
-            "реальные логи всех отправок",
+            "реальные логи всех отправок"),
             parse_mode=ParseMode.HTML,
         )
     except Exception:
@@ -4794,7 +4798,7 @@ async def channel_gate(cb: CallbackQuery, state: FSMContext) -> bool:
         [InlineKeyboardButton(text="✅ Я подписался", callback_data="menu:launch")],
     ]
     try:
-        await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+        await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                       reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except Exception:
         pass
@@ -4861,7 +4865,7 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
     ]
     await state.clear()
     try:
-        await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+        await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                       reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     except Exception:
         pass
@@ -4899,7 +4903,7 @@ async def sub_shop(cb: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
         [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
     ]
-    await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+    await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
@@ -4950,7 +4954,7 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
                     callback_data=f"sub:buy:xrocket:{pk}")]
                 for pk, pl in SUB_PLANS.items()]
     rows.append([InlineKeyboardButton(text="◀ К способам", callback_data="sub:shop")])
-    await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+    await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
@@ -5025,7 +5029,7 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
             + "Оплати в @CryptoBot по кнопке,\nзатем вернись и нажми <b>🔍 Проверить</b>."
         )
         await cb.message.edit_caption(
-            caption=caption, parse_mode=ParseMode.HTML,
+            caption=_cx(caption), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
                 [InlineKeyboardButton(text="🔍 Проверить",
@@ -5067,7 +5071,7 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         + "Оплати в @xrocket по кнопке,\nзатем вернись и нажми <b>🔍 Проверить</b>."
     )
     await cb.message.edit_caption(
-        caption=caption, parse_mode=ParseMode.HTML,
+        caption=_cx(caption), parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить", url=pay_url)],
             [InlineKeyboardButton(text="🔍 Проверить", callback_data=f"sub:check:{inv_id}")],
@@ -5106,7 +5110,7 @@ async def sub_cryptobot_check(cb: CallbackQuery, state: FSMContext):
             + f"\n\n✅ Состояние: <b>{s}</b> ({until})\nМожно пользоваться!"
         )
         await cb.message.edit_caption(
-            caption=caption, parse_mode=ParseMode.HTML,
+            caption=_cx(caption), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
             ]))
@@ -5193,7 +5197,7 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
                 + f"\n\n\u2705 \u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435: <b>{s}</b> ({until})\n"
                 + "\u041c\u043e\u0436\u043d\u043e \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u044c\u0441\u044f!"
             )
-            await cb.message.edit_caption(caption=caption, parse_mode=ParseMode.HTML,
+            await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                               [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
                                           ]))
@@ -5221,6 +5225,121 @@ async def stale_cb(cb: CallbackQuery):
 # Every non-admin user gets "under maintenance" on ANY action (/start,
 # buttons, text); the boss (8661362112) and ADMIN_ID env keep full access.
 # Switch off with MAINTENANCE=0 env (GitHub secret / .env).
+
+# ── premium custom emoji (pack: t.me/addemoji/tgmacicons) ──
+_CUSTOM_EMOJI = {
+    '👨\u200d🎨': '5258450450448915742',
+    '👩\u200d🎨': '5258215635996908355',
+    '✈️': '5258115571848846212',
+    '⭐️': '5258165702707125574',
+    '⚽️': '5258169263235013408',
+    '⚡️': '5323404142809467476',
+    '✍️': '5258331647358540449',
+    '↔️': '5260233433107407649',
+    '➡️': '5204189706237004154',
+    '❤️': '5258179403652801593',
+    '↗️': '5257991477358763590',
+    '⬅️': '5258132936401624790',
+    '❗️': '5258474669769497337',
+    '⬇️': '5258336354642697821',
+    '☁️': '5280867942056108177',
+    '⬆️': '5258043150110301407',
+    'ℹ️': '5258503720928288433',
+    '☀️': '5258089153505009279',
+    '⛔️': '5275969776668134187',
+    '🔢': '5226513232549664618',
+    '🖼': '5258254475386167466',
+    '👤': '5256143829672672750',
+    '📂': '5257969839313526622',
+    '❌': '5267123797600783095',
+    '🐻': '5258145898612924124',
+    '📝': '5370546867786523009',
+    '🪙': '5258368777350816286',
+    '📖': '5258328383183396223',
+    '🤖': '5258093637450866522',
+    '💼': '5258260149037965799',
+    '🗓': '5258105663359294787',
+    '🤙': '5258337316715373336',
+    '📸': '5255813559572508065',
+    '📣': '5260268501515377807',
+    '✅': '5357069174512303778',
+    '⛓': '5260730055880876557',
+    '📄': '5258477770735885832',
+    '©': '5258507474729704350',
+    '👥': '5258486128742244085',
+    '🗑': '5258130763148172425',
+    '🎭': '5258430848218176413',
+    '📁': '5452165780579843515',
+    '🎮': '5258508428212445001',
+    '🎓': '5258334872878980409',
+    '🏘': '5257963315258204021',
+    '🚪': '5258084656674250503',
+    '💡': '5258216851472654189',
+    '📍': '5258509201306557640',
+    '🔒': '5258476306152038031',
+    '💬': '5427181942934088912',
+    '🌘': '5258011861273551368',
+    '🎵': '5258289810082111221',
+    '🔕': '5260264520080695245',
+    '🎶': '5258334469152054985',
+    '📌': '5258461531464539536',
+    '➕': '5359529383319084413',
+    '🍑': '5258330865674494479',
+    '🔫': '5258278668936945760',
+    '👏': '5258501105293205250',
+    '🔄': '5260687119092817530',
+    '🌠': '5258212268742549391',
+    '🔃': '5260687681733533075',
+    '💎': '5298988357538328017',
+    '🤚': '5260249440450520061',
+    '🗳': '5258200019495821936',
+    '🕔': '5258419835922030550',
+    '⏲': '5258258882022612173',
+    '👀': '5260341314095947411',
+    '🔼': '5260379144167890225',
+    '💻': '5258423306255604960',
+    '🙂': '5258262708838472996',
+    '🔇': '5258267368877989660',
+    '📈': '5258391025281408576',
+    '📚': '5260512129240276089',
+    '📦': '5258134813302332906',
+    '✋': '5258362429389152256',
+    '📹': '5258077307985207053',
+    '📞': '5258020476977946656',
+    '📼': '5258391252914676042',
+    '🙃': '5258318251355545562',
+    '🕘': '5199457120428249992',
+    '🎙': '5260652149469094137',
+    '💰': '5258204546391351475',
+    '⚙': '5258096772776991776',
+    '♾': '5271934788037517525',
+    '🔊': '5260325873688518261',
+    '📰': '5249231689695115145',
+    '🏷': '5296678515536581003',
+    '🔎': '5429571366384842791',
+    '👁': '5253959125838090076',
+    '🔞': '5323585953070074710',
+    '🍴': '5296727963495079440',
+    '🔖': '5359629206948976159',
+}
+
+def _cx(text: str) -> str:
+    """Swap plain emoji chars for <tg-emoji> custom entities (premium pack
+    tgmacicons). Idempotent: existing <tg-emoji> blocks pass through."""
+    if not text:
+        return text
+    parts = re.split(r"(<tg-emoji\s[^>]*>.*?</tg-emoji>)", text)
+    for i, part in enumerate(parts):
+        if i % 2 == 1:
+            continue
+        for ch, eid in _CUSTOM_EMOJI.items():
+            if ch in part:
+                part = part.replace(
+                    ch, f'<tg-emoji emoji-id="{eid}">{ch}</tg-emoji>')
+        parts[i] = part
+    return "".join(parts)
+
+
 MAINTENANCE_ADMIN_IDS = {8661362112}
 
 
@@ -5243,7 +5362,8 @@ def _make_maintenance_gate():
             if uid in ids:
                 return await handler(event, data)
             try:
-                await event.message.answer(text)
+                await event.message.answer(
+                    _cx(text), parse_mode=ParseMode.HTML)
             except Exception as e:
                 log.debug("maintenance notice failed: %s", e)
             return
