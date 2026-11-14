@@ -1121,15 +1121,73 @@ _MAIL_SYNONYMS = {
     "report": ["report", "complaint", "notification"],
 }
 
-_MAIL_SUBJECT_TPL_RU = [
-    "{base}", "{base} — обращение #{num}", "Re: {base}", "Fwd: {base}",
-    "{base} (важно)", "{base} | ticket #{num}",
-    "[Жалоба] {base}", "{base} — требует внимания",
-]
-_MAIL_SUBJECT_TPL_EN = [
-    "{base}", "Re: {base}", "{base} - Case #{num}", "Urgent: {base}",
-    "{base} (follow-up)", "Complaint: {base}", "{base} | ref #{num}",
-]
+# per-theme natural subjects ("Reporting user for spam" style),
+# ru/en variants picked to match the body language
+_MAIL_SUBJECTS = {
+    "spam": {
+        "ru": ["Жалоба на спам", "Жалоба на спам-рассылку",
+               "Репорт: спам-аккаунт", "Жалоба на рекламный спам"],
+        "en": ["Reporting user for spam", "Report: spam account",
+               "Spam messages report", "Reporting a spam bot"],
+    },
+    "fraud": {
+        "ru": ["Жалоба на мошенника", "Жалоба на мошенническую схему",
+               "Репорт: скам-аккаунт", "Жалоба на обман пользователей"],
+        "en": ["Reporting a scammer", "Scam report",
+               "Reporting a fraudulent account", "Report: fraud scheme"],
+    },
+    "violence": {
+        "ru": ["Жалоба на насилие", "Жалоба на угрозы насилия",
+               "Репорт: агрессивный контент"],
+        "en": ["Reporting violent content", "Report: violent threats",
+               "Reporting violence"],
+    },
+    "porn": {
+        "ru": ["Жалоба на порнографию", "Жалоба на интимный контент",
+               "Репорт: NSFW-контент"],
+        "en": ["Reporting pornographic content", "Report: NSFW content",
+               "Reporting adult content"],
+    },
+    "child": {
+        "ru": ["Жалоба на контент с участием несовершеннолетних",
+               "Срочная жалоба: угроза детям"],
+        "en": ["Reporting child safety violation",
+               "URGENT: child safety report",
+               "Reporting content endangering children"],
+    },
+    "copyright": {
+        "ru": ["Жалоба на нарушение авторских прав",
+               "DMCA: нарушение авторских прав",
+               "Жалоба на пиратский контент"],
+        "en": ["Copyright infringement report", "DMCA takedown request",
+               "Reporting copyright violation"],
+    },
+    "drugs": {
+        "ru": ["Жалоба на продажу наркотиков", "Жалоба на наркотрафик",
+               "Репорт: торговля запрещёнными веществами"],
+        "en": ["Reporting drug sales", "Report: narcotics trade",
+               "Reporting illegal drug sales"],
+    },
+    "personal": {
+        "ru": ["Жалоба на утечку личных данных",
+               "Жалоба: разглашение персональных данных", "Репорт: деанон"],
+        "en": ["Reporting personal data exposure", "Report: doxxing",
+               "Reporting leaked personal data"],
+    },
+    "fake": {
+        "ru": ["Жалоба на фейковый аккаунт", "Жалоба на клона аккаунта",
+               "Репорт: поддельный профиль"],
+        "en": ["Reporting a fake account", "Report: impersonation",
+               "Reporting an impostor account"],
+    },
+    "other": {
+        "ru": ["Жалоба на нарушение правил", "Жалоба на пользователя",
+               "Репорт: нарушение правил Telegram"],
+        "en": ["Reporting a rule violation", "Report: abusive account",
+               "Reporting a user"],
+    },
+}
+
 _MAIL_INTROS_RU = [
     "Здравствуйте, ", "Добрый день, ",
     "Уважаемая служба поддержки, ",
@@ -1175,13 +1233,6 @@ def mail_spin_text(text: str) -> str:
     return (random.choice(_MAIL_INTROS_RU if ru else _MAIL_INTROS_EN)
             + spun
             + random.choice(_MAIL_OUTROS_RU if ru else _MAIL_OUTROS_EN))
-
-
-def mail_spin_subject(subject: str) -> str:
-    num = random.randint(1000, 9999)
-    tpl = (_MAIL_SUBJECT_TPL_RU if _mail_is_ru(subject)
-           else _MAIL_SUBJECT_TPL_EN)
-    return random.choice(tpl).format(base=subject, num=num)
 
 
 def _mail_load_pool() -> list[tuple[str, str, str]]:
@@ -1251,8 +1302,9 @@ def _mail_compose(target: str, reason_key: str, used: set) -> tuple[str, str]:
         body = (mail_spin_text(base)
                 + ("\n\nНарушитель: " + target if ru
                    else "\n\nViolator: " + target))
-        subject = mail_spin_subject(
-            "Жалоба: " + target if ru else "Complaint: " + target)
+        subjects = _MAIL_SUBJECTS.get(reason_key,
+                                _MAIL_SUBJECTS["other"])
+        subject = random.choice(subjects["ru" if ru else "en"])
         if body not in used:
             break
     used.add(body)
