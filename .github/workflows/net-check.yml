@@ -11,42 +11,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      CRYPTOBOT_TOKEN: ${{ secrets.CRYPTOBOT_TOKEN }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests
-      - name: CryptoBot method scope probe
+      - name: Cloudtips page + api + tg bot discovery
         shell: bash
         run: |
+          echo "=== payment page a5139821 (curl) ==="
+          curl -s -L -o /tmp/ct.html -w "HTTP %{http_code} size %{size_download}\n" \
+            "https://pay.cloudtips.ru/p/a5139821"
           python3 - <<'PY'
-          import json, os, requests
-          tok = os.environ["CRYPTOBOT_TOKEN"]
-          H = {"Crypto-Pay-API-Token": tok}
-          B = "https://pay.crypt.bot/api/"
-          tests = [
-              ("getMe", "GET", None),
-              ("getBalance", "GET", None),
-              ("getCurrencies", "GET", None),
-              ("getExchangeRates", "GET", None),
-              ("getInvoices", "GET", {"status": "all", "limit": 3}),
-              ("getStats", "GET", None),
-              ("createInvoice", "POST", {"asset": "USDT", "amount": 0.5,
-                                         "description": "probe"}),
-              ("transfer", "POST", {"asset": "USDT", "amount": 0.5,
-                                    "user_id": 8661362112,
-                                    "spend_id": "probe-scope-test"}),
-          ]
-          for name, m, params in tests:
-              try:
-                  if m == "GET":
-                      r = requests.get(B + name, headers=H, params=params,
-                                       timeout=20)
-                  else:
-                      r = requests.post(B + name, headers=H, json=params,
-                                        timeout=20)
-                  print(name, "->", r.status_code, r.text[:220])
-              except Exception as e:
-                  print(name, "EXC", repr(e)[:120])
+          import re
+          t = open("/tmp/ct.html", encoding="utf-8", errors="replace").read()
+          print("title:", re.findall(r"<title>(.*?)</title>", t)[:1])
+          for kw in ["amount", "comment", "api", "recurrent", "currency",
+                     "СБП", "карт", "рубл"]:
+              hits = [m.start() for m in re.finditer(kw, t, re.I)]
+              print(f"kw {kw!r}: {len(hits)} hits")
+          print("api urls:", sorted(set(re.findall(
+              r"https?://[a-z0-9.\-]*cloudtips[a-z0-9.\-/]*", t, re.I)))[:15])
+          print("script srcs:", re.findall(r'src="([^"]+)"', t)[:12])
+          for m in re.finditer(r'.{70}(?amount=|amount:|amount").{140}', t, re.I):
+              print("ctx:", m.group(0).strip()[:230])
           PY
+          echo
+          echo "=== api.cloudtips.ru discovery ==="
+          for u in "https://api.cloudtips.ru/swagger/v1/swagger.json" \
+                   "https://api.cloudtips.ru/swagger/index.html" \
+                   "https://api.cloudtips.ru/api/GetRegistredAccounts" \
+                   "https://dev.cloudtips.ru/" \
+                   "https://api.cloudtips.ru/index.html"; do
+            echo "-- $u"
+            curl -s -o /tmp/a.txt -w "HTTP %{http_code} size %{size_download}\n" "$u"
+            head -c 200 /tmp/a.txt; echo
+          done
+          echo
+          echo "=== cloudtips tg bots (getChat) ==="
+          for name in cloudtips_bot CloudTipsBot cloudtips CloudtipsBot cloudtips_support_bot; do
+            code=$(curl -s -o /tmp/g.json -w "%{http_code}" \
+              "https://api.telegram.org/bot$BOT_TOKEN/getChat?chat_id=@$name")
+            echo "$name -> $code $(head -c 220 /tmp/g.json)"
+          done
