@@ -1,0 +1,42 @@
+name: emoji-fetch
+
+on:
+  workflow_dispatch:
+    inputs:
+      set_name:
+        description: "Custom emoji set short name (from t.me/addemoji/<name>)"
+        required: false
+        default: "tgmacicons"
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Fetch custom emoji set
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          tok = os.environ["BOT_TOKEN"]
+          name = "${{ github.event.inputs.set_name }}"
+          url = f"https://api.telegram.org/bot{tok}/getStickerSet?name={name}"
+          with urllib.request.urlopen(url, timeout=30) as r:
+              data = json.load(r)
+          if not data.get("ok"):
+              print("API error:", json.dumps(data)[:300])
+              raise SystemExit(1)
+          res = data["result"]
+          print("set:", res.get("name"), "|", res.get("title"),
+                "| type:", res.get("sticker_type"),
+                "| count:", len(res.get("stickers", [])))
+          for s in res.get("stickers", []):
+              print(f"{s.get('emoji','')}\t{s.get('custom_emoji_id','')}")
+          PY
