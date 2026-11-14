@@ -200,7 +200,7 @@ def bqe(text: str) -> str:
 
 
 def hero_caption(user_id: int = 0) -> str:
-    return bq("\U0001f680")
+    return bq("\u041c\u0435\u043d\u044e \U0001f680")
 
 
 # ── states ──────────────────────────────────────────────
