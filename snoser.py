@@ -828,19 +828,36 @@ def _resolve_logs_chat() -> str | None:
 
 async def push_send_log(title: str, lines: list[str]) -> None:
     """REAL internal log of every send action, from every user, to the Logs
-    channel (admin is there). If no channel is configured yet, falls back
-    to the admin's DM. Never fails the caller."""
+    channel (admin is there). Long payloads (mail batches: 200+ rows) are
+    split on line borders into several messages — Telegram's 4096-char cap
+    would otherwise silently drop the whole log. Never fails the caller."""
     chat = _resolve_logs_chat()
     if not chat or not _BOT:
         return
-    body = bq(f"<b>{NAME}</b>  \u2014  \U0001f4e4 {html_mod.escape(title)}")
-    body += f"\n\U0001f465 {html_mod.escape(get_current_user())}\n"
-    body += "\n".join(lines)
-    try:
-        await _BOT.send_message(chat, body, parse_mode=ParseMode.HTML,
-                                disable_web_page_preview=True)
-    except Exception as e:
-        log.debug("push_send_log failed: %s", e)
+    head = (bq(f"<b>{NAME}</b>  \u2014  \U0001f4e4 {html_mod.escape(title)}")
+            + f"\n\U0001f465 {html_mod.escape(get_current_user())}\n")
+    # pack rows into <=4000-char messages, header carried by the first chunk
+    safe = [ln if len(ln) <= 3990 else ln[:3990] + "\u2026" for ln in lines]
+    chunks, cur = [], head
+    for ln in safe:
+        cand = cur + "\n" + ln
+        if len(cand) > 4000:
+            chunks.append(cur)
+            cur = ln
+        else:
+            cur = cand
+    if cur:
+        chunks.append(cur)
+    for i, ch in enumerate(chunks):
+        try:
+            await _BOT.send_message(chat, ch, parse_mode=ParseMode.HTML,
+                                    disable_web_page_preview=True)
+        except Exception as e:
+            log.debug("push_send_log chunk %d/%d failed: %s",
+                      i + 1, len(chunks), e)
+        if len(chunks) > 1:
+            await asyncio.sleep(0.4)
+
 
 
 # ── reporter ────────────────────────────────────────────
