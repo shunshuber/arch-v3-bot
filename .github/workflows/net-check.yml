@@ -10,14 +10,17 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Verify custom_emoji rule across sources
+      - name: Probe colored buttons (docs + live API echo)
         run: |
           python - <<'PY'
-          import json, re, urllib.request, urllib.parse
+          import json, os, re, urllib.request
 
           def get(url, headers=None):
               req = urllib.request.Request(url, headers=headers or
@@ -25,93 +28,83 @@ jobs:
               with urllib.request.urlopen(req, timeout=30) as r:
                   return r.read().decode("utf-8", errors="replace")
 
-          print("=== 1. core.telegram.org/bots/api — MessageEntity ===")
+          def totext(html):
+              t = re.sub(r"<[^>]+>", " ", html)
+              return re.sub(r"\s+", " ", t)
+
+          print("=== 1. bots/api: style/color windows near buttons ===")
           try:
-              page = get("https://core.telegram.org/bots/api")
-              # strip html tags for readability around custom_emoji mentions
-              text = re.sub(r"<[^>]+>", " ", page)
-              text = re.sub(r"\s+", " ", text)
-              text = re.sub(r"<[^>]+>", " ", page)
-              text = re.sub(r"\s+", " ", text)
-              for m in re.finditer(r".{400}Fragment.{500}", text):
+              text = totext(get("https://core.telegram.org/bots/api"))
+              for m in re.finditer(r".{200}\b(style|colored|red)\b.{300}",
+                                   text, re.I):
+                  w = m.group(0)
+                  if re.search(r"button|keyboard", w, re.I):
+                      print("...", w.strip(), "...")
+                      print("---")
+          except Exception as e:
+              print("FAIL", e)
+
+          print()
+          print("=== 2. bots/api: KeyboardButton section ===")
+          try:
+              i = text.find("KeyboardButton This object")
+              print(text[i:i + 2400] if i >= 0 else "section not found")
+          except Exception as e:
+              print("FAIL", e)
+
+          print()
+          print("=== 3. bots/api: InlineKeyboardButton section ===")
+          try:
+              i = text.find("InlineKeyboardButton This object")
+              print(text[i:i + 2600] if i >= 0 else "section not found")
+          except Exception as e:
+              print("FAIL", e)
+
+          print()
+          print("=== 4. changelog: style/color entries ===")
+          try:
+              ct = totext(get("https://core.telegram.org/bots/api-changelog"))
+              for m in re.finditer(r".{260}(button style|colored|"
+                                   r"button_color|bg_color|"
+                                   r"style of.{0,30}button).{340}", ct, re.I):
                   print("...", m.group(0).strip(), "...")
                   print("---")
           except Exception as e:
-              print("FETCH FAIL:", e)
+              print("FAIL", e)
 
           print()
-          print("=== 2. bots/api-changelog — Bot API 7.0 ===")
-          try:
-              page = get("https://core.telegram.org/bots/api-changelog")
-              text = re.sub(r"<[^>]+>", " ", page)
-              text = re.sub(r"\s+", " ", text)
-              for m in re.finditer(r".{200}custom.emoji.{340}", text):
-                  print("...", m.group(0).strip(), "...")
-                  print("---")
-          except Exception as e:
-              print("FETCH FAIL:", e)
+          print("=== 5. live API echo: candidate fields on inline button ===")
+          tok = os.environ["BOT_TOKEN"]
+          chat = os.environ["ADMIN_ID"]
 
-          print()
-          print("=== 3. Stack Overflow search ===")
-          try:
-              q = urllib.parse.quote("bot send custom emoji fragment")
-              so = get(f"https://api.stackexchange.com/2.3/search/advanced?"
-                       f"order=desc&sort=relevance&q={q}&site=stackoverflow")
-              data = json.loads(so)
-              for item in data.get("items", [])[:5]:
-                  print("-", item.get("title"),
-                        "| score:", item.get("score"),
-                        "|", item.get("link"))
-          except Exception as e:
-              print("SEARCH FAIL:", e)
+          def try_field(field, value):
+              kb = {"inline_keyboard": [[{
+                  "text": "probe " + field,
+                  field: value,
+                  "callback_data": "noop",
+              }]]}
+              payload = {"chat_id": chat, "text": "color probe " + field,
+                         "reply_markup": kb}
+              req = urllib.request.Request(
+                  "https://api.telegram.org/bot" + tok + "/sendmessage",
+                  data=json.dumps(payload).encode(),
+                  headers={"Content-Type": "application/json"})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      res = json.load(r)
+              except Exception as e:
+                  body = getattr(e, "read", lambda: b"")()
+                  return "HTTPFAIL " + body.decode(errors="replace")[:220]
+              btn = (res.get("result", {}).get("reply_markup", {})
+                       .get("inline_keyboard", [[{}]])[0][0])
+              echo = btn.get(field)
+              if echo is None:
+                  return "ignored (not echoed)"
+              return "ECHO " + json.dumps(echo, ensure_ascii=False)
 
-              for m in re.finditer(r".{400}or in the.{500}", text):
-                  print("...", m.group(0).strip(), "...")
-                  print("---")
-          except Exception as e:
-              print("FETCH FAIL:", e)
-
-          print()
-          print("=== 2b. full premium-subscription wording (9.4) ===")
-          try:
-              page = get("https://core.telegram.org/bots/api-changelog")
-              text = re.sub(r"<[^>]+>", " ", page)
-              text = re.sub(r"\s+", " ", text)
-              for m in re.finditer(r".{160}Telegram Premium subscription.{420}",
-                                   text):
-                  print("...", m.group(0).strip(), "...")
-                  print("---")
-          except Exception as e:
-              print("FETCH FAIL:", e)
-
-          print()
-          print("=== 4b. Stack Overflow answer 78314430 ===")
-          try:
-              so = get("https://api.stackexchange.com/2.3/questions/"
-                       "78314430/answers?order=desc&sort=votes&"
-                       "site=stackoverflow&filter=withbody")
-              data = json.loads(so)
-              for item in data.get("items", [])[:2]:
-                  body = re.sub(r"<[^>]+>", " ", item.get("body", ""))
-                  body = re.sub(r"\s+", " ", body).strip()
-                  print("- answer score:", item.get("score"))
-                  print(body[:900])
-                  print("---")
-          except Exception as e:
-              print("SO FAIL:", e)
-
-          print()
-          print("=== 4. DuckDuckGo top results ===")
-          try:
-              q = urllib.parse.quote("telegram bot custom_emoji entity "
-                                     "fragment username")
-              ddg = get("https://html.duckduckgo.com/html/?q=" + q)
-              for m in re.finditer(
-                      r'<a rel="nofollow" class="result__a" href="([^"]+)">'
-                      r'(.*?)</a>', ddg):
-                  href, title = m.group(1), re.sub(r"<[^>]+>", "",
-                                                   m.group(2))
-                  print("-", title.strip()[:110], "|", href[:120])
-          except Exception as e:
-              print("SEARCH FAIL:", e)
+          for field in ["style", "color", "button_style", "bg_color",
+                        "background_color", "kind", "variant", "appearance"]:
+              print(field, "red ->", try_field(field, "red"))
+          for val in ["danger", "destructive", "primary", "success"]:
+              print("style", val, "->", try_field("style", val))
           PY
