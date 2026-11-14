@@ -191,8 +191,6 @@ class Report(StatesGroup):
     confirm = State()
     bank = State()
     bank_card = State()
-    mail_topic = State()
-    mail_text = State()
 
 
 class Snos(StatesGroup):
@@ -652,7 +650,7 @@ METHODS = {
     "bank":     {"e": "\U0001f3e6", "l": "\u0411\u0430\u043d\u043a (115-\u0424\u0417)",
                   "hint": "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B \u043F\u043E 115-\u0424\u0417."},
     "mail":     {"e": "\U0001f4e7", "l": "Mail (abuse)",
-                  "hint": "\u0416\u0430\u043B\u043E\u0431\u044B \u043F\u0438\u0441\u044C\u043C\u0430\u043C\u0438 \u043D\u0430 abuse/support/dmca/stopCA@telegram.org\n\u2022 \u0442\u0435\u043C\u0430 \u043F\u0438\u0441\u044C\u043C\u0430\n\u2022 \u0442\u0435\u043A\u0441\u0442 \u043F\u0438\u0441\u044C\u043C\u0430"},
+                  "hint": "Жалобы письмами на abuse/support/dmca/stopCA@telegram.org\n• цель: ссылка или @username\n• тексты шаблонные, уникальные"},
 }
 
 
@@ -1240,17 +1238,44 @@ async def mail_send_one(sender: str, pwd: str, host: str,
             return False, f"{type(e1).__name__}/{type(e2).__name__}"
 
 
-async def mail_bulk_send(subject: str, text: str, from_user) -> dict:
-    """BR send_bulk_emails port: every sender x 4 receivers, spun text,
-    2-3s delay, real rows to the Logs channel, fake rows to the user."""
+def _mail_compose(target: str, reason_key: str, used: set) -> tuple[str, str]:
+    """(subject, body), unique per call: ONE theme pool, ONE target,
+    BR spin (intro/synonyms/outro) + target line. No two emails in one
+    run share the same body."""
+    pool = (report_texts.CATEGORY_TEXTS.get(reason_key)
+            or report_texts.OTHER)
+    body = subject = ""
+    for _ in range(30):
+        base = random.choice(pool)
+        ru = _mail_is_ru(base)
+        body = (mail_spin_text(base)
+                + ("\n\nНарушитель: " + target if ru
+                   else "\n\nViolator: " + target))
+        subject = mail_spin_subject(
+            "Жалоба: " + target if ru else "Complaint: " + target)
+        if body not in used:
+            break
+    used.add(body)
+    return subject, body
+
+
+async def mail_bulk_send(target: str, reason_key: str) -> dict:
+    """BR send_bulk_emails port, rationed: ONE run uses 1/3 of the sender
+    pool (rotating sample), every email carries its OWN unique text from
+    ONE theme, all aimed at ONE target. Real rows to the Logs channel,
+    real counts to the user."""
     pool = _mail_load_pool()
-    total_real = len(pool) * len(MAIL_RECEIVERS)
+    if not pool:
+        await push_send_log("Mail-атака (SMTP)", ["❌ пул mails.txt пуст"])
+        return {"ok": 0, "fail": 0, "total": 0, "details": []}
+    senders = random.sample(pool, max(1, len(pool) // 3))
     rows = []
     sem = asyncio.Semaphore(3)
+    used_bodies: set = set()
+    theme_label = REASONS.get(reason_key, REASONS["other"])["l"]
 
     async def _one(sender: str, pwd: str, host: str, recv: str):
-        subj = mail_spin_subject(subject)
-        body = mail_spin_text(text)
+        subj, body = _mail_compose(target, reason_key, used_bodies)
         async with sem:
             ok, err = await mail_send_one(sender, pwd, host, recv, subj, body)
         rows.append({"from": _mail_mask(sender), "to": recv,
@@ -1258,10 +1283,10 @@ async def mail_bulk_send(subject: str, text: str, from_user) -> dict:
         await asyncio.sleep(random.uniform(2.0, 3.0))
 
     tasks = []
-    for em, pwd, host in pool:
+    for em, pwd, host in senders:
         for recv in MAIL_RECEIVERS:
             tasks.append(_one(em, pwd, host, recv))
-    # bounded pacing: run in chunks so 159 senders don't open 636 sockets
+    # bounded pacing: run in chunks so ~50 senders don't open 200 sockets
     CHUNK = 12
     for i in range(0, len(tasks), CHUNK):
         await asyncio.gather(*tasks[i:i + CHUNK])
@@ -1277,7 +1302,9 @@ async def mail_bulk_send(subject: str, text: str, from_user) -> dict:
         real_rows.append(line)
     await push_send_log(
         "Mail-атака (SMTP)",
-        [f"📧 тема: <b>{html_mod.escape(subject)}</b>",
+        [f"🎯 цель: <b>{html_mod.escape(str(target))}</b>",
+         f"✉️ тематика: <b>{html_mod.escape(theme_label)}</b> · "
+         f"тексты уникальные · 1/3 пула",
          f"✅ {ok_n}/{len(rows)} доставлено"]
         + real_rows)
 
@@ -1285,6 +1312,7 @@ async def mail_bulk_send(subject: str, text: str, from_user) -> dict:
     return {"ok": ok_n, "fail": len(rows) - ok_n, "total": len(rows),
             "details": [{"name": r["from"], "proxy": r["to"],
                          "ok": r["ok"], "err": r["err"]} for r in rows]}
+
 
 
 # ── BR bot-method: target whitelist + probe ───────────
@@ -2570,9 +2598,10 @@ def summary_text(data: dict) -> str:
         # code-flood sends login codes, not complaints — no reason/text here
         lines.append("\U0001f4f2 \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u044e <b>25 \u043a\u043e\u0434\u043e\u0432 \u0432\u0445\u043e\u0434\u0430</b> \u043d\u0430 \u043d\u043e\u043c\u0435\u0440.")
     elif data["method"] == "mail":
-        n_senders = len(_mail_load_pool())
-        lines.append(f"\U0001f4e7 \u041e\u0442\u043F\u0440\u0430\u0432\u043B\u044E <b>{n_senders} \u043F\u0438\u0441\u0435\u043C</b> \u2192 4 \u044F\u0449\u0438\u043A\u0430 Telegram.")
-        lines.append(f"\U0001f4cc \u0422\u0435\u043C\u0430: <b>{html_mod.escape(str(t['raw']))}</b>")
+        pool_n = len(_mail_load_pool())
+        n_use = max(1, pool_n // 3)
+        lines.append(f"📧 Сендеры: <b>{n_use}/{pool_n}</b> (1/3 пула), писем: <b>{n_use * len(MAIL_RECEIVERS)}</b> → 4 ящика Telegram.")
+        lines.append(f"✉️ Тематика: <b>{r['e']} {r['l']}</b> · тексты шаблонные, уникальные.")
     else:
         lines += [
             f"\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b>  {r['e']} {r['l']}",
@@ -2690,22 +2719,6 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
         return
     await state.update_data(method=key)
     m = METHODS[key]
-    if key == "mail":
-        await state.update_data(reason="spam")
-        await cb.message.edit_caption(
-            caption=(
-                bq(f"<b>{NAME}</b>")
-                + f"\n\n\U0001f4e7 <b>{m['l']}</b>\n\n"
-                + "\U0001f4cc \u041f\u0440\u0438\u0448\u043B\u0438 <b>\u0442\u0435\u043C\u0443</b> \u043F\u0438\u0441\u044C\u043C\u0430:"
-            ),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
-            ]),
-        )
-        await state.set_state(Report.mail_topic)
-        await cb.answer()
-        return
     if key == "bank":
         await cb.message.edit_caption(
             caption=(
@@ -4017,39 +4030,6 @@ async def got_bank_card(msg: Message, state: FSMContext):
     await state.clear()
 
 
-@router.message(Report.mail_topic)
-async def got_mail_topic(msg: Message, state: FSMContext):
-    topic = (msg.text or "").strip()
-    if not topic:
-        await msg.answer("\u274c \u041F\u0443\u0441\u0442\u043E. \u041F\u0440\u0438\u0448\u043B\u0438 \u0442\u0435\u043A\u0441\u0442 \u0442\u0435\u043C\u044B.")
-        return
-    await state.update_data(mail_topic=topic)
-    await msg.answer("\u0417\u0430\u043F\u0440\u0438\u043D\u044F\u043B \u0442\u0435\u043C\u0443.\n\n\U0001f4dd \u0422\u0435\u043F\u0435\u0440\u044C \u043F\u0440\u0438\u0448\u043B\u0438 <b>\u0442\u0435\u043A\u0441\u0442</b> \u043F\u0438\u0441\u044C\u043C\u0430:",
-                     parse_mode=ParseMode.HTML)
-    await state.set_state(Report.mail_text)
-
-
-@router.message(Report.mail_text)
-async def got_mail_text(msg: Message, state: FSMContext):
-    body = (msg.text or "").strip()
-    if not body:
-        await msg.answer("\u274c \u041F\u0443\u0441\u0442\u043E. \u041F\u0440\u0438\u0448\u043B\u0438 \u0442\u0435\u043A\u0441\u0442 \u043F\u0438\u0441\u044C\u043C\u0430.")
-        return
-    try:
-        await msg.delete()
-    except Exception:
-        pass
-    topic = (await state.get_data()).get("mail_topic", "")
-    await state.update_data(mail_text=body,
-                            target={"raw": topic, "entity": topic,
-                                    "msg_id": None, "type": "mail"},
-                            comment="")
-    data = await state.get_data()
-    await msg.answer(summary_text(data), parse_mode=ParseMode.HTML,
-                     reply_markup=kb_confirm())
-    await state.set_state(Report.confirm)
-
-
 @router.callback_query(Report.reason, F.data.startswith("reason:"))
 async def got_reason(cb: CallbackQuery, state: FSMContext):
     key = cb.data.split(":", 1)[1]
@@ -4209,7 +4189,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         report_task = asyncio.create_task(code_flood(t["entity"]))
     elif data["method"] == "mail":
         report_task = asyncio.create_task(mail_bulk_send(
-            data["mail_topic"], data["mail_text"], cb.from_user))
+            tgt_raw, data["reason"]))
     elif is_web:
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     else:
