@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Extract xRocket Pay API endpoints from docs
+      - name: Extract Pay API reference details
         run: |
           python - <<'PY'
           import re, urllib.request
@@ -26,35 +26,33 @@ jobs:
               with urllib.request.urlopen(req, timeout=25) as r:
                   return r.read().decode("utf-8", errors="replace")
 
-          print("=== sitemap pages ===")
-          sm = get("https://docs.xrocket.tg/sitemap.xml")
-          urls = re.findall(r"<loc>(.*?)</loc>", sm)
-          for u in urls:
-              print("-", u)
-
-          print()
-          print("=== pay/api related pages: endpoint lines ===")
-          for u in urls:
-              if not re.search(r"pay|api", u, re.I):
-                  continue
+          pages = [
+              "https://docs.xrocket.exchange/api/pay/pay-api-overview",
+              "https://docs.xrocket.exchange/api/pay/migration-legacy",
+              "https://docs.xrocket.exchange/api/pay/reference/http/"
+              "app-controller-get-app",
+              "https://docs.xrocket.exchange/api/pay/reference/http/"
+              "invoice-controller-create-invoice",
+              "https://docs.xrocket.exchange/api/pay/reference/http/"
+              "invoice-controller-get-invoice",
+              "https://docs.xrocket.exchange/api/pay/reference/http/"
+              "invoice-controller-get-invoice-payments",
+          ]
+          for u in pages:
               try:
                   page = get(u)
               except Exception as e:
-                  print("FAIL", u, e)
+                  print("FAIL", u, repr(e)[:120])
                   continue
               text = re.sub(r"<script.*?</script>", " ", page, flags=re.S)
+              text = re.sub(r"<style.*?</style>", " ", text, flags=re.S)
               text = re.sub(r"<[^>]+>", " ", text)
               text = re.sub(r"\s+", " ", text)
-              keep = []
+              print("PAGE:", u.rsplit("/", 1)[-1])
               for m in re.finditer(
-                      r".{80}(https://[^\s]*api[^\s]*|/api/v\d[^\s]*"
-                      r"|Bearer|Authorization|GET |POST |base.?url)"
-                      r".{140}", text, re.I):
-                  w = m.group(0).strip()
-                  if w not in keep:
-                      keep.append(w)
-              if keep:
-                  print("PAGE", u)
-                  for w in keep[:18]:
-                      print("  ...", w, "...")
+                      r".{100}(base.?url|Bearer|Authorization|"
+                      r"https://pay[^\s]*|GET /|POST /|DELETE /|"
+                      r"X-API|api.?key).{180}", text, re.I):
+                  print("  ...", m.group(0).strip()[:300], "...")
+              print("---")
           PY
