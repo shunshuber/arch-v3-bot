@@ -200,9 +200,8 @@ def bqe(text: str) -> str:
 
 
 def hero_caption(user_id: int = 0) -> str:
-    return (
-        bq(f"<b>{NAME}</b>")
-        + f"\n\U0001f680 <b>\u0412\u044b\u0431\u0435\u0440\u0438 \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435</b>"
+    return bq(
+        f"<b>{NAME}</b>\n\U0001f680 <b>\u0412\u044b\u0431\u0435\u0440\u0438 \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435</b>"
     )
 
 
