@@ -22,6 +22,8 @@ jobs:
       API_ID: ${{ secrets.API_ID }}
       API_HASH: ${{ secrets.API_HASH }}
       XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
+      CRYPTOBOT_TOKEN: ${{ secrets.CRYPTOBOT_TOKEN }}
+      MAINTENANCE: "0"
       SUB_CHANNEL_LINK: ${{ secrets.SUB_CHANNEL_LINK }}
       SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
       GROQ_KEY: ${{ secrets.GROQ_KEY }}

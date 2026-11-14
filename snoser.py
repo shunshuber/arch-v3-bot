@@ -4480,6 +4480,44 @@ async def cryptobot_api(method: str, params: dict | None = None) -> dict:
     return j.get("result") or {}
 
 
+
+async def xrocket_create_invoice(amount: float, payload: dict,
+                                 description: str) -> dict:
+    """xRocket Pay API (Bearer JWT, /api/v1 paths)."""
+    headers = {
+        "Authorization": f"Bearer {XROCKET_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "priceAmount": f"{amount:.2f}",
+        "priceCurrency": XROCKET_CURRENCY,
+        "description": description[:1000],
+        "clientInvoiceId": f"archv3_{payload['plan']}_{payload['tgId']}_"
+                           f"{int(time.time())}",
+        "data": payload,
+    }
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"{XROCKET_API}/invoices", json=body,
+                          headers=headers,
+                          timeout=aiohttp.ClientTimeout(total=20)) as r:
+            j = await r.json(content_type=None)
+            return j
+
+
+async def xrocket_get_invoice(invoice_id: str) -> dict:
+    headers = {
+        "Authorization": f"Bearer {XROCKET_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"{XROCKET_API}/invoice",
+                         params={"invoiceId": invoice_id},
+                         headers=headers,
+                         timeout=aiohttp.ClientTimeout(total=20)) as r:
+            j = await r.json(content_type=None)
+            return j
+
+
 def load_subs() -> dict:
     # always re-read subs.json so GH Actions checkout picks up fresh changes per-job run
     if SUBS_FILE.exists():
@@ -5201,7 +5239,7 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
                 pay_user = int(d.get("tgId") or pay_user)
             except (TypeError, ValueError):
                 pass
-        if status in ("paid", "confirmed", "success"):
+        if status in ("paid", "confirmed", "success", "completed"):
             if plan_key and SUB_PLANS.get(plan_key):
                 activate_plan(subs, pay_user, plan_key)
             await cb.answer("\u2705 \u041e\u043f\u043b\u0430\u0442\u0430 \u043f\u0440\u043e\u0448\u043b\u0430, \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u0430\u043a\u0442\u0438\u0432\u043d\u0430!", show_alert=True)
