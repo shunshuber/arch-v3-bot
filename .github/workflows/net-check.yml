@@ -16,27 +16,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install aiohttp
-      - name: discover invoice schema via validation errors
+      - name: full cycle probe create and get
         shell: bash
         run: |
-          echo "=== empty body -> full validation list ==="
-          curl -s -X POST \
+          echo "=== create invoice (legacy-style body) ==="
+          RESP=$(curl -s -w "\n%{http_code}" -X POST \
             -H "Authorization: Bearer $XROCKET_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{}' \
-            "https://pay.api.xrocket.exchange/api/v1/invoices"
+            -d '{"priceAmount":"0.50","priceCurrency":"USDT","description":"probe cycle","clientInvoiceId":"archv3_probe_1_'$RANDOM'","data":{"kind":"sub","plan":"d1","tgId":"8661362112"}}' \
+            "https://pay.api.xrocket.exchange/api/v1/invoices")
+          echo "$RESP"
+          INV=$(echo "$RESP" | head -c 4000 | grep -o '"id":"[0-9]*"' | head -1 | cut -d'"' -f4)
           echo
-          echo
-          echo "=== valid-ish body ==="
-          curl -s -X POST \
-            -H "Authorization: Bearer $XROCKET_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d '{"priceAmount":0.5,"priceCurrency":"USDT","description":"probe","payload":"probe"}' \
-            "https://pay.api.xrocket.exchange/api/v1/invoices"
-          echo
-          echo
-          echo "=== get invoice probe ==="
+          echo "=== get invoice $INV ==="
           curl -s \
             -H "Authorization: Bearer $XROCKET_TOKEN" \
-            "https://pay.api.xrocket.exchange/api/v1/invoices?limit=5"
+            "https://pay.api.xrocket.exchange/api/v1/invoice?invoiceId=$INV"
+          echo
+          echo
+          echo "=== get invoice payments ==="
+          curl -s \
+            -H "Authorization: Bearer $XROCKET_TOKEN" \
+            "https://pay.api.xrocket.exchange/api/v1/invoice/payments?invoiceId=$INV"
