@@ -177,8 +177,8 @@ def bqe(text: str) -> str:
 
 def hero_caption(user_id: int = 0) -> str:
     return (
-        bq(f"<b>{NAME}</b>  \u00b7  <i>report engine</i>")
-        + f"\n<code>\U0001f680</code> <b>\u0412\u044b\u0431\u0435\u0440\u0438 \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435</b>"
+        bq(f"<b>{NAME}</b>")
+        + f"\n\U0001f680 <b>\u0412\u044b\u0431\u0435\u0440\u0438 \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435</b>"
     )
 
 
@@ -2561,7 +2561,7 @@ async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
 # ── snos: UI state bits ─────────────────────────────────
 def kb_snos_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ])
 
 
@@ -2614,8 +2614,8 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
     ]
 
     if ADMIN_ID and user_id == int(ADMIN_ID):
-        rows.append([InlineKeyboardButton(text="\U0001f4e1 \u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", callback_data="menu:telemetry"),
-                     InlineKeyboardButton(text="\U0001f511 \u0412\u044b\u0434\u0430\u0442\u044c", callback_data="menu:grant")])
+        rows.append([InlineKeyboardButton(text="\u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", icon_custom_emoji_id="5258391025281408576", callback_data="menu:telemetry"),
+                     InlineKeyboardButton(text="\u0412\u044b\u0434\u0430\u0442\u044c", icon_custom_emoji_id="5258476306152038031", callback_data="menu:grant")])
         rows.append([InlineKeyboardButton(text="Сессия", icon_custom_emoji_id="5359529383319084413", callback_data="menu:addsess")])
     rows.append([InlineKeyboardButton(text="\u0418\u043d\u0444\u043e", icon_custom_emoji_id="5258503720928288433", callback_data="menu:info")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -2636,7 +2636,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=short["web"], icon_custom_emoji_id=short_icons["web"], callback_data="method:web"),
          InlineKeyboardButton(text=short["mail"], icon_custom_emoji_id=short_icons["mail"], callback_data="method:mail")],
         [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank")],
-        [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -2651,14 +2651,14 @@ def kb_reasons() -> InlineKeyboardMarkup:
             row.append(InlineKeyboardButton(
                 text=v['l'], callback_data=f"reason:{k}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:methods")])
+    rows.append([InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_skip() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u23e9 \u041f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c", callback_data="skip_comment")],
-        [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+        [InlineKeyboardButton(text="\u041f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5204189706237004154", callback_data="skip_comment")],
+        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ])
 
 
@@ -2825,7 +2825,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
                  InlineKeyboardButton(text="\u0410\u043B\u044C\u0444\u0430", callback_data="bank:alfa")],
                 [InlineKeyboardButton(text="\u0421\u0431\u0435\u0440", callback_data="bank:sber"),
                  InlineKeyboardButton(text="\u041E\u0437\u043E\u043D", callback_data="bank:ozon")],
-                [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
+                [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")],
             ]),
         )
         await state.set_state(Report.bank)
@@ -2892,7 +2892,7 @@ async def menu_refs(cb: CallbackQuery, state: FSMContext):
                              url=f"https://t.me/share/url?url={link}&text=Arch%20V3%20-%20жалобы%20и%20сброс%20сессий"),
     ], [
         InlineKeyboardButton(text="Проверить заново", icon_custom_emoji_id="5260687119092817530", callback_data="menu:refs"),
-        InlineKeyboardButton(text="◀ Назад", callback_data="back:home"),
+        InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home"),
     ]])
     await cb.message.edit_caption(caption=_cx(text), parse_mode=ParseMode.HTML,
                                   reply_markup=kb)
@@ -2970,7 +2970,7 @@ async def menu_profile(cb: CallbackQuery):
         caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
         ]),
     )
     await cb.answer()
@@ -2995,7 +2995,7 @@ async def menu_info(cb: CallbackQuery):
         caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
         ]),
     )
     await cb.answer()
@@ -3018,7 +3018,7 @@ async def menu_grant(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -3216,7 +3216,7 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
                                   callback_data="addsess:file")],
             [InlineKeyboardButton(text="Пересадка (мойка BR)", icon_custom_emoji_id="5258486128742244085",
                                   callback_data="addsess:trans")],
-            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -3232,7 +3232,7 @@ async def addsess_file(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -3304,7 +3304,7 @@ async def addsess_trans(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:home")],
+            [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -3754,7 +3754,7 @@ async def menu_mirror_add(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀ Назад", callback_data="menu:mirror_list")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="menu:mirror_list")],
         ]))
     await cb.answer()
 
@@ -3770,7 +3770,7 @@ async def menu_mirror_list(cb: CallbackQuery, state: FSMContext):
     kb_rows = [[InlineKeyboardButton(
         text=f"🪞 @{m['username']}", url=f"https://t.me/{m['username']}")] for m in mirrors]
     kb_rows.append([InlineKeyboardButton(text="Добавить", icon_custom_emoji_id="5359529383319084413", callback_data="menu:mirror_add")])
-    kb_rows.append([InlineKeyboardButton(text="◀ Назад", callback_data="back:home")])
+    kb_rows.append([InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")])
     text = (
         bq(f"<b>{NAME}</b>  ·  🪞 Зеркала")
         + f"\n\nВаши зеркала: <b>{len(mirrors)}</b> / {MIRROR_MAX}"
@@ -4089,7 +4089,7 @@ async def got_bank(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u25C0 \u041D\u0430\u0437\u0430\u0434", callback_data="back:methods")],
+            [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")],
         ]),
     )
     await state.set_state(Report.bank_card)
@@ -4145,7 +4145,7 @@ async def got_reason(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:reasons")],
+            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:reasons")],
         ]),
     )
     await state.set_state(Report.target)
@@ -4865,8 +4865,8 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
     rows = [
         [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
         [InlineKeyboardButton(text="CryptoBot (крипта)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:cbot")],
-        [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
-        [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     await state.clear()
     try:
@@ -4905,8 +4905,8 @@ async def sub_shop(cb: CallbackQuery, state: FSMContext):
     rows = [
         [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
         [InlineKeyboardButton(text="CryptoBot (крипта)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:cbot")],
-        [InlineKeyboardButton(text="🚀 xRocket (USDT)", callback_data="sub:pm:xr")],
-        [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+        [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -4958,7 +4958,7 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
                     text=f"💰 {pl['label']} — {pl['price']:g} USDT",
                     callback_data=f"sub:buy:xrocket:{pk}")]
                 for pk, pl in SUB_PLANS.items()]
-    rows.append([InlineKeyboardButton(text="◀ К способам", callback_data="sub:shop")])
+    rows.append([InlineKeyboardButton(text="К способам", icon_custom_emoji_id="5258132936401624790", callback_data="sub:shop")])
     await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
@@ -5039,7 +5039,7 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
                 [InlineKeyboardButton(text="Оплатить", icon_custom_emoji_id="5258204546391351475", url=pay_url)],
                 [InlineKeyboardButton(text="Проверить", icon_custom_emoji_id="5429571366384842791",
                                       callback_data=f"sub:cc:{inv_id}:{pk}")],
-                [InlineKeyboardButton(text="◀ Назад", callback_data="sub:pm:cbot")],
+                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="sub:pm:cbot")],
             ]),
         )
         await cb.answer()
@@ -5080,7 +5080,7 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Оплатить", icon_custom_emoji_id="5258204546391351475", url=pay_url)],
             [InlineKeyboardButton(text="Проверить", icon_custom_emoji_id="5429571366384842791", callback_data=f"sub:check:{inv_id}")],
-            [InlineKeyboardButton(text="◀ Назад", callback_data="sub:pm:xr")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="sub:pm:xr")],
         ]),
     )
     await cb.answer()
@@ -5117,7 +5117,7 @@ async def sub_cryptobot_check(cb: CallbackQuery, state: FSMContext):
         await cb.message.edit_caption(
             caption=_cx(caption), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="◀ Назад", callback_data="back:home")],
+                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
             ]))
         await push_send_log(
             "Оплата (CryptoBot)",
@@ -5204,7 +5204,7 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
             )
             await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                              [InlineKeyboardButton(text="\u25c0 \u041d\u0430\u0437\u0430\u0434", callback_data="back:home")],
+                                              [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
                                           ]))
             return
         await cb.answer(f"\u23f3 \u0441\u0442\u0430\u0442\u0443\u0441: {status or 'unknown'}", show_alert=True)
@@ -5234,6 +5234,7 @@ async def stale_cb(cb: CallbackQuery):
 # ── premium custom emoji (pack: t.me/addemoji/tgmacicons) ──
 _CUSTOM_EMOJI = {
     "🚀": '5323404142809467476', "🝬": '5258254475386167466',
+    "◀": '5258132936401624790', "📡": '5258391025281408576', "🔑": '5258476306152038031',
     '👨\u200d🎨': '5258450450448915742',
     '👩\u200d🎨': '5258215635996908355',
     '✈️': '5258115571848846212',
