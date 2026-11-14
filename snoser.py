@@ -4450,6 +4450,34 @@ SUB_PLANS = {
     "fore": {"label": "\u041d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 12.0},
 }
 
+# ── Cloudtips (RU cards / SBP) ───────────────────────────
+CLOUDTIPS_PAGE = "https://pay.cloudtips.ru/p/a5139821"
+CLOUDTIPS_RATE = float(os.getenv("CLOUDTIPS_RATE", "100"))   # rub per USDT
+CT_PENDING_FILE = Path(__file__).parent / "ct_pending.json"
+
+
+def ct_price_rub(pk: str) -> float:
+    return round(SUB_PLANS[pk]["price"] * CLOUDTIPS_RATE, 2)
+
+
+def ct_amount(uid: int, pk: str) -> str:
+    """Price with unique kopeck tail (10..99) derived from user id."""
+    tail = 10 + uid % 90
+    return f"{SUB_PLANS[pk]['price'] * CLOUDTIPS_RATE + tail / 100:.2f}"
+
+
+def load_ct_pending() -> dict:
+    try:
+        return json.loads(CT_PENDING_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_ct_pending(d: dict) -> None:
+    CT_PENDING_FILE.write_text(json.dumps(d, ensure_ascii=False),
+                               encoding="utf-8")
+
+
 # ── beta payment methods (CryptoBot + Telegram Stars) ────
 # PAY_METHODS_ADMIN = <uid> enables pilot mode; None opens everything
 PAY_METHODS_ADMIN: int | None = None
@@ -4910,6 +4938,7 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
         + "\n\nДля запуска нужна подписка. Выбери способ оплаты:"
     )
     rows = [
+        [InlineKeyboardButton(text="Карта РФ / СБП (₽)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:ct")],
         [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
         [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
         [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
@@ -4949,6 +4978,7 @@ async def sub_shop(cb: CallbackQuery, state: FSMContext):
         + "\n\nВыбери способ оплаты:"
     )
     rows = [
+        [InlineKeyboardButton(text="Карта РФ / СБП (₽)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:ct")],
         [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
         [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
         [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
@@ -4980,6 +5010,17 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
         rows = [[InlineKeyboardButton(
                     text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
                     callback_data=f"sub:buy:xtr:{pk}")]
+                for pk, pl in SUB_PLANS.items()]
+    elif m == "ct":
+        caption = (
+            bq(f"<b>{NAME}</b>  —  💳 Карта РФ / СБП")
+            + "\n\nОплата рублями через Cloudtips: карта любого банка РФ или СБП.\nТарифы:"
+        )
+        for pk, pl in SUB_PLANS.items():
+            caption += f"\n• <b>{pl['label']}</b> — <b>{ct_price_rub(pk):.0f} ₽</b>"
+        rows = [[InlineKeyboardButton(
+                    text=f"💰 {pl['label']} — {ct_price_rub(pk):.0f} ₽",
+                    callback_data=f"sub:buy:ct:{pk}")]
                 for pk, pl in SUB_PLANS.items()]
     else:
         caption = (
@@ -5030,6 +5071,42 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         return
 
+    if method == "ct":
+        if _pilot_only(cb):
+            await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
+            return
+        uid = cb.from_user.id
+        amount = ct_amount(uid, pk)
+        pay_url = f"{CLOUDTIPS_PAGE}?amount={amount}"
+        pend = load_ct_pending()
+        pend[str(uid)] = {"plan": pk, "amount": amount, "ts": time.time()}
+        save_ct_pending(pend)
+        price_r = f"{ct_price_rub(pk):.0f}"
+        caption = (
+            bq(f"<b>{NAME}</b>  —  💳 Оплата Cloudtips")
+            + f"\n\n💳 <b>{pl['label']}</b> — <b>{price_r} ₽</b>"
+            + f"\n🧾 Сумма к оплате: <b>{amount} ₽</b>\n\n"
+            + "Сумма уже вбитая — на странице выбери <b>СБП</b> или карту\n"
+            + "и заплати <b>ровно эту сумму</b>. Копейки — твой код платежа.\n"
+            + "После оплаты жми <b>✅ Я оплатил</b>."
+        )
+        await cb.message.edit_caption(
+            caption=_cx(caption), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"Оплатить {amount} ₽",
+                                      icon_custom_emoji_id="5258204546391351475",
+                                      url=pay_url)],
+                [InlineKeyboardButton(text="Я оплатил",
+                                      icon_custom_emoji_id="5357069174512303778",
+                                      callback_data=f"sub:ctpaid:{pk}")],
+                [InlineKeyboardButton(text="Назад",
+                                      icon_custom_emoji_id="5258132936401624790",
+                                      callback_data="sub:pm:ct")],
+            ]),
+        )
+        await cb.answer()
+        return
+
     # ── xrocket (USDT, everyone) ──
     if not XROCKET_TOKEN:
         await cb.answer("Оплата не настроена (XROCKET_TOKEN)", show_alert=True)
@@ -5068,6 +5145,108 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="sub:pm:xr")],
         ]),
     )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("sub:ctpaid:"))
+async def sub_ct_paid(cb: CallbackQuery, state: FSMContext):
+    """Buyer pressed 'I paid' → admin approve request."""
+    pk = cb.data.rsplit(":", 1)[1]
+    if pk not in SUB_PLANS:
+        await cb.answer("❌", show_alert=True)
+        return
+    uid = cb.from_user.id
+    pl = SUB_PLANS[pk]
+    pend = load_ct_pending()
+    rec = pend.get(str(uid))
+    if not rec or rec.get("plan") != pk:
+        rec = {"plan": pk, "amount": ct_amount(uid, pk), "ts": time.time()}
+        pend[str(uid)] = rec
+        save_ct_pending(pend)
+    amount = rec["amount"]
+    who = html_mod.escape(cb.from_user.first_name or cb.from_user.username
+                          or str(uid))
+    days = pl["days"] if pl["days"] is not None else "∞"
+    text = (
+        bq("💳 Заявка Cloudtips")
+        + f"\n👤 <b>{who}</b> — <code>{uid}</code>"
+        + f"\n📦 План: <b>{pl['label']}</b> ({days} дн.)"
+        + f"\n💰 Сумма: <b>{amount} ₽</b>"
+        + "\n✅ Проверь поступление в Cloudtips и выдай."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выдать",
+                              icon_custom_emoji_id="5357069174512303778",
+                              callback_data=f"sub:ctok:{uid}:{pk}")],
+        [InlineKeyboardButton(text="❌ Отказ",
+                              icon_custom_emoji_id="5267123797600783095",
+                              callback_data=f"sub:ctno:{uid}:{pk}")],
+    ])
+    sent = False
+    if ADMIN_ID:
+        try:
+            await cb.bot.send_message(int(ADMIN_ID), _cx(text),
+                                      parse_mode=ParseMode.HTML,
+                                      reply_markup=kb)
+            sent = True
+        except Exception as e:
+            log.error("cloudtips admin notify failed: %s", e)
+    await push_send_log(
+        "Заявка Cloudtips",
+        [f"👤 <code>{uid}</code> — план <b>{pk}</b>",
+         f"💰 {amount} ₽", "✅ выдать" if sent else "⚠️ админ недоступен"])
+    await cb.answer("Заявка отправлена — ждём подтверждения", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("sub:ctok:"))
+async def sub_ct_ok(cb: CallbackQuery, state: FSMContext):
+    """Admin approves cloudtips payment → activate plan."""
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer("⛔️", show_alert=True)
+        return
+    _, _, uid_s, pk = cb.data.split(":")
+    if pk not in SUB_PLANS:
+        await cb.answer("❌", show_alert=True)
+        return
+    uid = int(uid_s)
+    subs = load_subs()
+    activate_plan(subs, uid, pk)
+    pend = load_ct_pending()
+    pend.pop(str(uid), None)
+    save_ct_pending(pend)
+    s, until = sub_quality(subs, uid)
+    try:
+        await cb.bot.send_message(
+            uid,
+            _cx(bq(f"<b>{NAME}</b> — оплата подтверждена ✅")
+                + f"\n\n✅ Подписка: <b>{s}</b> ({until})\nМожно пользоваться!"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    await push_send_log(
+        "Оплата (Cloudtips)",
+        [f"✅ <code>{uid}</code> — план <b>{pk}</b> выдан"])
+    await cb.message.edit_text(_cx(f"✅ Выдано: план <b>{pk}</b> → <code>{uid}</code>"),
+                               parse_mode=ParseMode.HTML)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("sub:ctno:"))
+async def sub_ct_no(cb: CallbackQuery, state: FSMContext):
+    """Admin rejects cloudtips claim."""
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer("⛔️", show_alert=True)
+        return
+    _, _, uid_s, pk = cb.data.split(":")
+    uid = int(uid_s)
+    pend = load_ct_pending()
+    pend.pop(str(uid), None)
+    save_ct_pending(pend)
+    await push_send_log(
+        "Заявка Cloudtips",
+        [f"❌ отказ: <code>{uid}</code> — план {pk}"])
+    await cb.message.edit_text(_cx(f"❌ Отклонено: <code>{uid}</code> ({pk})"),
+                               parse_mode=ParseMode.HTML)
     await cb.answer()
 
 
