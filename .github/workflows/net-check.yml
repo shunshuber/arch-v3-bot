@@ -31,7 +31,9 @@ jobs:
               # strip html tags for readability around custom_emoji mentions
               text = re.sub(r"<[^>]+>", " ", page)
               text = re.sub(r"\s+", " ", text)
-              for m in re.finditer(r".{220}custom_emoji.{320}", text):
+              text = re.sub(r"<[^>]+>", " ", page)
+              text = re.sub(r"\s+", " ", text)
+              for m in re.finditer(r".{400}Fragment.{500}", text):
                   print("...", m.group(0).strip(), "...")
                   print("---")
           except Exception as e:
@@ -62,6 +64,41 @@ jobs:
                         "|", item.get("link"))
           except Exception as e:
               print("SEARCH FAIL:", e)
+
+              for m in re.finditer(r".{400}or in the.{500}", text):
+                  print("...", m.group(0).strip(), "...")
+                  print("---")
+          except Exception as e:
+              print("FETCH FAIL:", e)
+
+          print()
+          print("=== 2b. full premium-subscription wording (9.4) ===")
+          try:
+              page = get("https://core.telegram.org/bots/api-changelog")
+              text = re.sub(r"<[^>]+>", " ", page)
+              text = re.sub(r"\s+", " ", text)
+              for m in re.finditer(r".{160}Telegram Premium subscription.{420}",
+                                   text):
+                  print("...", m.group(0).strip(), "...")
+                  print("---")
+          except Exception as e:
+              print("FETCH FAIL:", e)
+
+          print()
+          print("=== 4b. Stack Overflow answer 78314430 ===")
+          try:
+              so = get("https://api.stackexchange.com/2.3/questions/"
+                       "78314430/answers?order=desc&sort=votes&"
+                       "site=stackoverflow&filter=withbody")
+              data = json.loads(so)
+              for item in data.get("items", [])[:2]:
+                  body = re.sub(r"<[^>]+>", " ", item.get("body", ""))
+                  body = re.sub(r"\s+", " ", body).strip()
+                  print("- answer score:", item.get("score"))
+                  print(body[:900])
+                  print("---")
+          except Exception as e:
+              print("SO FAIL:", e)
 
           print()
           print("=== 4. DuckDuckGo top results ===")
