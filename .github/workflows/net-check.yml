@@ -10,54 +10,47 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 12
-    env:
-      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Cloudtips bundles + api + tg bots
+      - name: Cloudtips deep extraction
         shell: bash
         run: |
-          echo "=== env.js ==="
-          curl -s "https://pay.cloudtips.ru/assets/env.js" -o /tmp/env.js \
-            -w "HTTP %{http_code} size %{size_download}\n"
-          cat /tmp/env.js
+          echo "=== public page config json ==="
+          for q in "api/paymentpages/a5139821?theme=LIGHT" \
+                   "api/paymentpages/a5139821" \
+                   "api/paymentpage/a5139821"; do
+            echo "-- /$q"
+            curl -s -o /tmp/p.json -w "HTTP %{http_code} size %{size_download}\n" \
+              "https://api.cloudtips.ru/$q" -H "Accept: application/json" \
+              -H "Origin: https://pay.cloudtips.ru" -H "Referer: https://pay.cloudtips.ru/"
+            head -c 700 /tmp/p.json; echo
+          done
           echo
-          echo "=== main.js bundle ==="
-          curl -s "https://pay.cloudtips.ru/main.53cccfc72e5faa58.js" \
-            -o /tmp/main.js -w "HTTP %{http_code} size %{size_download}\n"
+          echo "=== main.js endpoint extraction ==="
+          curl -s "https://pay.cloudtips.ru/main.53cccfc72e5faa58.js" -o /tmp/main.js
           python3 - <<'PY'
           import re
           t = open("/tmp/main.js", encoding="utf-8", errors="replace").read()
-          urls = sorted(set(re.findall(r"https://[a-z0-9.\-]+", t)))
-          print("hardcoded urls:", [u for u in urls if "cloudtips" in u
-                                    or "psbank" in u or "api" in u][:20])
-          paths = sorted(set(re.findall(r'"/?api/[a-zA-Z0-9/_\-]+', t)))[:40]
-          print("api paths:")
-          for p in paths:
-              print("  ", p)
-          for kw in ["amount", "comment", "sbp", "recurrent", "payer",
-                     "paymentpage", "externalId", "orderId"]:
-              n = len(re.findall(kw, t, re.I))
-              print(f"kw {kw!r}: {n}")
-          idx = t.lower().find("paymentpage")
-          if idx >= 0:
-              print("ctx paymentpage:", t[max(0, idx-150):idx+250][:380])
+          eps = sorted(set(re.findall(
+              r'requestService\.(get|post|put|delete)\(\s*"([^"]+)"', t)))
+          for m, p in eps:
+              print(f"{m.upper():6} {p}")
+          print()
+          for kw in ["amount", "comment"]:
+              for m in re.finditer(kw, t, re.I):
+                  s = t[max(0, m.start()-130):m.start()+170]
+                  s = re.sub(r"\s+", " ", s)
+                  print(f"[{kw}] ...{s}...")
+                  print()
+              break
+          i = t.lower().find("queryparam")
+          if i >= 0:
+              print("queryparam ctx:", re.sub(r"\s+", " ", t[i-200:i+400])[:550])
+          for kw in ["referrerParams", "URLSearchParams", "queryParams", "routeParam"]:
+              i = t.find(kw)
+              if i >= 0:
+                  print(f"{kw} ctx:", re.sub(r"\s+", " ",
+                        t[max(0,i-150):i+350])[:480])
           PY
-          echo
-          echo "=== api probes ==="
-          for u in "https://api.cloudtips.ru/swagger/v1/swagger.json" \
-                   "https://api.cloudtips.ru/api/payment/page/a5139821" \
-                   "https://api.cloudtips.ru/index.html"; do
-            echo "-- $u"
-            curl -s -o /tmp/a.txt -w "HTTP %{http_code} size %{size_download}\n" "$u"
-            head -c 260 /tmp/a.txt; echo
-          done
-          echo
-          echo "=== cloudtips tg bots (getChat) ==="
-          for name in cloudtips_bot CloudTipsBot cloudtips CloudtipsBot cloudtips_ru cloudtips_payment_bot; do
-            code=$(curl -s -o /tmp/g.json -w "%{http_code}" \
-              "https://api.telegram.org/bot$BOT_TOKEN/getChat?chat_id=@$name")
-            echo "$name -> $code $(head -c 200 /tmp/g.json)"
-          done
