@@ -12,20 +12,20 @@ jobs:
     timeout-minutes: 5
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Probe custom_emoji send via Bot API
+      - name: Probe custom_emoji send to private chat (owner has Premium)
         run: |
           python - <<'PY'
           import json, os, urllib.request
 
           tok = os.environ["BOT_TOKEN"]
-          chat = os.environ["LOGS_CHAT_ID"]
+          chat = os.environ["ADMIN_ID"]
           eid = "5357069174512303778"   # ✅ from tgmacicons
-          text = "✅ test custom emoji send"
+          text = "✅ test custom emoji send (private chat, owner premium)"
 
           payload = {
               "chat_id": chat,
@@ -43,21 +43,45 @@ jobs:
               headers={"Content-Type": "application/json"})
           with urllib.request.urlopen(req, timeout=30) as r:
               res = json.load(r)
-          print("RESULT:", json.dumps(res, ensure_ascii=False)[:600])
+          msg = res.get("result", {})
+          print("SENT entities:", json.dumps(msg.get("entities"),
+                                             ensure_ascii=False))
+          print("SENT full:", json.dumps(res, ensure_ascii=False)[:500])
 
-          # forward echo: does the stored message keep the custom entity?
-          fwd = {
+          # button with custom emoji icon (Bot API 9.4)
+          kb = {"inline_keyboard": [[{
+              "text": "Проверить эмодзи-кнопку",
+              "icon_custom_emoji_id": eid,
+              "callback_data": "noop",
+          }]]}
+          payload2 = {
               "chat_id": chat,
-              "from_chat_id": chat,
-              "message_id": res["result"]["message_id"],
+              "text": "тест кастом-иконки на кнопке",
+              "reply_markup": kb,
           }
           req2 = urllib.request.Request(
-              f"https://api.telegram.org/bot{tok}/forwardmessage",
-              data=json.dumps(fwd).encode(),
+              f"https://api.telegram.org/bot{tok}/sendmessage",
+              data=json.dumps(payload2).encode(),
               headers={"Content-Type": "application/json"})
-          with urllib.request.urlopen(req2, timeout=30) as r:
-              res2 = json.load(r)
-          ent = res2.get("result", {}).get("entities")
-          print("FORWARD entities:", json.dumps(ent, ensure_ascii=False))
-          print("FORWARD full:", json.dumps(res2, ensure_ascii=False)[:400])
+          try:
+              with urllib.request.urlopen(req2, timeout=30) as r:
+                  res2 = json.load(r)
+              print("BUTTON ok:", res2.get("ok"))
+          except Exception as e:
+              body = getattr(e, "read", lambda: b"")()
+              print("BUTTON fail:", body.decode(errors="replace")[:400])
+
+          # forward echo: does the stored message keep the custom entity?
+          if msg.get("message_id"):
+              fwd = {"chat_id": chat, "from_chat_id": chat,
+                     "message_id": msg["message_id"]}
+              req3 = urllib.request.Request(
+                  f"https://api.telegram.org/bot{tok}/forwardmessage",
+                  data=json.dumps(fwd).encode(),
+                  headers={"Content-Type": "application/json"})
+              with urllib.request.urlopen(req3, timeout=30) as r:
+                  res3 = json.load(r)
+              print("FORWARD entities:",
+                    json.dumps(res3.get("result", {}).get("entities"),
+                               ensure_ascii=False))
           PY
