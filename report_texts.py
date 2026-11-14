@@ -226,18 +226,18 @@ CHILD = [
 
 # ─── порнография ─────────────────────────────────────────
 PORN = [
-    "Этот канал распространяет порнографический контент в открытом доступе.",
+    "Этот аккаунт распространяет порнографический контент в открытом доступе.",
     "Пользователь рассылает порнографию в личные сообщения.",
-    "Прошу заблокировать канал с откровенным контентом.",
+    "Прошу заблокировать аккаунт с откровенным контентом.",
     "Аккаунт публикует 18+ материалы без какой-либо маркировки.",
-    "Пожалуйста, заблокируйте порнографический канал, он нарушает правила.",
+    "Пожалуйста, заблокируйте аккаунт, распространяющий порнографический контент, он нарушает правила.",
     "Он дёргает в личку с порнографическими вложениями без спроса.",
     "Данный аккаунт ведёт себя как бот для распространения 18+.",
-    "Рассылка порноконтента через группы, нужна блокировка.",
+    "Рассылка порноконтента через группы от этого аккаунта, нужна блокировка.",
     "Прошу заблокировать: пользователь распространяет откровенный контент несовершеннолетним.",
-    "This channel distributes pornographic content publicly.",
+    "This account distributes pornographic content publicly.",
     "This user sends porn in private messages.",
-    "Please block the channel with explicit content.",
+    "Please block the account with explicit content.",
     "The account posts 18+ materials without any marking.",
     "He sends explicit media in DMs without consent.",
 ]
@@ -329,8 +329,27 @@ OTHER = [
     "This user is toxic and aggressive, please restrict him.",
 ]
 
+SEXWORK = [
+    "Этот аккаунт рекламирует интим-услуги за деньги: публикует посты с прайсом на «час» и «ночь», условиями встреч и контактами для брони. Это реклама проституции — запрещённый и незаконный контент. Требую заблокировать аккаунт.",
+    "Аккаунт распространяет объявления о продаже интим-услуг с ценами и фото интимного характера в листинг-группе. Реклама проституции нарушает правила Telegram. Прошу заблокировать пользователя.",
+    "Пользователь торгует интим-услугами через Telegram: объявления с ценами, выездом и местом встречи. Прошу заблокировать аккаунт за рекламу проституции.",
+    "Данный аккаунт размещает рекламу проституции: интимные фото, прайс-лист на час, контакты для заказа. Подобная деятельность запрещена. Требую бана аккаунта.",
+    "Аккаунт используется для рекламы сексуальных услуг за плату, включая предложения выезда. Это незаконная деятельность. Немедленно заблокируйте пользователя.",
+    "Через этот аккаунт продают интим-услуги: посты с ценами и контактами для заказа. Прошу заблокировать его за рекламу проституции.",
+    "Массовая реклама интим-услуг (проституция) с откровенным контентом 18+ через личный аккаунт. Требую блокировки аккаунта.",
+    "Аккаунт предлагает интим-услуги за плату — реклама проституции и незаконной деятельности. Заблокируйте аккаунт немедленно.",
+    "This account advertises paid sexual services: posts with hourly rates, meeting conditions and booking contacts. This is prostitution advertising — banned and illegal. Ban the account.",
+    "The account distributes escort ads with prices and explicit photos in a listing group. Prostitution advertising violates Telegram ToS. Please ban the user.",
+    "This user sells sexual services through Telegram: ads with prices, outcall offers and meeting spots. Ban the account for prostitution advertising.",
+    "The account is used to advertise sexual services for money, including explicit media. This is illegal activity. Ban the user immediately.",
+    "User posts prostitution ads with a price list and booking contact. Such accounts must be removed. Please ban.",
+    "Advertising sexual services for money, including explicit photos, runs through this personal account. Block the account.",
+]
+
+
 CATEGORY_TEXTS = {
     "spam": SPAM,
+    "sexwork": SEXWORK,
     "fraud": FRAUD,
     "violence": VIOLENCE,
     "child": CHILD,

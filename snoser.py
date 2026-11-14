@@ -248,6 +248,16 @@ REASONS = {
 # ── auto comment templates: 10 per category, 10 languages ──
 # used when the user skips the comment step; strong multi-lingual texts
 COMMENT_TEMPLATES = {
+    "sexwork": [
+        # RU
+        "Этот аккаунт используется для рекламы проституции: публикует прайс на интим-услуги («час», «ночь»), условия встреч, выезд и контакты для заказа, сопровождая посты интимным контентом 18+. Реклама проституции прямо запрещена правилами Telegram и законом. Требую немедленной блокировки аккаунта и удаления всех публикаций.",
+        # EN
+        "This account is used for prostitution advertising: it posts price lists for sexual services ('hour', 'night'), meeting conditions, outcall offers and booking contacts, accompanied by explicit 18+ media. Advertising prostitution is explicitly banned under Telegram's ToS and local law. Demand: immediate account ban and removal of all publications.",
+        # DE
+        "Dieses Konto wird für die Werbung von Prostitution genutzt: Preislisten für Sexualdienstleistungen ('Stunde', 'Nacht'), Treffpunktbedingungen, Hausbesuche und Booking-Kontakte, begleitet von expliziten 18+-Medien. Werbung für Prostitution verstößt klar gegen die Telegram-AGB. Sofortige Sperrung des Kontos wird gefordert.",
+        # ES
+        "Esta cuenta se usa para anunciar prostitución: publica listas de precios de servicios sexuales ('hora', 'noche'), condiciones de encuentro, salidas a domicilio y contactos de reserva, acompañados de contenido explícito +18. La publicidad de prostitución está prohibida por las normas de Telegram. Exijo el bloqueo inmediato de la cuenta.",
+    ],
     "spam": [
         # RU
         "Этот аккаунт массово рассылает спам в личные сообщения и группы. Кампания идёт сутками без перерыва, сотни пользователей уже пострадали. Требую немедленной блокировки аккаунта и удаления всей рассылки.",
@@ -1141,6 +1151,14 @@ _MAIL_SYNONYMS = {
 # per-theme natural subjects ("Reporting user for spam" style),
 # ru/en variants picked to match the body language
 _MAIL_SUBJECTS = {
+    "sexwork": {
+        "ru": ["Жалоба на рекламу интим-услуг",
+               "Жалоба на рекламу проституции",
+               "Репорт: аккаунт с проституцией"],
+        "en": ["Reporting prostitution advertising",
+               "Report: escort services ad",
+               "Reporting sexual services solicitation"],
+    },
     "spam": {
         "ru": ["Жалоба на спам", "Жалоба на спам-рассылку",
                "Репорт: спам-аккаунт", "Жалоба на рекламный спам"],

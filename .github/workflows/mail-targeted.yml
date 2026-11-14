@@ -1,0 +1,50 @@
+name: mail-targeted
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Violator account (@username) or link"
+        required: true
+      evidence:
+        description: "Evidence post link (optional)"
+        required: false
+        default: ""
+      reasons:
+        description: "Comma-separated theme keys (sexwork,porn,spam,...)"
+        required: false
+        default: "sexwork,porn"
+      web:
+        description: "Also fire web support-form reports (1/0)"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  fire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+      GROQ_KEY: ${{ secrets.GROQ_KEY }}
+      WEB_COUNT: "5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Fire targeted reports
+        run: |
+          echo "targeted run started at $(date -u +%H:%M:%S)"
+          python targeted_report.py \
+            "${{ github.event.inputs.target }}" \
+            "${{ github.event.inputs.evidence }}" \
+            "${{ github.event.inputs.reasons }}" \
+            "${{ github.event.inputs.web }}"
