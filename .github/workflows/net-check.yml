@@ -10,14 +10,16 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Extract Pay API reference details
+      - name: Pay API schema + live probe
         run: |
           python - <<'PY'
-          import re, urllib.request
+          import json, os, re, urllib.request, urllib.error
 
           def get(url):
               req = urllib.request.Request(url,
@@ -26,33 +28,52 @@ jobs:
               with urllib.request.urlopen(req, timeout=25) as r:
                   return r.read().decode("utf-8", errors="replace")
 
-          pages = [
-              "https://docs.xrocket.exchange/api/pay/pay-api-overview",
-              "https://docs.xrocket.exchange/api/pay/migration-legacy",
-              "https://docs.xrocket.exchange/api/pay/reference/http/"
-              "app-controller-get-app",
-              "https://docs.xrocket.exchange/api/pay/reference/http/"
-              "invoice-controller-create-invoice",
-              "https://docs.xrocket.exchange/api/pay/reference/http/"
-              "invoice-controller-get-invoice",
-              "https://docs.xrocket.exchange/api/pay/reference/http/"
-              "invoice-controller-get-invoice-payments",
-          ]
-          for u in pages:
-              try:
-                  page = get(u)
-              except Exception as e:
-                  print("FAIL", u, repr(e)[:120])
-                  continue
-              text = re.sub(r"<script.*?</script>", " ", page, flags=re.S)
-              text = re.sub(r"<style.*?</style>", " ", text, flags=re.S)
-              text = re.sub(r"<[^>]+>", " ", text)
-              text = re.sub(r"\s+", " ", text)
-              print("PAGE:", u.rsplit("/", 1)[-1])
-              for m in re.finditer(
-                      r".{100}(base.?url|Bearer|Authorization|"
-                      r"https://pay[^\s]*|GET /|POST /|DELETE /|"
-                      r"X-API|api.?key).{180}", text, re.I):
-                  print("  ...", m.group(0).strip()[:300], "...")
-              print("---")
+          def totext(page):
+              t = re.sub(r"<script.*?</script>", " ", page, flags=re.S)
+              t = re.sub(r"<[^>]+>", " ", t)
+              return re.sub(r"\s+", " ", t)
+
+          print("=== create-invoice request schema ===")
+          page = get("https://docs.xrocket.exchange/api/pay/reference/"
+                     "http/invoice-controller-create-invoice")
+          t = totext(page)
+          i = t.find("Request")
+          print(t[i:i + 3000])
+
+          print()
+          print("=== get-invoice schema ===")
+          page = get("https://docs.xrocket.exchange/api/pay/reference/"
+                     "http/invoice-controller-get-invoice")
+          t = totext(page)
+          i = t.find("Get invoice info")
+          j = t.find("Request", i)
+          print(t[j:j + 2600])
+
+          print()
+          print("=== LIVE app-info ===")
+          tok = os.environ["XROCKET_TOKEN"]
+          req = urllib.request.Request(
+              "https://pay.api.xrocket.exchange/api/v1/app-info")
+          req.add_header("Authorization", "Bearer " + tok)
+          try:
+              with urllib.request.urlopen(req, timeout=25) as r:
+                  print(r.status, r.read().decode()[:400])
+          except urllib.error.HTTPError as e:
+              print(e.code, e.read().decode(errors="replace")[:400])
+
+          print()
+          print("=== LIVE create invoice (0.5 USDT probe) ===")
+          body = {"amount": 0.5, "currency": "USDT",
+                  "description": "probe", "payload": "probe"}
+          req = urllib.request.Request(
+              "https://pay.api.xrocket.exchange/api/v1/invoices",
+              data=json.dumps(body).encode(),
+              headers={"Content-Type": "application/json",
+                       "Authorization": "Bearer " + tok},
+              method="POST")
+          try:
+              with urllib.request.urlopen(req, timeout=25) as r:
+                  print(r.status, r.read().decode()[:600])
+          except urllib.error.HTTPError as e:
+              print(e.code, e.read().decode(errors="replace")[:600])
           PY
