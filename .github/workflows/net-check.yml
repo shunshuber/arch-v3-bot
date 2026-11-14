@@ -12,43 +12,48 @@ jobs:
     timeout-minutes: 10
     env:
       XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
-      CRYPTOBOT_TOKEN: ${{ secrets.CRYPTOBOT_TOKEN }}
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Probe CryptoBot and xRocket pay APIs
+      - name: Find xRocket Pay API docs and endpoints
         run: |
           python - <<'PY'
-          import json, os, urllib.request, urllib.error
+          import json, os, re, urllib.request, urllib.error
 
-          def hit(url, token, header):
-              req = urllib.request.Request(url)
-              req.add_header(header[0], header[1] + " " + token
-                             if header[1] else token)
-              req.add_header("User-Agent", "Mozilla/5.0")
+          def get(url, headers=None):
+              req = urllib.request.Request(url, headers=headers or
+                                           {"User-Agent": "Mozilla/5.0"})
               try:
                   with urllib.request.urlopen(req, timeout=25) as r:
                       return r.status, r.read().decode("utf-8",
-                                                       errors="replace")[:300]
+                                                       errors="replace")
               except urllib.error.HTTPError as e:
                   return e.code, e.read().decode("utf-8",
-                                                 errors="replace")[:300]
+                                                 errors="replace")
               except Exception as e:
-                  return 0, repr(e)[:200]
+                  return 0, repr(e)
 
-          ct = os.environ["CRYPTOBOT_TOKEN"]
-          print("=== CryptoBot getMe ===")
-          s, b = hit("https://pay.crypt.bot/api/getMe", ct,
-                     ("Crypto-Pay-API-Token", ""))
-          print(s, b)
+          print("=== docs candidates ===")
+          for url in ["https://pay.api.xrocket.exchange/docs-json",
+                      "https://pay.api.xrocket.exchange/docs",
+                      "https://pay.xrocket.tg/docs-json",
+                      "https://pay.xrocket.tg/docs",
+                      "https://wiki.xrocket.tg/",
+                      "https://docs.xrocket.tg/"]:
+              s, b = get(url)
+              print(url, "->", s, "len:", len(b))
+              if s == 200 and len(b) < 400000:
+                  print(b[:600].replace("\n", " ")[:600])
+              print("---")
 
-          xr = os.environ["XROCKET_TOKEN"]
-          print("=== xRocket host hunt (GET me) ===")
-          for host in ["https://pay.api.xrocket.exchange/api/v1/me",
-                       "https://xrocket.tg/api/v1/me",
-                       "https://pay.xrocket.tg/api/v1/me",
-                       "https://api.xrocket.tg/api/v1/me"]:
-              s, b = hit(host, xr, ("Authorization", "Bearer"))
-              print(host, "->", s, b[:220])
+          print("=== DDG: xrocket pay api ===")
+          s, b = get("https://html.duckduckgo.com/html/?q=" +
+                     "xrocket+pay+api+create+invoice+documentation")
+          for m in re.finditer(r'result__a[^>]*>(.*?)</a>', b):
+              print("-", re.sub(r"<[^>]+>", "", m.group(1))[:110])
+          for m in re.finditer(r'class="result__snippet"[^>]*>(.*?)</a>',
+                               b, re.S):
+              t = re.sub(r"<[^>]+>", " ", m.group(1))
+              print("  ", re.sub(r"\s+", " ", t)[:180])
           PY
