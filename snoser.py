@@ -200,9 +200,7 @@ def bqe(text: str) -> str:
 
 
 def hero_caption(user_id: int = 0) -> str:
-    return bq(
-        f"<b>{NAME}</b>\n\U0001f680 <b>\u0412\u044b\u0431\u0435\u0440\u0438 \u043d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435</b>"
-    )
+    return bq("\U0001f680")
 
 
 # ── states ──────────────────────────────────────────────
@@ -2640,7 +2638,6 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="\u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", icon_custom_emoji_id="5258391025281408576", callback_data="menu:telemetry"),
                      InlineKeyboardButton(text="\u0412\u044b\u0434\u0430\u0442\u044c", icon_custom_emoji_id="5258476306152038031", callback_data="menu:grant")])
         rows.append([InlineKeyboardButton(text="Сессия", icon_custom_emoji_id="5359529383319084413", callback_data="menu:addsess")])
-    rows.append([InlineKeyboardButton(text="\u0418\u043d\u0444\u043e", icon_custom_emoji_id="5258503720928288433", callback_data="menu:info")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2797,7 +2794,6 @@ async def cmd_start(msg: Message, state: FSMContext):
         msg,
         caption=_cx(caption),
         parse_mode=ParseMode.HTML,
-        show_caption_above_media=True,
         reply_markup=kb_main(uid),
     )
 
@@ -3709,7 +3705,6 @@ async def back_home(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_caption(
         caption=_cx(caption),
         parse_mode=ParseMode.HTML,
-        show_caption_above_media=True,
         reply_markup=kb_main(cb.from_user.id),
     )
     await cb.answer()
@@ -3745,7 +3740,6 @@ async def captcha_solve(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_caption(
         caption=_cx(hero_caption(uid)),
         parse_mode=ParseMode.HTML,
-        show_caption_above_media=True,
     )
 
 
@@ -3914,7 +3908,6 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
             cb.message,
             caption=_cx(caption),
             parse_mode=ParseMode.HTML,
-            show_caption_above_media=True,
             reply_markup=kb_main(cb.from_user.id))
         await state.clear()
         await cb.answer()
@@ -4220,7 +4213,6 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             cb.message,
             caption=_cx(caption),
             parse_mode=ParseMode.HTML,
-            show_caption_above_media=True,
             reply_markup=kb_main(cb.from_user.id),
         )
         await state.clear()
