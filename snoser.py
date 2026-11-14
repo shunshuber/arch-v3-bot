@@ -4911,7 +4911,6 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
     )
     rows = [
         [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
-        [InlineKeyboardButton(text="CryptoBot (крипта)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:cbot")],
         [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
         [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
@@ -4951,7 +4950,6 @@ async def sub_shop(cb: CallbackQuery, state: FSMContext):
     )
     rows = [
         [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
-        [InlineKeyboardButton(text="CryptoBot (крипта)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:cbot")],
         [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
         [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
@@ -4982,17 +4980,6 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
         rows = [[InlineKeyboardButton(
                     text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
                     callback_data=f"sub:buy:xtr:{pk}")]
-                for pk, pl in SUB_PLANS.items()]
-    elif m == "cbot":
-        caption = (
-            bq(f"<b>{NAME}</b>  —  💵 CryptoBot")
-            + "\n\nИнвойс в USDT через официальный @CryptoBot.\nТарифы:"
-        )
-        for pk, pl in SUB_PLANS.items():
-            caption += f"\n• <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
-        rows = [[InlineKeyboardButton(
-                    text=f"💰 {pl['label']} — {pl['price']:g} USDT",
-                    callback_data=f"sub:buy:cbot:{pk}")]
                 for pk, pl in SUB_PLANS.items()]
     else:
         caption = (
@@ -5040,55 +5027,6 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
             log.error("stars invoice failed: %s", e)
             await cb.answer(f"❌ Инвойс не создан: {type(e).__name__}", show_alert=True)
             return
-        await cb.answer()
-        return
-
-    if method == "cbot":
-        if _pilot_only(cb):
-            await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
-            return
-        try:
-            me = await cb.bot.get_me()
-            invoice = await cryptobot_api("createInvoice", {
-                "asset": "USDT",
-                "amount": pl["price"],
-                "description": f"{NAME} subscription {pl['label']}"[:1024],
-                "payload": json.dumps({"kind": "sub", "plan": pk,
-                                       "tgId": str(cb.from_user.id)}),
-                "expires_in": 3600,
-                "paid_btn_name": "callback",
-                "paid_btn_url": f"https://t.me/{me.username}",
-            })
-        except Exception as e:
-            log.error("cryptobot invoice failed: %s", e)
-            await cb.answer(f"❌ Инвойс не создан: {type(e).__name__}", show_alert=True)
-            return
-        inv_id = str(invoice.get("invoice_id") or "")
-        pay_url = invoice.get("pay_url") or invoice.get("bot_invoice_url") or ""
-        if not inv_id or not pay_url:
-            log.error("cryptobot bad invoice: %s", invoice)
-            await cb.answer("❌ Инвойс не создан", show_alert=True)
-            return
-        data = await state.get_data()
-        pend = data.get("pend", {})
-        pend[f"cb{inv_id}"] = {"user": cb.from_user.id, "plan": pk,
-                               "ts": time.time(), "method": "cbot"}
-        await state.update_data(pend=pend)
-        caption = (
-            bq(f"<b>{NAME}</b>  —  Оплата CryptoBot")
-            + f"\n\n💳 <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
-            + f"\n🧾 <b>Invoice:</b> <code>{inv_id}</code>\n\n"
-            + "Оплати в @CryptoBot по кнопке,\nзатем вернись и нажми <b>🔍 Проверить</b>."
-        )
-        await cb.message.edit_caption(
-            caption=_cx(caption), parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Оплатить", icon_custom_emoji_id="5258204546391351475", url=pay_url)],
-                [InlineKeyboardButton(text="Проверить", icon_custom_emoji_id="5429571366384842791",
-                                      callback_data=f"sub:cc:{inv_id}:{pk}")],
-                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="sub:pm:cbot")],
-            ]),
-        )
         await cb.answer()
         return
 
