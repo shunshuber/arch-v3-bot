@@ -5217,6 +5217,52 @@ async def stale_cb(cb: CallbackQuery):
     await cb.answer("\u26a0\ufe0f \u0421\u0435\u0441\u0441\u0438\u044f \u0438\u0441\u0442\u0435\u043a\u043b\u0430. /start", show_alert=True)
 
 
+# ── maintenance gate ────────────────────────────────────────
+# Every non-admin user gets "under maintenance" on ANY action (/start,
+# buttons, text); the boss (8661362112) and ADMIN_ID env keep full access.
+# Switch off with MAINTENANCE=0 env (GitHub secret / .env).
+MAINTENANCE_ADMIN_IDS = {8661362112}
+
+
+def _make_maintenance_gate():
+    on = os.getenv("MAINTENANCE", "1") != "0"
+    ids = set(MAINTENANCE_ADMIN_IDS)
+    if ADMIN_ID:
+        try:
+            ids.add(int(ADMIN_ID))
+        except ValueError:
+            pass
+    text = ("\U0001f6e0 \u0411\u043e\u0442 \u043d\u0430 \u0442\u0435\u0445\u043d\u0438\u0447\u0435\u0441\u043a\u0438\u0445 \u0440\u0430\u0431\u043e\u0442\u0430\u0445. "
+            "\u0421\u043a\u043e\u0440\u043e \u043e\u0442\u043a\u0440\u043e\u0435\u0442\u0441\u044f \u2014 \u0437\u0430\u0433\u043b\u044f\u043d\u0438 \u0447\u0443\u0442\u044c \u043f\u043e\u0437\u0436\u0435.")
+
+    async def _gate(handler, event, data):
+        if not on:
+            return await handler(event, data)
+        if event.message is not None:
+            uid = getattr(getattr(event.message, "from_user", None), "id", None)
+            if uid in ids:
+                return await handler(event, data)
+            try:
+                await event.message.answer(text)
+            except Exception as e:
+                log.debug("maintenance notice failed: %s", e)
+            return
+        if event.callback_query is not None:
+            uid = getattr(getattr(event.callback_query, "from_user", None),
+                          "id", None)
+            if uid in ids:
+                return await handler(event, data)
+            try:
+                await event.callback_query.answer(text, show_alert=True)
+            except Exception as e:
+                log.debug("maintenance cb-notice failed: %s", e)
+            return
+        return  # other update types from non-admins: held silently
+
+    return _gate
+
+
+
 # ── run ─────────────────────────────────────────────────
 async def main():
     if not BOT_TOKEN:
@@ -5224,6 +5270,8 @@ async def main():
         return
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+    # ── maintenance gate: boss only, everyone else gets the notice ──────
+    dp.update.outer_middleware(_make_maintenance_gate())
     n = len(load_sessions())
     p = len(load_proxies())
     log.info("%s starting... sessions=%d proxies=%d paid=%d",
