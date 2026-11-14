@@ -2567,7 +2567,7 @@ def kb_snos_back() -> InlineKeyboardMarkup:
 
 def kb_snos_confirm() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5267123797600783095", callback_data="snosrun:yes"),
+        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5267123797600783095", style="danger", callback_data="snosrun:yes"),
          InlineKeyboardButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", icon_custom_emoji_id="5267123797600783095", callback_data="snosrun:no")],
     ])
 
@@ -2606,7 +2606,7 @@ def parse_target(text: str) -> dict:
 
 def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u043a", icon_custom_emoji_id="5323404142809467476", callback_data="menu:launch")],
+        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u043a", icon_custom_emoji_id="5323404142809467476", style="danger", callback_data="menu:launch")],
         [InlineKeyboardButton(text="\u041f\u0440\u043e\u0444\u0438\u043b\u044c", icon_custom_emoji_id="5256143829672672750", callback_data="menu:profile"),
          InlineKeyboardButton(text="\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", icon_custom_emoji_id="5258204546391351475", callback_data="menu:subs")],
         [InlineKeyboardButton(text="\u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", icon_custom_emoji_id="5298988357538328017", callback_data="menu:refs")],
