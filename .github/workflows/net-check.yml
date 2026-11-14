@@ -37,7 +37,7 @@ jobs:
           page = get("https://docs.xrocket.exchange/api/pay/reference/"
                      "http/invoice-controller-create-invoice")
           t = totext(page)
-          i = t.find("Request")
+          i = t.find("amount")
           print(t[i:i + 3000])
 
           print()
@@ -46,8 +46,8 @@ jobs:
                      "http/invoice-controller-get-invoice")
           t = totext(page)
           i = t.find("Get invoice info")
-          j = t.find("Request", i)
-          print(t[j:j + 2600])
+          j = t.find("invoiceId")
+          print(t[max(0, j - 400):j + 2600])
 
           print()
           print("=== LIVE app-info ===")
@@ -55,6 +55,7 @@ jobs:
           req = urllib.request.Request(
               "https://pay.api.xrocket.exchange/api/v1/app-info")
           req.add_header("Authorization", "Bearer " + tok)
+          req.add_header("Content-Type", "application/json")
           try:
               with urllib.request.urlopen(req, timeout=25) as r:
                   print(r.status, r.read().decode()[:400])
