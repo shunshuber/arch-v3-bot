@@ -4614,6 +4614,10 @@ async def ct_poll_once(bot) -> None:
             activate_plan(subs, uid, plan)
             pend.pop(uid_s)
             changed = True
+            # consumed money must not count toward other pending recs
+            for _o in pend.values():
+                if "base" in _o:
+                    _o["base"] = round(_o["base"] + amount, 2)
             s, until = sub_quality(subs, uid)
             try:
                 await bot.send_message(
