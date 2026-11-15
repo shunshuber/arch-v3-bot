@@ -1603,7 +1603,12 @@ def _ledger_bump(name: str) -> int:
 
 
 def _session_punish(name: str, err: str, kind: str) -> None:
-    """Dead -> session_status.json; flooded -> rest timer in the ledger."""
+    """Dead -> session_status.json; flooded -> rest timer in the ledger.
+    NO_SESSION_KICK=1 (default) — dead verdicts are log-only, the session
+    stays in the pool and is retried on the next run."""
+    if kind == "dead" and os.getenv("NO_SESSION_KICK", "1") != "0":
+        log.warning("kick suppressed (NO_SESSION_KICK): %s | %s", name, err)
+        return
     if kind == "dead":
         st = _status_load()
         if name not in (st.get("dead") or []):
@@ -3477,7 +3482,6 @@ async def addsess_code(cb: CallbackQuery, state: FSMContext):
 
 @router.message(AddSession.code_phone, F.text)
 async def addsess_code_phone(msg: Message, state: FSMContext):
-    from telethon.errors import FloodWaitError
     phone = _norm_phone(msg.text or "")
     if not phone:
         await msg.answer(_cx("❌ Нужен номер: <code>+79991234567</code>"),
@@ -3487,40 +3491,93 @@ async def addsess_code_phone(msg: Message, state: FSMContext):
     digits = re.sub(r"\D", "", phone)
     dest = Path(__file__).parent / "sessions" / f"s{digits}.session"
     dest.parent.mkdir(exist_ok=True)
-    px = load_pin_proxies()
-    client = TelegramClient(str(dest.with_suffix("")), API_ID, API_HASH,
-                            proxy=pin_for_session(dest.stem, px))
-    try:
-        await asyncio.wait_for(client.connect(), timeout=20)
-        sent = await client.send_code_request(phone)
-    except FloodWaitError as e:
+    await state.update_data(phone=phone, dest=str(dest), attempt=0)
+    await _login_send_step(msg, state, attempt=0, edit=False)
+
+
+async def _login_send_step(target, state: FSMContext, attempt: int,
+                           edit: bool) -> None:
+    """send_code_request through a ROTATING pool IP (base + attempt) —
+    the deterministic pin hammering one paid IP is why codes stopped
+    arriving. Each retry rides the next proxy in the pool."""
+    from telethon.errors import FloodWaitError
+    data = await state.get_data()
+    phone, dest_s = data.get("phone", ""), data.get("dest", "")
+    pool = load_pin_proxies()
+    kb = None
+    if not pool:
+        text = (bq(f"<b>{NAME}</b>  ·  📱 Сессия через код")
+                + "\n\n⛔️ Пул прокси пуст — код входа без прокси "
+                "не отправляется.\n"
+                "Закинь прокси (paid_proxies.txt / proxies.txt) и повтори.")
+    else:
+        base = int(hashlib.sha1(Path(dest_s).stem.encode()).hexdigest(), 16)
+        pin = pool[(base + attempt) % len(pool)]
+        client = TelegramClient(str(Path(dest_s).with_suffix("")),
+                                API_ID, API_HASH, proxy=pin)
         try:
-            await client.disconnect()
-        except Exception:
-            pass
-        await msg.answer(_cx(
-            f"⏳ Телеграм просит подождать: <b>{e.seconds} сек</b>. "
-            "Попробуй позже."),
-            parse_mode=ParseMode.HTML)
-        return
-    except Exception as e:
+            await asyncio.wait_for(client.connect(), timeout=20)
+            sent = await client.send_code_request(phone)
+        except FloodWaitError as e:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            text = (bq(f"<b>{NAME}</b>  ·  📱 Сессия через код")
+                    + f"\n\n⏳ Телеграм просит подождать: "
+                    f"<b>{e.seconds} сек</b>.")
+        except Exception as e:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            text = (bq(f"<b>{NAME}</b>  ·  📱 Сессия через код")
+                    + f"\n\n❌ Код не отправлен (IP "
+                    f"<code>{html_mod.escape(str(pin[1]))}</code>): "
+                    f"<code>{html_mod.escape(str(e)[:100])}</code>")
+        else:
+            _LOGIN_CLIENTS[target.from_user.id] = client
+            await state.update_data(phone_hash=sent.phone_code_hash,
+                                    attempt=attempt)
+            await state.set_state(AddSession.code_login)
+            text = (bq(f"<b>{NAME}</b>  ·  📟 Код отправлен")
+                    + f"\n\nНомер: <code>{html_mod.escape(phone)}</code>"
+                    + f"\n🔌 код через: <code>{html_mod.escape(str(pin[1]))}"
+                    + ("</code>" if not attempt else
+                       f"</code> (попытка {attempt + 1})")
+                    + "\nКод придёт в Telegram (или от 777000). "
+                    "Пришли его цифры.")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🔄 Не пришёл — другой IP",
+                    icon_custom_emoji_id="5258216851472654189",
+                    callback_data="addsess:code_retry")]])
+    if edit:
         try:
-            await client.disconnect()
+            await target.message.edit_caption(
+                caption=_cx(text), parse_mode=ParseMode.HTML,
+                reply_markup=kb)
         except Exception:
-            pass
-        await msg.answer(_cx(
-            f"❌ Код не отправлен: <code>{html_mod.escape(str(e)[:120])}</code>"),
-            parse_mode=ParseMode.HTML)
+            await target.message.answer(_cx(text),
+                                        parse_mode=ParseMode.HTML,
+                                        reply_markup=kb)
+    else:
+        await target.answer(_cx(text), parse_mode=ParseMode.HTML,
+                            reply_markup=kb)
+
+
+@router.callback_query(AddSession.code_login,
+                       F.data == "addsess:code_retry")
+async def addsess_code_retry(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("phone"):
+        await cb.answer("Начни заново: Сессия → Через код", show_alert=True)
         return
-    _LOGIN_CLIENTS[msg.from_user.id] = client
-    await state.update_data(phone=phone, phone_hash=sent.phone_code_hash,
-                            dest=str(dest))
-    await state.set_state(AddSession.code_login)
-    await msg.answer(_cx(
-        bq(f"<b>{NAME}</b>  ·  📟 Код отправлен")
-        + f"\n\nНомер: <code>{html_mod.escape(phone)}</code>\n"
-        + "Код придёт в Telegram (или от 777000). Пришли его цифры."),
-        parse_mode=ParseMode.HTML)
+    _login_client(cb.from_user.id)
+    await cb.answer("🔄 Пробую другой IP...")
+    await _login_send_step(cb, state,
+                           attempt=int(data.get("attempt", 0)) + 1,
+                           edit=True)
 
 
 @router.message(AddSession.code_login, F.text)
