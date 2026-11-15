@@ -5388,42 +5388,31 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         price_r = f"{ct_price_rub(pk):.0f}"
-        if sbp_url:
-            how = ("Счёт на эту сумму уже создан — жми "
-                   "<b>Оплатить через СБП</b>, выбери свой банк и "
-                   "подтверди в приложении банка.\n"
-                   "Подписка включится <b>автоматически</b> "
-                   "(до пары минут).\n"
-                   "«Я оплатил» — обновить ссылку или ускорить проверку.")
-        else:
-            how = ("Сумма уже вбитая — на странице выбери <b>СБП</b> "
-                   "или карту и заплати <b>ровно эту сумму</b>.\n"
-                   "Копейки — твой код платежа.\n"
-                   "Подписка включится <b>автоматически</b>.")
         caption = (
             bq(f"<b>{NAME}</b>  —  💳 Оплата Cloudtips")
             + f"\n\n💳 <b>{pl['label']}</b> — <b>{price_r} ₽</b>"
             + f"\n🧾 Сумма к оплате: <b>{amount} ₽</b>\n\n"
-            + how
+            + "Подписка включится <b>автоматически</b>."
         )
-        rows = []
         if sbp_url:
-            rows.append([InlineKeyboardButton(
+            pay_btn = [InlineKeyboardButton(
                 text=f"Оплатить через СБП {amount} ₽",
                 icon_custom_emoji_id="5258204546391351475",
-                url=sbp_url)])
-        rows.append([InlineKeyboardButton(
-            text=f"Другой способ ({amount} ₽)",
-            icon_custom_emoji_id="5258204546391351475",
-            url=pay_url)])
-        rows.append([InlineKeyboardButton(
-            text="Я оплатил",
-            icon_custom_emoji_id="5357069174512303778",
-            callback_data=f"sub:ctpaid:{pk}")])
-        rows.append([InlineKeyboardButton(
-            text="Назад",
-            icon_custom_emoji_id="5258132936401624790",
-            callback_data="sub:pm:ct")])
+                url=sbp_url)]
+        else:
+            pay_btn = [InlineKeyboardButton(
+                text=f"Оплатить {amount} ₽",
+                icon_custom_emoji_id="5258204546391351475",
+                url=pay_url)]
+        rows = [pay_btn,
+                [InlineKeyboardButton(
+                    text="Я оплатил",
+                    icon_custom_emoji_id="5357069174512303778",
+                    callback_data=f"sub:ctpaid:{pk}")],
+                [InlineKeyboardButton(
+                    text="Назад",
+                    icon_custom_emoji_id="5258132936401624790",
+                    callback_data="sub:pm:ct")]]
         await cb.message.edit_caption(
             caption=_cx(caption), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
