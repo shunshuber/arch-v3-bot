@@ -3229,6 +3229,63 @@ async def cmd_wl(msg: Message):
         await msg.answer("\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u043e\u0435 \u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435. add / del / list")
 
 
+@router.message(Command("protect"))
+async def cmd_protect(msg: Message):
+    """Protect-list: targets the bot refuses to attack, every method.
+    /protect add @name | /protect del @name | /protect list"""
+    if not (user_is_admin(msg.from_user.id)
+            or (ADMIN_ID and msg.from_user.id == int(ADMIN_ID))):
+        await msg.answer(_cx("⛔️ Команда для админов."),
+                         parse_mode=ParseMode.HTML)
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.answer(_cx(
+            "🛡 <b>Протект-лист</b> — цели, которые бот не трогает "
+            "ни сносом, ни репортом, ни флудом.\n"
+            "Формат:\n<code>/protect add @username</code>\n"
+            "<code>/protect del @username</code>\n"
+            "<code>/protect list</code>\n\n"
+            "Тот же список, что /wl — единый источник истины."),
+            parse_mode=ParseMode.HTML)
+        return
+    action = parts[1].lower()
+    cur = _wl_load()
+    if action == "list":
+        if not cur:
+            await msg.answer("🛡 Протект-лист пуст.")
+        else:
+            body = "\n".join(
+                f"• <code>{html_mod.escape(p)}</code>"
+                for p in sorted(set(cur)))
+            await msg.answer(_cx(
+                f"🛡 <b>Протект-лист:</b>\n{body}"),
+                parse_mode=ParseMode.HTML)
+        return
+    if len(parts) < 3:
+        await msg.answer(_cx(
+            "Нужен паттерн: <code>/protect add @username</code>"),
+            parse_mode=ParseMode.HTML)
+        return
+    pat = parts[2].strip().lstrip("@").lower()
+    if action == "add":
+        if pat and pat not in [p.lower() for p in cur]:
+            cur.append(pat)
+            _wl_save(cur)
+        await msg.answer(_cx(
+            f"🛡 <code>{html_mod.escape(pat)}</code> под протектом — "
+            "бот его не сносит."),
+            parse_mode=ParseMode.HTML)
+    elif action == "del":
+        cur = [p for p in cur if p.lower() != pat]
+        _wl_save(cur)
+        await msg.answer(_cx(
+            f"❎ <code>{html_mod.escape(pat)}</code> снят с протекта."),
+            parse_mode=ParseMode.HTML)
+    else:
+        await msg.answer("Неизвестное действие. add / del / list")
+
+
 @router.message(Command("refgive"))
 async def cmd_refgive(msg: Message):
     """Manually credit valid referrals: /refgive <user_id> [count]"""
@@ -3974,6 +4031,16 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
     if not username or not phone:
         await cb.answer("\u26a0\ufe0f \u0421\u0435\u0441\u0441\u0438\u044f \u0438\u0441\u0442\u0435\u043a\u043b\u0430. /start", show_alert=True)
         return
+    if is_target_whitelisted(username):
+        await cb.answer("⛔️ Цель в протект-листе — снос заблокирован.",
+                        show_alert=True)
+        await push_send_log(
+            "Попытка снести цель из протект-листа",
+            [f"🎯 <code>{html_mod.escape(username)}</code> "
+             f"📱 <code>{html_mod.escape(phone)}</code>",
+             f"👤 {html_mod.escape(cb.from_user.full_name)} "
+             f"(<code>{cb.from_user.id}</code>) | поток: снос"])
+        return
 
     await cb.answer("\u23f3 \u0417\u0430\u043f\u0443\u0441\u043a...")
 
@@ -4305,19 +4372,20 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     tgt_raw = t["raw"]
     esc_raw = html_mod.escape(tgt_raw)
 
-    # ── BR bot-method gates (method=bot only) ──
+    # ── protect gate: every method ──
     probe_note = ""
+    hit = is_target_whitelisted(tgt_raw)
+    if hit:
+        await cb.answer("⛔️ Цель в протект-листе!", show_alert=True)
+        await push_send_log(
+            "Попытка снести цель из протект-листа",
+            [f"\U0001f3af <code>{esc_raw}</code> (паттерн: <code>{html_mod.escape(hit)}</code>)",
+             f"\U0001f464 {html_mod.escape(cb.from_user.full_name)} "
+             f"(<code>{cb.from_user.id}</code>) | метод: "
+             f"{html_mod.escape(str(data['method']))}"])
+        await state.clear()
+        return
     if data["method"] == "bot":
-        hit = is_target_whitelisted(tgt_raw)
-        if hit:
-            await cb.answer("\u26d4 \u0426\u0435\u043b\u044c \u0432 \u0431\u0435\u043b\u043e\u043c \u0441\u043f\u0438\u0441\u043a\u0435!",
-                            show_alert=True)
-            await push_send_log(
-                "\u041f\u043e\u043f\u044b\u0442\u043a\u0430 \u0441\u043d\u0435\u0441\u0442\u0438 \u0446\u0435\u043b\u044c \u0438\u0437 \u0431\u0435\u043b\u043e\u0433\u043e \u0441\u043f\u0438\u0441\u043a\u0430",
-                [f"\U0001f3af <code>{esc_raw}</code> (\u043f\u0430\u0442\u0442\u0435\u0440\u043d: <code>{html_mod.escape(hit)}</code>)",
-                 f"\U0001f464 {html_mod.escape(cb.from_user.full_name)} (<code>{cb.from_user.id}</code>) | \u043c\u0435\u0442\u043e\u0434: \u0431\u043e\u0442"])
-            await state.clear()
-            return
         try:
             await cb.message.edit_caption(
                 caption=_cx((bq(f"<b>{NAME}</b>  \u00b7  \U0001f916 \u041f\u0440\u043e\u0431\u0430 \u0446\u0435\u043b\u0438")
