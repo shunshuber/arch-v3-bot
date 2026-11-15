@@ -438,26 +438,9 @@ COMMENT_TEMPLATES = {
         "يقوم هذا القناة بتجارة المخدرات بشكل علني: قوائم أسعار، إحداثيات مخابئ، لوجستيات توصيل. هذه جريمة جنائية. أطالب بإغلاق القناة فوراً وتسليم السجلات للشرطة.",
     ],
     "personal": [
-        # RU
-        "В этом канале публикуют персональные данные людей: адреса, телефоны, паспортные данные, фото, сканы документов. Это грубое нарушение приватности и прямая угроза жизни. Требую немедленного удаления канала.",
-        # EN
-        "This channel publishes people's personal data: addresses, phone numbers, passport scans, photos. Gross privacy violation and direct threat to lives. Immediate removal of the channel is required.",
-        # DE
-        "Dieser Kanal veröffentlicht personenbezogene Daten: Adressen, Telefonnummern, Passdaten, Fotos. Grober Verstoß gegen die Privatsphäre und direkte Gefahr für Leben. Sofortige Entfernung des Kanals erforderlich.",
-        # ES
-        "Este canal publica datos personales de personas: direcciones, teléfonos, escaneos de pasaportes, fotos. Grave violación de la privacidad y amenaza directa a la vida. Exijo la eliminación inmediata del canal.",
-        # FR
-        "Ce canal publie des données personnelles : adresses, numéros de téléphone, copies de passeports, photos. Violation grave de la vie privée et menace directe sur des vies. Je demande une suppression immédiate du canal.",
-        # IT
-        "Questo canale pubblica dati personali: indirizzi, numeri di telefono, scansioni di passaporti, foto. Grave violazione della privacy e minaccia diretta alla vita delle persone. Richiedo la rimozione immediata del canale.",
-        # PT
-        "Este canal publica dados pessoais de pessoas: endereços, telefones, cópias de passaportes, fotos. Grave violação de privacidade e ameaça direta à vida. Exijo a eliminação imediata do canal.",
-        # PL
-        "Ten kanał publikuje dane osobowe ludzi: adresy, numery telefonów, skany paszportów, zdjęcia. Brutalne naruszenie prywatności i bezpośrednie zagrożenie życia. Wymagam natychmiastowego usunięcia kanału.",
-        # TR
-        "Bu kanal insanların kişisel verilerini yayımlıyor: adresler, telefon numaraları, pasaport taramaları, fotoğraflar. Ağır bir mahremiyet ihlali ve canlara doğrudan tehdit. Kanalın derhal kaldırılmasını talep ediyorum.",
-        # AR
-        "ينشر هذا القناة بيانات شخصية للأشخاص: عناوين، أرقام هواتف، نسخ جوازات، صور. انتهاك جسيم للخصوصية وتهديد مباشر لحياة الناس. أطالب بإزالة القناة فوراً.",
+        # RU — probiv / doxxing
+        "Бот создан для поиска персональных данных (номер телефона, адрес, ФИО, и другая личная информация) по русским гражданам через взломанные базы данных. Удалите бота для доксинга за нарушения правил ToS Telegram, пожалуйста.",
+        "Бот создан для поиска персональных данных (номер телефона, адрес, ФИО и другая личная информация) по российским гражданам через взломанные базы данных. Прошу удалить бота для доксинга за нарушение правил ToS Telegram.",
     ],
     "fake": [
         # RU
