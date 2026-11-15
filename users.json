@@ -482,5 +482,16 @@
   "refs": [],
   "ref_grants": 0,
   "deep_refs": 0
+ },
+ "8997099937": {
+  "id": 8997099937,
+  "username": "eraser_support",
+  "name": "Support",
+  "first_seen": "2026-11-15T11:10:01",
+  "last_seen": "2026-11-15T11:10:01",
+  "ref_by": null,
+  "refs": [],
+  "ref_grants": 0,
+  "deep_refs": 0
  }
 }
