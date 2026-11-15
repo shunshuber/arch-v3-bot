@@ -3431,6 +3431,10 @@ async def addsess_file_wrongtype(msg: Message, state: FSMContext):
 # ── admin: add session via login code ────────────────────
 _LOGIN_CLIENTS: dict[int, TelegramClient] = {}
 
+# failed login-code IPs get a short in-memory cooldown; retries
+# auto-skip to the next proxy instead of hammering a dead one
+_LOGIN_IP_COOL: dict[str, float] = {}
+
 
 def _login_client(uid: int) -> None:
     """Kill a stale login-by-code client (called on menu open / new flow)."""
@@ -3512,39 +3516,70 @@ async def _login_send_step(target, state: FSMContext, attempt: int,
                 "Закинь прокси (paid_proxies.txt / proxies.txt) и повтори.")
     else:
         base = int(hashlib.sha1(Path(dest_s).stem.encode()).hexdigest(), 16)
-        pin = pool[(base + attempt) % len(pool)]
-        client = TelegramClient(str(Path(dest_s).with_suffix("")),
-                                API_ID, API_HASH, proxy=pin)
-        try:
-            await asyncio.wait_for(client.connect(), timeout=20)
-            sent = await client.send_code_request(phone)
-        except FloodWaitError as e:
+        now = time.time()
+        sent, used, k, last_err, client = None, None, 0, "", None
+        for k in range(len(pool)):
+            i = (base + attempt + k) % len(pool)
+            pin = pool[i]
+            ip_key = f"{pin[1]}:{pin[2]}"
+            if _LOGIN_IP_COOL.get(ip_key, 0) > now:
+                continue
+            client = TelegramClient(str(Path(dest_s).with_suffix("")),
+                                    API_ID, API_HASH, proxy=pin)
+            log.info("login send try phone=%s pin=%s attempt=%s",
+                     phone, ip_key, attempt + k)
             try:
-                await client.disconnect()
-            except Exception:
-                pass
+                await asyncio.wait_for(client.connect(), timeout=15)
+                sent = await client.send_code_request(phone)
+                used = pin
+            except FloodWaitError as e:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                log.warning("login send FloodWait phone=%s pin=%s secs=%s",
+                            phone, ip_key, e.seconds)
+                last_err = f"FloodWait {e.seconds} сек"
+                _LOGIN_IP_COOL[ip_key] = now + 900
+                continue
+            except Exception as e:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                log.error("login send FAIL phone=%s pin=%s err=%s",
+                          phone, ip_key, repr(e)[:160])
+                last_err = str(e)[:100]
+                _LOGIN_IP_COOL[ip_key] = now + 600
+                continue
+            break
+        if sent is None:
+            if not last_err:
+                last_err = "нет живого IP в пуле"
+            log.error("login send exhausted phone=%s pool=%d err=%s",
+                      phone, len(pool), last_err)
             text = (bq(f"<b>{NAME}</b>  ·  📱 Сессия через код")
-                    + f"\n\n⏳ Телеграм просит подождать: "
-                    f"<b>{e.seconds} сек</b>.")
-        except Exception as e:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            text = (bq(f"<b>{NAME}</b>  ·  📱 Сессия через код")
-                    + f"\n\n❌ Код не отправлен (IP "
-                    f"<code>{html_mod.escape(str(pin[1]))}</code>): "
-                    f"<code>{html_mod.escape(str(e)[:100])}</code>")
+                    + "\n\n❌ Код не отправлен ни через один IP.\n"
+                    f"Причина: <code>{html_mod.escape(last_err)}</code>\n"
+                    "Сдохнувшие IP стоят на кулдауне 10 мин; "
+                    "кнопка ниже перезапустит подбор.")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🔄 Не пришёл — другой IP",
+                    icon_custom_emoji_id="5258216851472654189",
+                    callback_data="addsess:code_retry")]])
         else:
+            log.info("login send OK phone=%s pin=%s attempt=%s",
+                     phone, f"{used[1]}:{used[2]}", attempt + k)
             _LOGIN_CLIENTS[target.from_user.id] = client
             await state.update_data(phone_hash=sent.phone_code_hash,
-                                    attempt=attempt)
+                                    attempt=attempt + k)
             await state.set_state(AddSession.code_login)
             text = (bq(f"<b>{NAME}</b>  ·  📟 Код отправлен")
                     + f"\n\nНомер: <code>{html_mod.escape(phone)}</code>"
-                    + f"\n🔌 код через: <code>{html_mod.escape(str(pin[1]))}"
-                    + ("</code>" if not attempt else
-                       f"</code> (попытка {attempt + 1})")
+                    + f"\n🔌 код через: <code>{html_mod.escape(str(used[1]))}"
+                    + f":{used[2]}</code>"
+                    + (f" (попытка {attempt + k + 1})" if attempt + k else "")
                     + "\nКод придёт в Telegram (или от 777000). "
                     "Пришли его цифры.")
             kb = InlineKeyboardMarkup(inline_keyboard=[[
