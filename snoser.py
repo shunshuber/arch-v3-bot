@@ -4478,6 +4478,197 @@ def save_ct_pending(d: dict) -> None:
                                encoding="utf-8")
 
 
+CT_OIDC = "https://identity.cloudtips.ru/connect/token"
+CT_API = "https://api.cloudtips.ru/api"
+CT_SESSION_FILE = Path(__file__).parent / "ct_session.json"
+_ct_tok = {"access": "", "exp": 0.0}
+_last_balance: float | None = None
+
+
+def load_ct_session() -> dict:
+    try:
+        return json.loads(CT_SESSION_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_ct_session(d: dict) -> None:
+    CT_SESSION_FILE.write_text(json.dumps(d, ensure_ascii=False),
+                               encoding="utf-8")
+
+
+async def ct_refresh_access() -> str | None:
+    """Receiver token via OIDC refresh grant — no captcha involved."""
+    sess = load_ct_session()
+    rt = sess.get("refresh") or os.getenv("CLOUDTIPS_REFRESH", "").strip()
+    if not rt:
+        return None
+    body = {"client_id": "MobilePhone", "client_type": "ReceiverWeb",
+            "grant_type": "refresh_token", "refresh_token": rt}
+    async with aiohttp.ClientSession() as s:
+        async with s.post(CT_OIDC, data=body,
+                          timeout=aiohttp.ClientTimeout(total=20)) as r:
+            j = await r.json(content_type=None)
+            if r.status == 200 and isinstance(j, dict) \
+                    and j.get("access_token"):
+                new_rt = j.get("refresh_token") or rt
+                save_ct_session({"access": j["access_token"],
+                                 "refresh": new_rt, "ts": time.time()})
+                if new_rt != rt:
+                    commit_file_to_repo("ct_session.json",
+                                        "ct session rotate", cooldown=300)
+                _ct_tok.update(access=j["access_token"],
+                               exp=time.time() + 2400)
+                return j["access_token"]
+            log.error("cloudtips refresh failed: %s %s", r.status,
+                      str(j)[:200])
+    return None
+
+
+def _ct_pick_balance(obj, depth: int = 0):
+    """Best-effort numeric extraction from accumulations/summary."""
+    if depth > 4 or not isinstance(obj, (dict, list)):
+        return None
+    prefixes = ("available", "total", "balance", "current", "accumulated",
+                "amount", "sum", "free", "onbalance")
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, (int, float)) and \
+                    str(k).lower().startswith(prefixes):
+                return float(v)
+        for v in obj.values():
+            r = _ct_pick_balance(v, depth + 1)
+            if r is not None:
+                return r
+    else:
+        for v in obj[:10]:
+            r = _ct_pick_balance(v, depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
+async def ct_fetch_balance() -> float | None:
+    tok = _ct_tok["access"]
+    if time.time() > _ct_tok["exp"]:
+        tok = await ct_refresh_access()
+        if not tok:
+            return None
+    for attempt in (1, 2):
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{CT_API}/accumulations/summary",
+                             headers={"Authorization": f"Bearer {tok}"},
+                             timeout=aiohttp.ClientTimeout(total=20)) as r:
+                j = await r.json(content_type=None)
+                if r.status == 401 and attempt == 1:
+                    _ct_tok["exp"] = 0
+                    tok = await ct_refresh_access()
+                    if not tok:
+                        return None
+                    continue
+                if r.status != 200:
+                    log.error("cloudtips summary %s: %s", r.status,
+                              str(j)[:200])
+                    return None
+        val = _ct_pick_balance(j)
+        if val is None:
+            log.warning("cloudtips summary shape: %s", str(j)[:400])
+        return val
+    return None
+
+
+async def ct_poll_once(bot) -> None:
+    """One balance poll → match pending purchases → auto-activate."""
+    global _last_balance
+    bal = await ct_fetch_balance()
+    if bal is None:
+        return
+    pend = load_ct_pending()
+    if not pend:
+        _last_balance = bal
+        return
+    changed = False
+    for uid_s in list(pend):
+        rec = pend[uid_s]
+        plan = rec.get("plan", "")
+        if plan not in SUB_PLANS:
+            pend.pop(uid_s)
+            changed = True
+            continue
+        amount = float(rec.get("amount", 0))
+        if "base" not in rec:
+            rec["base"] = (_last_balance if _last_balance is not None
+                           and time.time() - rec.get("ts", 0) < 120
+                           else bal)
+            changed = True
+            continue
+        base = rec["base"]
+        if bal < base - 0.01:          # payout withdrawal → rebase
+            rec["base"] = bal
+            changed = True
+            base = bal
+        delta = bal - base
+        if delta >= amount - 0.005:
+            uid = int(uid_s)
+            subs = load_subs()
+            activate_plan(subs, uid, plan)
+            pend.pop(uid_s)
+            changed = True
+            s, until = sub_quality(subs, uid)
+            try:
+                await bot.send_message(
+                    uid,
+                    _cx(bq(f"<b>{NAME}</b> — оплата подтверждена ✅")
+                        + f"\n\n✅ Подписка: <b>{s}</b> ({until})"
+                        + "\nМожно пользоваться!"),
+                    parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+            await push_send_log(
+                "Оплата (Cloudtips, авто)",
+                [f"✅ <code>{uid}</code> — план <b>{plan}</b>",
+                 f"💰 {amount:g} ₽ (дельта {delta:.2f} ₽)"])
+        elif (time.time() - rec.get("ts", 0) > 900
+              and not rec.get("alerted")):
+            rec["alerted"] = True
+            changed = True
+            if ADMIN_ID:
+                text = (bq("💳 Cloudtips: платёж не найден 15 мин")
+                        + f"\n👤 <code>{uid_s}</code> — план <b>{plan}</b>"
+                        + f"\n💰 ждём: <b>{amount:g} ₽</b>"
+                        + f" (дельта {delta:.2f} ₽)"
+                        + "\nВыдай вручную, если платёж был.")
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="✅ Выдать",
+                        icon_custom_emoji_id="5357069174512303778",
+                        callback_data=f"sub:ctok:{uid_s}:{plan}")],
+                    [InlineKeyboardButton(
+                        text="❌ Отказ",
+                        icon_custom_emoji_id="5267123797600783095",
+                        callback_data=f"sub:ctno:{uid_s}:{plan}")],
+                ])
+                try:
+                    await bot.send_message(int(ADMIN_ID), _cx(text),
+                                           parse_mode=ParseMode.HTML,
+                                           reply_markup=kb)
+                except Exception as e:
+                    log.error("ct admin alert: %s", e)
+    if changed:
+        save_ct_pending(pend)
+    _last_balance = bal
+
+
+async def ct_poller_loop(bot) -> None:
+    log.info("cloudtips poller: start (interval 45s)")
+    while True:
+        try:
+            await ct_poll_once(bot)
+        except Exception as e:
+            log.error("ct poller: %s", e)
+        await asyncio.sleep(45)
+
+
 # ── beta payment methods (CryptoBot + Telegram Stars) ────
 # PAY_METHODS_ADMIN = <uid> enables pilot mode; None opens everything
 PAY_METHODS_ADMIN: int | None = None
@@ -5081,6 +5272,13 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         pend = load_ct_pending()
         pend[str(uid)] = {"plan": pk, "amount": amount, "ts": time.time()}
         save_ct_pending(pend)
+        try:
+            _b = await ct_fetch_balance()
+            if _b is not None:
+                pend[str(uid)]["base"] = _b
+                save_ct_pending(pend)
+        except Exception:
+            pass
         price_r = f"{ct_price_rub(pk):.0f}"
         caption = (
             bq(f"<b>{NAME}</b>  —  💳 Оплата Cloudtips")
@@ -5088,7 +5286,8 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
             + f"\n🧾 Сумма к оплате: <b>{amount} ₽</b>\n\n"
             + "Сумма уже вбитая — на странице выбери <b>СБП</b> или карту\n"
             + "и заплати <b>ровно эту сумму</b>. Копейки — твой код платежа.\n"
-            + "После оплаты жми <b>✅ Я оплатил</b>."
+            + "Подписка включится <b>автоматически</b> (до пары минут).\n"
+            + "«Я оплатил» — ускорить проверку."
         )
         await cb.message.edit_caption(
             caption=_cx(caption), parse_mode=ParseMode.HTML,
@@ -5150,52 +5349,33 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("sub:ctpaid:"))
 async def sub_ct_paid(cb: CallbackQuery, state: FSMContext):
-    """Buyer pressed 'I paid' → admin approve request."""
+    """Buyer pressed 'I paid' → poll now; auto-confirm or wait."""
     pk = cb.data.rsplit(":", 1)[1]
     if pk not in SUB_PLANS:
         await cb.answer("❌", show_alert=True)
         return
     uid = cb.from_user.id
-    pl = SUB_PLANS[pk]
+    try:
+        await ct_poll_once(cb.bot)
+    except Exception as e:
+        log.error("ct paid poll: %s", e)
     pend = load_ct_pending()
-    rec = pend.get(str(uid))
-    if not rec or rec.get("plan") != pk:
-        rec = {"plan": pk, "amount": ct_amount(uid, pk), "ts": time.time()}
-        pend[str(uid)] = rec
-        save_ct_pending(pend)
-    amount = rec["amount"]
-    who = html_mod.escape(cb.from_user.first_name or cb.from_user.username
-                          or str(uid))
-    days = pl["days"] if pl["days"] is not None else "∞"
-    text = (
-        bq("💳 Заявка Cloudtips")
-        + f"\n👤 <b>{who}</b> — <code>{uid}</code>"
-        + f"\n📦 План: <b>{pl['label']}</b> ({days} дн.)"
-        + f"\n💰 Сумма: <b>{amount} ₽</b>"
-        + "\n✅ Проверь поступление в Cloudtips и выдай."
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Выдать",
-                              icon_custom_emoji_id="5357069174512303778",
-                              callback_data=f"sub:ctok:{uid}:{pk}")],
-        [InlineKeyboardButton(text="❌ Отказ",
-                              icon_custom_emoji_id="5267123797600783095",
-                              callback_data=f"sub:ctno:{uid}:{pk}")],
-    ])
-    sent = False
-    if ADMIN_ID:
+    if str(uid) not in pend:
+        subs = load_subs()
+        s, until = sub_quality(subs, uid)
         try:
-            await cb.bot.send_message(int(ADMIN_ID), _cx(text),
-                                      parse_mode=ParseMode.HTML,
-                                      reply_markup=kb)
-            sent = True
-        except Exception as e:
-            log.error("cloudtips admin notify failed: %s", e)
-    await push_send_log(
-        "Заявка Cloudtips",
-        [f"👤 <code>{uid}</code> — план <b>{pk}</b>",
-         f"💰 {amount} ₽", "✅ выдать" if sent else "⚠️ админ недоступен"])
-    await cb.answer("Заявка отправлена — ждём подтверждения", show_alert=True)
+            await cb.message.edit_caption(
+                caption=_cx(bq(f"<b>{NAME}</b> — оплата подтверждена ✅")
+                            + f"\n\n✅ Подписка: <b>{s}</b> ({until})"
+                            + "\nМожно пользоваться!"),
+                parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
+        await cb.answer("Оплата найдена — подписка активна ✅")
+        return
+    await cb.answer("Платёж пока не дошёл — включу автоматически, "
+                    "как только придёт (проверка каждые 45 сек).",
+                    show_alert=True)
 
 
 @router.callback_query(F.data.startswith("sub:ctok:"))
@@ -5665,6 +5845,9 @@ async def main():
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
             await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
+            if not globals().get("_ct_poller_started"):
+                globals()["_ct_poller_started"] = True
+                asyncio.create_task(ct_poller_loop(bot))
             await dp.start_polling(bot)
             break
         except TelegramNetworkError as e:

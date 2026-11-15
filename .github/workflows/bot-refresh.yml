@@ -28,6 +28,7 @@ jobs:
       SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
       GROQ_KEY: ${{ secrets.GROQ_KEY }}
       CREDS_MULTI: ${{ secrets.CREDENTIALS_LIST }}
+      CLOUDTIPS_REFRESH: ${{ secrets.CLOUDTIPS_REFRESH }}
       WEB_COUNT: "8"
     steps:
       - uses: actions/checkout@v4
