@@ -227,6 +227,9 @@ class GrantFSM(StatesGroup):
 class AddSession(StatesGroup):
     choose = State()
     file = State()
+    code_phone = State()
+    code_login = State()
+    code_pw = State()
     trans = State()
     trans_pw = State()
 
@@ -683,6 +686,8 @@ METHODS = {
                   "hint": "\u0417\u0430\u044F\u0432\u043A\u0430 \u043D\u0430 \u0431\u043B\u043E\u043A\u0438\u0440\u043E\u0432\u043A\u0443 \u043A\u0430\u0440\u0442\u044B \u043F\u043E 115-\u0424\u0417."},
     "mail":     {"e": "\U0001f4e7", "l": "Mail (abuse)",
                   "hint": "Жалобы письмами на abuse/support/dmca/stopCA@telegram.org\n• цель: ссылка или @username\n• тексты шаблонные, уникальные"},
+    "bot":      {"e": "🤖", "l": "Bot",
+                  "hint": "Цель — бот: @username или t.me/ссылка.\nСессии из пула шлют на него жалобы (ReportPeer).\nСначала проба /start, протект-лист работает."},
 }
 
 
@@ -2701,16 +2706,19 @@ def kb_methods() -> InlineKeyboardMarkup:
         "web":      "Web",
         "bank":     "Банк",
         "mail":     "Mail",
+        "bot":      "Bot",
     }
     short_icons = {
         "web":      "5258423306255604960",
         "bank":     "5258204546391351475",
         "mail":     "5260268501515377807",
+        "bot":      "5258093637450866522",
     }
     rows = [
         [InlineKeyboardButton(text=short["web"], icon_custom_emoji_id=short_icons["web"], callback_data="method:web"),
          InlineKeyboardButton(text=short["mail"], icon_custom_emoji_id=short_icons["mail"], callback_data="method:mail")],
-        [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank")],
+        [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank"),
+         InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3330,6 +3338,7 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
     if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
         await cb.answer()
         return
+    _login_client(cb.from_user.id)   # kill a stale login-by-code client
     sessions = load_sessions()
     alive_line = ""
     if sessions:
@@ -3343,7 +3352,9 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Загрузить файлом", icon_custom_emoji_id="5258477770735885832",
-                                  callback_data="addsess:file")],
+                                  callback_data="addsess:file"),
+             InlineKeyboardButton(text="Через код", icon_custom_emoji_id="5258216851472654189",
+                                  callback_data="addsess:code")],
             [InlineKeyboardButton(text="Пересадка (мойка BR)", icon_custom_emoji_id="5258486128742244085",
                                   callback_data="addsess:trans")],
             [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
@@ -3410,6 +3421,171 @@ async def addsess_file_recv(msg: Message, state: FSMContext):
 @router.message(AddSession.file)
 async def addsess_file_wrongtype(msg: Message, state: FSMContext):
     await msg.answer(_cx("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0444\u0430\u0439\u043B."), parse_mode=ParseMode.HTML)
+
+
+# ── admin: add session via login code ────────────────────
+_LOGIN_CLIENTS: dict[int, TelegramClient] = {}
+
+
+def _login_client(uid: int) -> None:
+    """Kill a stale login-by-code client (called on menu open / new flow)."""
+    cl = _LOGIN_CLIENTS.pop(uid, None)
+    if cl is not None:
+        try:
+            cl.disconnect()
+        except Exception:
+            pass
+
+
+async def _finish_login(msg: Message, state: FSMContext,
+                        client: TelegramClient, dest: Path) -> None:
+    name = dest.name
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+    _LOGIN_CLIENTS.pop(msg.from_user.id, None)
+    ok, why = await _session_alive(dest)
+    commit_file_to_repo(f"sessions/{name}", f"add session {name} (code)")
+    await state.clear()
+    await msg.answer(_cx(
+        bq(f"<b>{NAME}</b>  ·  ✅ Сессия добавлена")
+        + f"\n\n🧷 <code>{html_mod.escape(name)}</code> → пул"
+        + f"\n🔌 проб: {'✅ живая' if ok else '❌ ' + why}"
+        + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий"),
+        parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(AddSession.choose, F.data == "addsess:code")
+async def addsess_code(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(AddSession.code_phone)
+    await cb.message.edit_caption(
+        caption=_cx((
+            bq(f"<b>{NAME}</b>  ·  📱 Сессия через код")
+            + "\n\nПришли <b>номер</b> аккаунта:\n"
+            + "<code>+79991234567</code>\n\n"
+            + "Бот запросит код входа — пришли его следующим сообщением, "
+            + "затем 2FA-пароль, если включён."
+        )),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790",
+                                  callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+@router.message(AddSession.code_phone, F.text)
+async def addsess_code_phone(msg: Message, state: FSMContext):
+    from telethon.errors import FloodWaitError
+    phone = _norm_phone(msg.text or "")
+    if not phone:
+        await msg.answer(_cx("❌ Нужен номер: <code>+79991234567</code>"),
+                         parse_mode=ParseMode.HTML)
+        return
+    _login_client(msg.from_user.id)   # kill stale client of a previous run
+    digits = re.sub(r"\D", "", phone)
+    dest = Path(__file__).parent / "sessions" / f"s{digits}.session"
+    dest.parent.mkdir(exist_ok=True)
+    px = load_pin_proxies()
+    client = TelegramClient(str(dest.with_suffix("")), API_ID, API_HASH,
+                            proxy=pin_for_session(dest.stem, px))
+    try:
+        await asyncio.wait_for(client.connect(), timeout=20)
+        sent = await client.send_code_request(phone)
+    except FloodWaitError as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        await msg.answer(_cx(
+            f"⏳ Телеграм просит подождать: <b>{e.seconds} сек</b>. "
+            "Попробуй позже."),
+            parse_mode=ParseMode.HTML)
+        return
+    except Exception as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        await msg.answer(_cx(
+            f"❌ Код не отправлен: <code>{html_mod.escape(str(e)[:120])}</code>"),
+            parse_mode=ParseMode.HTML)
+        return
+    _LOGIN_CLIENTS[msg.from_user.id] = client
+    await state.update_data(phone=phone, phone_hash=sent.phone_code_hash,
+                            dest=str(dest))
+    await state.set_state(AddSession.code_login)
+    await msg.answer(_cx(
+        bq(f"<b>{NAME}</b>  ·  📟 Код отправлен")
+        + f"\n\nНомер: <code>{html_mod.escape(phone)}</code>\n"
+        + "Код придёт в Telegram (или от 777000). Пришли его цифры."),
+        parse_mode=ParseMode.HTML)
+
+
+@router.message(AddSession.code_login, F.text)
+async def addsess_code_login(msg: Message, state: FSMContext):
+    from telethon.errors import (PhoneCodeInvalidError,
+                                 PhoneCodeExpiredError,
+                                 SessionPasswordNeededError)
+    data = await state.get_data()
+    client = _LOGIN_CLIENTS.get(msg.from_user.id)
+    if client is None:
+        await state.clear()
+        await msg.answer(_cx("⚠️ Сессия входа истекла — начни заново."),
+                         parse_mode=ParseMode.HTML)
+        return
+    code = (msg.text or "").strip()
+    try:
+        await client.sign_in(phone=data["phone"], code=code,
+                             phone_code_hash=data["phone_hash"])
+    except (PhoneCodeInvalidError, PhoneCodeExpiredError):
+        await msg.answer(_cx("❌ Код неверный или протух — пришли ещё раз."),
+                         parse_mode=ParseMode.HTML)
+        return
+    except SessionPasswordNeededError:
+        await state.set_state(AddSession.code_pw)
+        await msg.answer(_cx("🔒 На аккаунте <b>2FA</b> — пришли пароль."),
+                         parse_mode=ParseMode.HTML)
+        return
+    except Exception as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        _LOGIN_CLIENTS.pop(msg.from_user.id, None)
+        await state.clear()
+        await msg.answer(_cx(
+            f"❌ Вход не прошёл: <code>{html_mod.escape(str(e)[:120])}</code>\n"
+            "Начни заново: /start → Сессия."),
+            parse_mode=ParseMode.HTML)
+        return
+    await _finish_login(msg, state, client, Path(data["dest"]))
+
+
+@router.message(AddSession.code_pw, F.text)
+async def addsess_code_pw(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    client = _LOGIN_CLIENTS.get(msg.from_user.id)
+    if client is None:
+        await state.clear()
+        await msg.answer(_cx("⚠️ Сессия входа истекла — начни заново."),
+                         parse_mode=ParseMode.HTML)
+        return
+    try:
+        await client.sign_in(password=(msg.text or "").strip())
+    except Exception as e:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        _LOGIN_CLIENTS.pop(msg.from_user.id, None)
+        await state.clear()
+        await msg.answer(_cx(
+            f"❌ Пароль не принят: <code>{html_mod.escape(str(e)[:120])}</code>"),
+            parse_mode=ParseMode.HTML)
+        return
+    await _finish_login(msg, state, client, Path(data["dest"]))
 
 
 # \u2500\u2500 BR-style transplant: \u043C\u043E\u0439\u043A\u0430 \u043A\u0443\u043F\u043B\u0435\u043D\u043D\u044B\u0445 \u0441\u0435\u0441\u0441\u0438\u0439 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
