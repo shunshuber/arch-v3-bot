@@ -4577,15 +4577,102 @@ async def ct_fetch_balance() -> float | None:
     return None
 
 
+CT_SBP_API = "https://api.cloudtips.ru/api"
+CT_ACCRUAL_RATE = float(os.getenv("CT_ACCRUAL_RATE", "0.85"))
+_SBP_HDRS = {
+    "Content-Type": "application/json",
+    "Origin": "https://pay.cloudtips.ru",
+    "Referer": "https://pay.cloudtips.ru/p/a5139821",
+    "User-Agent": ("Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Mobile Safari/537.36"),
+}
+_SBP_DEAD = {"fail", "failed", "expired", "canceled", "cancelled"}
+
+
+async def ct_sbp_create(amount: float):
+    """Server-side SBP invoice -> (transactionId, identifier, link)."""
+    import uuid
+    body = {"amount": round(amount, 2), "cardholderName": "string",
+            "currency": "RUB", "feeFromPayer": False,
+            "layoutId": "a5139821", "saveCard": False,
+            "device": {"type": "MobileWeb", "webview": False,
+                       "os": "Android", "browser": "Chrome"}}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                    f"{CT_SBP_API}/payment/sbp", json=body,
+                    headers={**_SBP_HDRS, "X-Request-ID": str(uuid.uuid4())},
+                    timeout=aiohttp.ClientTimeout(total=20)) as r:
+                j = await r.json(content_type=None)
+                d = (j or {}).get("data") or {}
+                if (r.status == 200 and j.get("succeed")
+                        and d.get("transactionId")
+                        and d.get("universalLinkUrl")):
+                    return (int(d["transactionId"]),
+                            str(d.get("identifier") or ""),
+                            d["universalLinkUrl"])
+                log.error("ct sbp create %s: %s", r.status, str(j)[:200])
+    except Exception as e:
+        log.error("ct sbp create: %s", e)
+    return None, None, None
+
+
+async def ct_sbp_status(sid: str) -> str:
+    """SBP invoice status: 'success' | 'dead' | 'wait'.
+    Bot-created sessions may hang or 500 here -> 'wait'; the balance
+    delta matching remains the authoritative activation signal."""
+    import uuid
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                    f"{CT_SBP_API}/payment/sbp/status",
+                    params={"id": str(sid)},
+                    headers={**_SBP_HDRS, "X-Request-ID": str(uuid.uuid4())},
+                    timeout=aiohttp.ClientTimeout(total=6)) as r:
+                j = await r.json(content_type=None)
+                if r.status != 200 or not (j or {}).get("succeed"):
+                    return "wait"
+                st = str(((j or {}).get("data") or {}).get(
+                    "status", "")).lower()
+                if st in _SBP_DEAD:
+                    return "dead"
+                if st in ("success", "paid", "completed", "done"):
+                    return "success"
+                return "wait"
+    except Exception as e:
+        log.error("ct sbp status: %s", e)
+    return "wait"
+
+
+async def ct_activate(bot, uid: int, plan: str, amount: float,
+                      how: str) -> None:
+    subs = load_subs()
+    activate_plan(subs, uid, plan)
+    s, until = sub_quality(subs, uid)
+    try:
+        await bot.send_message(
+            uid,
+            _cx(bq(f"<b>{NAME}</b> — оплата подтверждена ✅")
+                + f"\n\n✅ Подписка: <b>{s}</b> ({until})"
+                + "\nМожно пользоваться!"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    await push_send_log(
+        "Оплата (Cloudtips, авто)",
+        [f"✅ <code>{uid}</code> — план <b>{plan}</b>",
+         f"💰 {amount:g} ₽ ({how})"])
+
+
 async def ct_poll_once(bot) -> None:
-    """One balance poll → match pending purchases → auto-activate."""
+    """One poll: SBP status best-effort, balance delta as authority."""
     global _last_balance
     bal = await ct_fetch_balance()
-    if bal is None:
-        return
     pend = load_ct_pending()
     if not pend:
-        _last_balance = bal
+        if bal is not None:
+            _last_balance = bal
         return
     changed = False
     for uid_s in list(pend):
@@ -4596,6 +4683,26 @@ async def ct_poll_once(bot) -> None:
             changed = True
             continue
         amount = float(rec.get("amount", 0))
+        if rec.get("sbp_txn") and time.time() - rec.get("ts", 0) < 900:
+            _st = await ct_sbp_status(str(rec.get("sbp_id")
+                                         or rec["sbp_txn"]))
+            if _st == "success":
+                pend.pop(uid_s)
+                changed = True
+                for _o in pend.values():
+                    if "base" in _o:
+                        _o["base"] = round(
+                            _o["base"] + amount * CT_ACCRUAL_RATE, 2)
+                await ct_activate(bot, int(uid_s), plan, amount,
+                                  "СБП счёт")
+                continue
+            if _st == "dead":
+                rec.pop("sbp_txn", None)
+                rec.pop("sbp_id", None)
+                rec.pop("sbp_url", None)
+                changed = True
+        if bal is None:
+            continue
         if "base" not in rec:
             rec["base"] = (_last_balance if _last_balance is not None
                            and time.time() - rec.get("ts", 0) < 120
@@ -4608,30 +4715,17 @@ async def ct_poll_once(bot) -> None:
             changed = True
             base = bal
         delta = bal - base
-        if delta >= amount - 0.005:
+        if delta >= amount * CT_ACCRUAL_RATE - 0.005:
             uid = int(uid_s)
-            subs = load_subs()
-            activate_plan(subs, uid, plan)
             pend.pop(uid_s)
             changed = True
             # consumed money must not count toward other pending recs
             for _o in pend.values():
                 if "base" in _o:
-                    _o["base"] = round(_o["base"] + amount, 2)
-            s, until = sub_quality(subs, uid)
-            try:
-                await bot.send_message(
-                    uid,
-                    _cx(bq(f"<b>{NAME}</b> — оплата подтверждена ✅")
-                        + f"\n\n✅ Подписка: <b>{s}</b> ({until})"
-                        + "\nМожно пользоваться!"),
-                    parse_mode=ParseMode.HTML)
-            except Exception:
-                pass
-            await push_send_log(
-                "Оплата (Cloudtips, авто)",
-                [f"✅ <code>{uid}</code> — план <b>{plan}</b>",
-                 f"💰 {amount:g} ₽ (дельта {delta:.2f} ₽)"])
+                    _o["base"] = round(
+                        _o["base"] + amount * CT_ACCRUAL_RATE, 2)
+            await ct_activate(bot, uid, plan, amount,
+                              f"дельта {delta:.2f} ₽")
         elif (time.time() - rec.get("ts", 0) > 900
               and not rec.get("alerted")):
             rec["alerted"] = True
@@ -4660,7 +4754,8 @@ async def ct_poll_once(bot) -> None:
                     log.error("ct admin alert: %s", e)
     if changed:
         save_ct_pending(pend)
-    _last_balance = bal
+    if bal is not None:
+        _last_balance = bal
 
 
 async def ct_poller_loop(bot) -> None:
@@ -5273,8 +5368,17 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         uid = cb.from_user.id
         amount = ct_amount(uid, pk)
         pay_url = f"{CLOUDTIPS_PAGE}?amount={amount}"
+        try:
+            sbp_txn, sbp_id, sbp_url = await ct_sbp_create(float(amount))
+        except Exception as e:
+            log.error("ct sbp on buy: %s", e)
+            sbp_txn, sbp_id, sbp_url = None, None, None
         pend = load_ct_pending()
         pend[str(uid)] = {"plan": pk, "amount": amount, "ts": time.time()}
+        if sbp_txn:
+            pend[str(uid)]["sbp_txn"] = sbp_txn
+            pend[str(uid)]["sbp_id"] = sbp_id
+            pend[str(uid)]["sbp_url"] = sbp_url
         save_ct_pending(pend)
         try:
             _b = await ct_fetch_balance()
@@ -5284,28 +5388,45 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
         price_r = f"{ct_price_rub(pk):.0f}"
+        if sbp_url:
+            how = ("Счёт на эту сумму уже создан — жми "
+                   "<b>Оплатить через СБП</b>, выбери свой банк и "
+                   "подтверди в приложении банка.\n"
+                   "Подписка включится <b>автоматически</b> "
+                   "(до пары минут).\n"
+                   "«Я оплатил» — обновить ссылку или ускорить проверку.")
+        else:
+            how = ("Сумма уже вбитая — на странице выбери <b>СБП</b> "
+                   "или карту и заплати <b>ровно эту сумму</b>.\n"
+                   "Копейки — твой код платежа.\n"
+                   "Подписка включится <b>автоматически</b>.")
         caption = (
             bq(f"<b>{NAME}</b>  —  💳 Оплата Cloudtips")
             + f"\n\n💳 <b>{pl['label']}</b> — <b>{price_r} ₽</b>"
             + f"\n🧾 Сумма к оплате: <b>{amount} ₽</b>\n\n"
-            + "Сумма уже вбитая — на странице выбери <b>СБП</b> или карту\n"
-            + "и заплати <b>ровно эту сумму</b>. Копейки — твой код платежа.\n"
-            + "Подписка включится <b>автоматически</b> (до пары минут).\n"
-            + "«Я оплатил» — ускорить проверку."
+            + how
         )
+        rows = []
+        if sbp_url:
+            rows.append([InlineKeyboardButton(
+                text=f"Оплатить через СБП {amount} ₽",
+                icon_custom_emoji_id="5258204546391351475",
+                url=sbp_url)])
+        rows.append([InlineKeyboardButton(
+            text=f"Другой способ ({amount} ₽)",
+            icon_custom_emoji_id="5258204546391351475",
+            url=pay_url)])
+        rows.append([InlineKeyboardButton(
+            text="Я оплатил",
+            icon_custom_emoji_id="5357069174512303778",
+            callback_data=f"sub:ctpaid:{pk}")])
+        rows.append([InlineKeyboardButton(
+            text="Назад",
+            icon_custom_emoji_id="5258132936401624790",
+            callback_data="sub:pm:ct")])
         await cb.message.edit_caption(
             caption=_cx(caption), parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"Оплатить {amount} ₽",
-                                      icon_custom_emoji_id="5258204546391351475",
-                                      url=pay_url)],
-                [InlineKeyboardButton(text="Я оплатил",
-                                      icon_custom_emoji_id="5357069174512303778",
-                                      callback_data=f"sub:ctpaid:{pk}")],
-                [InlineKeyboardButton(text="Назад",
-                                      icon_custom_emoji_id="5258132936401624790",
-                                      callback_data="sub:pm:ct")],
-            ]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
         await cb.answer()
         return
@@ -5364,6 +5485,56 @@ async def sub_ct_paid(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         log.error("ct paid poll: %s", e)
     pend = load_ct_pending()
+    rec = pend.get(str(uid))
+    _stale = (rec and rec.get("sbp_txn")
+              and time.time() - rec.get("ts", 0) > 600)
+    if rec and (not rec.get("sbp_txn") or _stale):
+        try:
+            _txn, _sid, _url = await ct_sbp_create(
+                float(rec.get("amount", 0)))
+        except Exception as e:
+            log.error("ct sbp regen: %s", e)
+            _txn, _sid, _url = None, None, None
+        if _txn:
+            rec["sbp_txn"] = _txn
+            rec["sbp_id"] = _sid
+            rec["sbp_url"] = _url
+            rec["ts"] = time.time()
+            rec.pop("alerted", None)
+            save_ct_pending(pend)
+            try:
+                rows = [[InlineKeyboardButton(
+                            text=b.text,
+                            icon_custom_emoji_id=b.icon_custom_emoji_id,
+                            url=b.url,
+                            callback_data=b.callback_data)
+                        for b in _r]
+                        for _r in
+                        cb.message.reply_markup.inline_keyboard]
+                _upd = False
+                for _r in rows:
+                    for _b in _r:
+                        if (_b.url or "").startswith("https://qr.nspk.ru"):
+                            _b.url = _url
+                            _upd = True
+                if not _upd:
+                    _idx = 0
+                    for _i, _r in enumerate(rows):
+                        if any((b.callback_data or "").startswith(
+                                "sub:ctpaid") for b in _r):
+                            _idx = _i
+                            break
+                    rows.insert(_idx, [InlineKeyboardButton(
+                        text=f"Оплатить через СБП {rec.get('amount')} ₽",
+                        icon_custom_emoji_id="5258204546391351475",
+                        url=_url)])
+                await cb.message.edit_reply_markup(
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            except Exception as e:
+                log.error("ct sbp rekb: %s", e)
+            await cb.answer("Свежая СБП-ссылка — жми кнопку оплаты.",
+                            show_alert=True)
+            return
     if str(uid) not in pend:
         subs = load_subs()
         s, until = sub_quality(subs, uid)
