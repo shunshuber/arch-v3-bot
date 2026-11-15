@@ -9,17 +9,25 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
-    env:
-      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    timeout-minutes: 12
     steps:
-      - name: bot liveness via getUpdates conflict
+      - name: cloudtips page json full + cabinet discovery
         shell: bash
         run: |
-          for i in 1 2 3 4; do
-            code=$(curl -s -o /tmp/u.json -w "%{http_code}" \
-              "https://api.telegram.org/bot$BOT_TOKEN/getUpdates?timeout=0")
-            echo "try $i -> $code $(head -c 160 /tmp/u.json)"
-            if [ "$code" = "409" ]; then echo "ALIVE: single instance polling"; break; fi
-            sleep 15
+          echo "=== full page json ==="
+          curl -s "https://api.cloudtips.ru/api/paymentpages/a5139821" \
+            -H "Accept: application/json" \
+            -H "Origin: https://pay.cloudtips.ru" \
+            -H "Referer: https://pay.cloudtips.ru/" \
+            -w "\nHTTP %{http_code}\n"
+          echo
+          echo "=== cabinet hosts ==="
+          for u in "https://lk.cloudtips.ru/" \
+                   "https://app.cloudtips.ru/" \
+                   "https://cabinet.cloudtips.ru/" \
+                   "https://cloudtips.ru/" \
+                   "https://www.cloudtips.ru/api/v1/methods"; do
+            echo "-- $u"
+            curl -s -L -o /tmp/h.txt -w "HTTP %{http_code} size %{size_download} final:%{url_effective}\n" "$u"
+            head -c 300 /tmp/h.txt; echo
           done
