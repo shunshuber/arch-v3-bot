@@ -687,7 +687,7 @@ METHODS = {
     "mail":     {"e": "\U0001f4e7", "l": "Mail (abuse)",
                   "hint": "Жалобы письмами на abuse/support/dmca/stopCA@telegram.org\n• цель: ссылка или @username\n• тексты шаблонные, уникальные"},
     "bot":      {"e": "🤖", "l": "Bot",
-                  "hint": "Цель — бот: @username или t.me/ссылка.\nСессии из пула шлют на него жалобы (ReportPeer).\nСначала проба /start, протект-лист работает."},
+                  "hint": "Цель — бот: @username или t.me/ссылка."},
 }
 
 
