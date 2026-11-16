@@ -947,7 +947,7 @@ def _unique_texts_tagged(pool: list[str], n: int) -> list[tuple[str, str]]:
 
 
 # ── session reports (BR-style) ────────────────────
-REPORT_EXCLUDE_POOL = {"917066653092"}
+REPORT_EXCLUDE_POOL = set()   # 917066653092 now attacks; lolz-transplant keeps its own exclusion
 
 
 # fallback pools for sessions without meta json (sha1-synthesized)
