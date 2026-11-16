@@ -9,6 +9,7 @@ import os
 import random
 import re
 import subprocess
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -6170,6 +6171,7 @@ def persist_logs_binding(chat_id: str) -> None:
 
 
 _last_commit_times: dict[str, float] = {}
+_GIT_LOCK = threading.Lock()   # serialize local git ops vs Content-API pushes
 
 
 def commit_file_to_repo(rel_path: str, msg: str, cooldown: float = 0) -> None:
@@ -6182,35 +6184,36 @@ def commit_file_to_repo(rel_path: str, msg: str, cooldown: float = 0) -> None:
     _last_commit_times[rel_path] = now
     def _push():
         base = Path(__file__).parent
-        try:
-            subprocess.run(["git", "add", rel_path], cwd=base, timeout=30, check=False)
-            r = subprocess.run(
-                ["git", "-c", "user.name=arch-bot",
-                 "-c", "user.email=arch@users.noreply.github.com",
-                 "commit", "-m", msg],
-                cwd=base, timeout=60, check=False, capture_output=True)
-            if r.returncode != 0:
-                return   # nothing to commit — file unchanged
-            # rebase onto whatever landed since our checkout, then push;
-            # a bare push loses the whole state file on any race
-            subprocess.run(["git", "pull", "--rebase", "origin", "main"],
-                           cwd=base, timeout=90, check=False,
-                           capture_output=True)
-            p = subprocess.run(["git", "push"], cwd=base, timeout=60,
-                               check=False, capture_output=True)
-            if p.returncode != 0:
-                # remote moved again mid-rebase — one straight retry
-                subprocess.run(["git", "pull", "--rebase", "origin", "main"],
-                               cwd=base, timeout=90, check=False,
-                               capture_output=True)
-                p2 = subprocess.run(["git", "push"], cwd=base, timeout=60,
-                                    check=False, capture_output=True)
-                if p2.returncode != 0:
-                    log.warning("commit %s: push rejected after rebase", rel_path)
-                    return
-            log.info("committed %s to repo", rel_path)
-        except Exception as e:
-            log.warning("commit %s failed: %s", rel_path, e)
+        with _GIT_LOCK:
+            try:
+                subprocess.run(["git", "add", rel_path], cwd=base,
+                               timeout=30, check=False)
+                r = subprocess.run(
+                    ["git", "-c", "user.name=arch-bot",
+                     "-c", "user.email=arch@users.noreply.github.com",
+                     "commit", "-m", msg],
+                    cwd=base, timeout=60, check=False, capture_output=True)
+                if r.returncode != 0:
+                    return   # nothing to commit — file unchanged
+                # rebase+push retry loop: the Content-API (db_index.json)
+                # lands commits between our rebase and push — one rebase
+                # loses that race, 4 spaced attempts ride out a burst
+                for attempt in range(4):
+                    subprocess.run(
+                        ["git", "pull", "--rebase", "origin", "main"],
+                        cwd=base, timeout=90, check=False,
+                        capture_output=True)
+                    p = subprocess.run(["git", "push"], cwd=base,
+                                       timeout=60, check=False,
+                                       capture_output=True)
+                    if p.returncode == 0:
+                        log.info("committed %s to repo", rel_path)
+                        return
+                    time.sleep(1.5 * (attempt + 1))
+                log.warning("commit %s: push rejected after rebase x4",
+                            rel_path)
+            except Exception as e:
+                log.warning("commit %s failed: %s", rel_path, e)
     try:
         loop = asyncio.get_running_loop()
         loop.run_in_executor(None, _push)
@@ -7322,8 +7325,8 @@ FSM_FILE = Path(__file__).parent / "fsm_state.json"
 
 class PersistStorage(MemoryStorage):
     """MemoryStorage with instant persistence: every state/data change is
-    flushed to FSM_FILE and pushed to the Telegram store (canonical doc),
-    so restarts and deploys resume user flows instead of killing them."""
+    flushed to FSM_FILE and committed to the repo, so restarts and
+    deploys resume user flows instead of killing them."""
 
     def _flush(self) -> None:
         try:
@@ -7351,7 +7354,7 @@ class PersistStorage(MemoryStorage):
             except Exception:
                 pass
             FSM_FILE.write_text(text, encoding="utf-8")
-            store.push_async("fsm", text, force=True)
+            commit_file_to_repo("fsm_state.json", "fsm update", cooldown=15)
         except Exception as e:
             log.warning("fsm flush failed: %s", e)
 
@@ -7454,8 +7457,7 @@ async def main():
         try:
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
-            await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE,
-                                   "fsm": FSM_FILE})
+            await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
             if not globals().get("_ct_poller_started"):
                 globals()["_ct_poller_started"] = True
                 asyncio.create_task(ct_poller_loop(bot))
