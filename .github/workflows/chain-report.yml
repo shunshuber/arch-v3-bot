@@ -1,0 +1,81 @@
+name: chain-report
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "targets separated by spaces"
+        required: true
+        default: "@gc_ny7r_bot @fucksta_bot @first_u15m_bot @goes_l6o6_bot"
+      reason:
+        description: "reason key"
+        required: true
+        default: "personal"
+
+permissions:
+  contents: write
+
+jobs:
+  chain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPORTS_PER_SESSION_DAY: "5"
+      NO_SESSION_KICK: "1"
+      TARGETS: ${{ github.event.inputs.targets }}
+      REASON: ${{ github.event.inputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Fire report chain
+        run: |
+          python - <<'PY'
+          import asyncio, os, re, random
+          import snoser
+
+          captured = []
+          async def fake_push(title, lines):
+              captured.append((title, lines))
+          snoser.push_send_log = fake_push
+
+          targets = os.environ["TARGETS"].split()
+          reason = os.environ["REASON"]
+          snoser.set_current_user("chain-report runner")
+
+          async def go():
+              for i, target in enumerate(targets):
+                  print(f"[CHAIN {i+1}/{len(targets)}] {target} reason={reason}", flush=True)
+                  captured.clear()
+                  try:
+                      await snoser.fire_reports(target, reason, "", None)
+                  except Exception as e:
+                      print(f"[CHAIN] {target} EXCEPTION {type(e).__name__}: {e}", flush=True)
+                      continue
+                  for title, lines in captured:
+                      print(f"[LOG {title}]", flush=True)
+                      for line in lines:
+                          print("   ", re.sub("<[^>]+>", "", line), flush=True)
+                  if i + 1 < len(targets):
+                      pause = random.uniform(20, 35)
+                      print(f"[CHAIN] pause {pause:.0f}s", flush=True)
+                      await asyncio.sleep(pause)
+
+          asyncio.run(go())
+          PY
+      - name: Commit ledger
+        run: |
+          git add report_ledger.json session_status.json session_proxy.json 2>/dev/null || true
+          git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "chain report: ledger" || true
+          git pull --rebase origin main || true
+          git push || true
