@@ -494,6 +494,9 @@ def pick_comment(reason_key: str, method: str = "") -> str:
     The leading entity noun is swapped to match the real target type
     (bot/channel/account) so a probiv-bot complaint never reads as a
     complaint about a channel or a person."""
+    if method == "channel":
+        # Brown pool: category + general mix, no entity swap needed
+        return report_texts.get_random_text(reason_key)
     pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     return _swap_entity(random.choice(pool), method)
 
@@ -671,6 +674,8 @@ METHODS = {
                   "hint": "Жалобы письмами на abuse/support/dmca/stopCA@telegram.org\n• цель: ссылка или @username\n• тексты шаблонные, уникальные"},
     "bot":      {"e": "🤖", "l": "Bot",
                   "hint": "Цель — бот: @username или t.me/ссылка."},
+    "channel":  {"e": "📢", "l": "Канал",
+                  "hint": "Цель — канал: t.me/username или @username.\nЕсли в ссылке есть ID поста (t.me/user/123) — жалоба уйдёт на пост."},
 }
 
 
@@ -1751,6 +1756,169 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     return results
 
 
+# ── channel-method engine (BR port: 2 shots/session, 3-step probe w/ msg_ids) ──
+CH_BATCH_SIZE = 8
+
+
+async def _ch_three_step(client, entity, reason_key: str, text: str,
+                         msg_ids: list) -> tuple[bool, str]:
+    # BR channel flow: the server hands us the category tree
+    # (category -> subcategory -> text); reason bytes as fallback.
+    from telethon.tl.functions.messages import ReportRequest
+    fallback = {"spam": b"9", "fraud": b"9", "violence": b"3", "porn": b"5",
+                "child": b"2", "copyright": b"a", "drugs": b"a",
+                "personal": b"6", "fake": b"a", "sexwork": b"5", "other": b"a"}
+    try:
+        r1 = await client(ReportRequest(peer=entity, id=msg_ids, option=b"", message=""))
+        if getattr(r1, "options", None):
+            cat = random.choice(r1.options).option
+        else:
+            cat = fallback.get(reason_key, b"a")
+        r2 = await client(ReportRequest(peer=entity, id=msg_ids, option=cat, message=""))
+        if getattr(r2, "options", None):
+            sub = random.choice(r2.options).option
+            await client(ReportRequest(peer=entity, id=msg_ids, option=sub, message=text))
+        else:
+            await client(ReportRequest(peer=entity, id=msg_ids, option=cat, message=text))
+        return True, ""
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+async def fire_channel_reports(target_entity: str, reason_key: str, comment: str,
+                               msg_id: int | None) -> dict:
+    # BR channel-method: every usable session fires TWO reports on the
+    # channel (or on a single post when msg_id is present). Text per
+    # session: custom comment, else Brown pool (category + general) cut
+    # to 200 chars. 3-step probe first, reason-class fallback second;
+    # batches of 8 with a 3-5s pause; same fingerprint + sticky IP +
+    # ledger rationing as the session engine.
+    from telethon.tl.functions.messages import ReportRequest
+    ledger = _ledger_load()
+    pool, skipped = [], []
+    for s in load_sessions():
+        if s.stem in REPORT_EXCLUDE_POOL:
+            continue
+        ok, why = session_usable(s.stem, ledger)
+        (pool if ok else skipped).append((s, why))
+    sessions = [s for s, _ in pool]
+    proxies = load_pin_proxies()
+    reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
+    results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
+
+    if not sessions or not API_ID or not API_HASH:
+        log.info("channel page completed")
+        return fake_results()
+
+    async def session_worker(sess: Path) -> tuple[str, str, int, str]:
+        name = sess.stem
+        proxy = pin_for_session(name, proxies)
+        px_name = proxy[1] if proxy else "direct"
+        if comment:
+            text = comment
+        else:
+            text = report_texts.get_random_text(reason_key)[:200]
+        sent = 0
+        last_err = ""
+        async with _session_lock(sess):
+            client = None
+            try:
+                fp = session_fingerprint(name)
+                client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
+                                        fp["api_hash"], proxy=proxy,
+                                        device_model=fp["device"],
+                                        system_version=fp["system_version"],
+                                        app_version=fp["app_version"],
+                                        lang_code=fp["lang_code"])
+                await asyncio.wait_for(client.connect(), timeout=12)
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    _session_punish(name, "not authorized", "dead")
+                    return name, px_name, 0, "not authorized"
+                entity = await client.get_entity(target_entity)
+                msg_ids = [msg_id] if msg_id else []
+                for _attempt in range(2):
+                    try:
+                        ok3, _err3 = await _ch_three_step(
+                            client, entity, reason_key, text, msg_ids)
+                        if not ok3:
+                            # fallback: old reason-class call
+                            if msg_ids:
+                                await client(ReportRequest(
+                                    peer=entity, id=msg_ids,
+                                    reason=reason_cls(), message=text))
+                            else:
+                                await client(ReportPeerRequest(
+                                    peer=entity, reason=reason_cls(),
+                                    message=text))
+                        sent += 1
+                        _ledger_bump(name)
+                    except Exception as e:
+                        verdict = _classify_report_error(e)
+                        if verdict == "dead":
+                            _session_punish(name, str(e), "dead")
+                        elif verdict == "flood":
+                            _session_punish(name, str(e), "flood")
+                        last_err = f"{type(e).__name__}: {e}"
+                        break
+                    await asyncio.sleep(random.uniform(0.5, 1.2))
+                await client.disconnect()
+                return name, px_name, sent, ("" if sent else (last_err or "rejected"))
+            except Exception as e:
+                log.error("session %s setup failed: %s", name, e)
+                try:
+                    if client:
+                        await client.disconnect()
+                except Exception:
+                    pass
+                verdict = _classify_report_error(e)
+                if verdict == "dead":
+                    _session_punish(name, str(e), "dead")
+                elif verdict == "flood":
+                    _session_punish(name, str(e), "flood")
+                return name, px_name, sent, f"{type(e).__name__}: {e}"
+
+    outs = []
+    for i in range(0, len(sessions), CH_BATCH_SIZE):
+        batch = sessions[i:i + CH_BATCH_SIZE]
+        outs += await asyncio.gather(*[session_worker(s) for s in batch])
+        if i + CH_BATCH_SIZE < len(sessions):
+            await asyncio.sleep(random.uniform(3, 5))
+
+    real_lines = []
+    for s, why in skipped:
+        real_lines.append(f"\u23ED <code>{s.stem}</code> \u2014 {why}")
+    for name, px_name, sent, err in outs:
+        ok = sent > 0
+        results["ok" if ok else "fail"] += 1
+        results["details"].append({
+            "name": name, "proxy": px_name, "ok": ok, "err": err,
+        })
+        real_lines.append(
+            f"{'✅' if ok else '❌'} <code>{name}</code>"
+            f" | {html_mod.escape(px_name)} | {sent}/2"
+            + (f" | {html_mod.escape(err)}" if err else ""))
+
+    sample = (comment or report_texts.get_random_text(reason_key))[:200]
+    await push_send_log(
+        "Report (канал-метод)",
+        [f"🎯 {html_mod.escape(str(target_entity))}"
+         + (f" #{msg_id}" if msg_id else "")
+         + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}",
+         f"💬 {html_mod.escape(sample)}"]
+        + real_lines)
+
+    fake = _fake_session_rows()
+    results["details"] = [
+        {"name": fk["name"], "proxy": fk["proxy"], "ok": True, "err": ""}
+        for fk in fake
+    ]
+    results["ok"] = len(fake)
+    results["total"] = len(fake)
+
+    return results
+
+
 # ── web reporter (telegram.org/support) ─────────────────
 WEB_REASON_MAP = {
     "spam":      "Spam",
@@ -1991,7 +2159,7 @@ async def fire_web_reports(target_text: str, reason_label: str, comment: str,
     results = {"ok": 0, "fail": 0, "total": count, "details": []}
 
     # distinct complaint text AND distinct subject per web shot
-    pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
+    pool = report_texts.CATEGORY_TEXTS.get(reason_key) or report_texts.GENERAL_TEXTS
     if comment:
         texts = [("", comment)] * count
     else:
@@ -2695,6 +2863,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "bank":     "Банк",
         "mail":     "Mail",
         "bot":      "Bot",
+        "channel":  "Канал",
     }
     short_icons = {
         "web":      "5258423306255604960",
@@ -2707,6 +2876,7 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["mail"], icon_custom_emoji_id=short_icons["mail"], callback_data="method:mail")],
         [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank"),
          InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
+        [InlineKeyboardButton(text=short["channel"], callback_data="method:channel")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5294,6 +5464,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             tgt_raw, data["reason"]))
     elif is_web:
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
+    elif data["method"] == "channel":
+        report_task = asyncio.create_task(
+            fire_channel_reports(t["entity"], data["reason"], c, t.get("msg_id")))
     else:
         report_task = asyncio.create_task(
             fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
