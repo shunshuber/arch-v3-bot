@@ -191,7 +191,14 @@ async def bootstrap(files: dict[str, Path]) -> None:
             continue
         text = await _tg_read(kind, fid)
         if text is None:
-            log.warning("store: %s unreadable — keeping repo copy", kind)
+            # stale/foreign file_id (e.g. bot token switched) — the repo
+            # copy is the best we have; re-seed the store from it
+            log.warning("store: %s unreadable — re-seeding from repo copy",
+                        kind)
+            try:
+                push_async(kind, path.read_text(encoding="utf-8"))
+            except Exception as e:
+                log.warning("store reseed %s failed: %s", kind, e)
             continue
         try:
             json.loads(text)   # sanity
