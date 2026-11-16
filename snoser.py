@@ -677,6 +677,8 @@ METHODS = {
                   "hint": "Цель — бот: @username или t.me/ссылка."},
     "channel":  {"e": "📢", "l": "Канал",
                   "hint": "Цель — канал: t.me/username или @username.\nЕсли в ссылке есть ID поста (t.me/user/123) — жалоба уйдёт на пост."},
+    "message":  {"e": "💬", "l": "Сообщение",
+                 "hint": "Пришли ссылку на сообщение: <code>t.me/канал/123</code>.\nЖалоба уйдёт именно на этот пост."},
 }
 
 
@@ -2865,6 +2867,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "mail":     "Mail",
         "bot":      "Bot",
         "channel":  "Канал",
+        "message":  "Сообщение",
     }
     short_icons = {
         "web":      "5258423306255604960",
@@ -2877,7 +2880,8 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["mail"], icon_custom_emoji_id=short_icons["mail"], callback_data="method:mail")],
         [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank"),
          InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
-        [InlineKeyboardButton(text=short["channel"], icon_custom_emoji_id="5260325873688518261", callback_data="method:channel")],
+        [InlineKeyboardButton(text=short["channel"], icon_custom_emoji_id="5260325873688518261", callback_data="method:channel"),
+         InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -5188,6 +5192,10 @@ async def got_target(msg: Message, state: FSMContext):
     if not target["entity"]:
         await msg.answer("\u274c \u041D\u0435\u0432\u0435\u0440\u043D\u0430\u044F \u0446\u0435\u043B\u044C. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0441\u043D\u043E\u0432\u0430.")
         return
+    if _m == "message" and not target.get("msg_id"):
+        await msg.answer(_cx("❌ Нужна ссылка на сообщение: <code>t.me/канал/123</code>. Без ID поста жалоба не уйдёт."),
+                         parse_mode=ParseMode.HTML)
+        return
     await state.update_data(target=target, comment="")
     # text step: user picks their own complaint text or the auto template pool
     data = await state.get_data()
@@ -5467,6 +5475,13 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     elif data["method"] == "channel":
         report_task = asyncio.create_task(
             fire_channel_reports(t["entity"], data["reason"], c, t.get("msg_id")))
+    elif data["method"] == "message":
+        if not t.get("msg_id"):
+            await cb.answer("Нужна ссылка на сообщение: t.me/канал/123", show_alert=True)
+            await state.clear()
+            return
+        report_task = asyncio.create_task(
+            fire_channel_reports(t["entity"], data["reason"], c, t["msg_id"]))
     else:
         report_task = asyncio.create_task(
             fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
@@ -7126,9 +7141,11 @@ async def _fsm_render_state(cb: CallbackQuery, e: dict) -> None:
                                     parse_mode=ParseMode.HTML,
                                     reply_markup=kb_reasons())
         elif st == "Report:target":
+            _hint = ("Пришли ссылку на сообщение: <code>t.me/канал/123</code>."
+                     if data.get("method") == "message" else
+                     "Пришли юзернейм цели (<code>@name</code> или ссылку).")
             await cb.message.answer(_cx(bq(f"<b>{NAME}</b>  —  Цель")
-                                        + "\n\nПришли юзернейм цели "
-                                          "(<code>@name</code> или ссылку)."),
+                                        + "\n\n" + _hint),
                                     parse_mode=ParseMode.HTML)
         else:
             await cb.message.answer(_cx(bq(f"<b>{NAME}</b>")
