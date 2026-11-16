@@ -7074,6 +7074,14 @@ async def menu_subs(cb: CallbackQuery, state: FSMContext):
 # ── stale ───────────────────────────────────────────────
 @router.callback_query()
 async def stale_cb(cb: CallbackQuery):
+    try:
+        await push_send_log(
+            "Stale callback",
+            [f"\U0001f464 {html_mod.escape(cb.from_user.full_name or '?')} "
+             f"(<code>{cb.from_user.id}</code>)",
+             f"\U0001f518 <code>{html_mod.escape(cb.data or '?')}</code>"])
+    except Exception:
+        pass
     await cb.answer("\u26a0\ufe0f \u0421\u0435\u0441\u0441\u0438\u044f \u0438\u0441\u0442\u0435\u043a\u043b\u0430. /start", show_alert=True)
 
 
