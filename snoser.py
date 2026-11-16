@@ -2733,6 +2733,27 @@ def kb_skip() -> InlineKeyboardMarkup:
     ])
 
 
+def kb_comment_step() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Свой текст жалобы", callback_data="cmt:custom"),
+         InlineKeyboardButton(text="🎲 Авто-шаблон", callback_data="cmt:auto")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="cmt:back")],
+    ])
+
+
+def comment_step_text(data: dict) -> str:
+    m = METHODS[data["method"]]
+    r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
+    t = data["target"]
+    return (
+        bq(f"<b>{NAME}</b>  —  Текст жалобы")
+        + f"\n\n{m['e']} <b>Метод:</b> {m['l']}"
+        + f"\n🎯 <b>Цель:</b> <code>{html_mod.escape(str(t['raw']))}</code>"
+        + f"\n⚠️ {r['e']} {r['l']}"
+        + "\n\nВыбери, каким текстом жаловаться:"
+    )
+
+
 def kb_confirm() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c", icon_custom_emoji_id="5357069174512303778", callback_data="confirm:yes"),
@@ -4428,6 +4449,313 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
 
     await state.clear()
 # ── report flow ─────────────────────────────────────────
+# ── watchdog: цели под наблюдением ──────────────────────
+class WatchFSM(StatesGroup):
+    enter = State()
+
+
+WATCH_FILE = Path(__file__).parent / "watchdog.json"
+WATCH_INTERVAL = 150        # один проход каждые 2.5 мин (окно рана ~5 мин)
+WATCH_START_DELAY = 45
+WATCH_MAX_PER_USER = 5
+WATCH_DEFAULT_DAYS = 3
+WATCH_SESS_CAP = 5          # параллельные пробы
+
+_watch_sem = asyncio.Semaphore(WATCH_SESS_CAP)
+
+
+def load_watch() -> dict:
+    try:
+        return json.loads(WATCH_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"seq": 0, "items": []}
+
+
+def save_watch(d: dict, force: bool = False) -> None:
+    WATCH_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=1),
+                          encoding="utf-8")
+    commit_file_to_repo("watchdog.json", "watchdog update",
+                        cooldown=0 if force else 90)
+    try:
+        store.push_async("watchdog", WATCH_FILE.read_text(encoding="utf-8"),
+                         force=force)
+    except Exception:
+        pass
+
+
+def _watch_add(uid: int, raw: str) -> tuple[dict | None, str]:
+    d = load_watch()
+    mine = [it for it in d["items"] if it["uid"] == uid]
+    if len(mine) >= WATCH_MAX_PER_USER:
+        return None, f"лимит: {WATCH_MAX_PER_USER} целей на юзера"
+    tgt = (raw or "").strip()
+    if not tgt:
+        return None, "пусто"
+    low = tgt.lower()
+    if low.startswith(("http://", "https://")) and "t.me" not in low:
+        kind, entity, msg_id = "url", tgt, None
+    elif "t.me/+" in tgt or "joinchat/" in tgt:
+        h = (tgt.split("+")[-1].split("/")[-1].split("?")[0]
+             if "t.me/+" in tgt
+             else tgt.split("joinchat/")[-1].split("?")[0])
+        kind, entity, msg_id = "invite", h, None
+    else:
+        t = parse_target(tgt)
+        if not t["entity"]:
+            return None, "не разобрал цель"
+        kind, entity, msg_id = "entity", t["entity"], t.get("msg_id")
+    for it in d["items"]:
+        if it["uid"] == uid and it["entity"] == entity and it["kind"] == kind:
+            return it, "уже под наблюдением"
+    d["seq"] = d.get("seq", 0) + 1
+    item = {"id": d["seq"], "uid": uid, "kind": kind, "entity": entity,
+            "msg_id": msg_id, "raw": tgt, "status": "alive",
+            "until": time.time() + WATCH_DEFAULT_DAYS * 86400}
+    d["items"].append(item)
+    save_watch(d, force=True)
+    return item, "ok"
+
+
+def _watch_remove_all(uid: int) -> int:
+    d = load_watch()
+    keep = [it for it in d["items"] if it["uid"] != uid]
+    removed = len(d["items"]) - len(keep)
+    if removed:
+        d["items"] = keep
+        save_watch(d, force=True)
+    return removed
+
+
+def _watch_list(uid: int) -> list[dict]:
+    now = time.time()
+    return [it for it in load_watch()["items"]
+            if it["uid"] == uid and it.get("until", 0) > now]
+
+
+async def _watch_probe(kind: str, entity: str, msg_id: int | None,
+                       sess: Path) -> str:
+    """alive | dead | msg_gone | error. Ошибка сети — не событие."""
+    from telethon import errors as _wterr
+    from telethon.tl.functions.messages import CheckChatInviteRequest
+    from telethon.tl.types import User as _WUser
+    fp = session_fingerprint(sess.stem)
+    proxy = pin_for_session(sess.stem, load_pin_proxies())
+    client = TelegramClient(
+        str(sess.with_suffix("")), fp["api_id"], fp["api_hash"], proxy=proxy,
+        device_model=fp["device"], system_version=fp["system_version"],
+        app_version=fp["app_version"], lang_code=fp["lang_code"])
+    try:
+        await asyncio.wait_for(client.connect(), timeout=10)
+        if not await client.is_user_authorized():
+            return "error"
+        if kind == "invite":
+            try:
+                await client(CheckChatInviteRequest(hash=entity))
+                return "alive"
+            except (_wterr.InviteHashExpiredError, _wterr.InviteHashInvalidError,
+                    _wterr.ChannelPrivateError):
+                return "dead"
+            return "error"
+        ent = await client.get_entity(entity)
+        if isinstance(ent, _WUser):
+            if ent.deleted or getattr(ent, "deactivated", False):
+                return "dead"
+            if msg_id and not ent.bot:
+                return "alive"
+        if getattr(ent, "deactivated", False):
+            return "dead"
+        if msg_id:
+            try:
+                m = await client.get_messages(ent, ids=msg_id)
+                return "alive" if m else "msg_gone"
+            except Exception:
+                return "msg_gone"
+        return "alive"
+    except (_wterr.UsernameNotOccupiedError, _wterr.UsernameInvalidError,
+            _wterr.UserDeactivatedError, _wterr.UserDeactivatedBanError,
+            _wterr.ChannelPrivateError):
+        return "dead"
+    except Exception:
+        return "error"
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+async def _watch_probe_url(url: str) -> str:
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10),
+                             headers={"User-Agent": "Mozilla/5.0"},
+                             allow_redirects=True) as r:
+                return "dead" if r.status in (404, 410) else "alive"
+    except Exception:
+        return "error"
+
+
+async def _watch_check_one(it: dict, sessions: list[Path]) -> tuple[int, str]:
+    async with _watch_sem:
+        if it["kind"] == "url":
+            return it["id"], await _watch_probe_url(it["entity"])
+        if not sessions:
+            return it["id"], "error"
+        sess = random.choice(sessions)
+        st = await _watch_probe(it["kind"], it["entity"], it.get("msg_id"), sess)
+        return it["id"], st
+
+
+async def watch_sweep() -> None:
+    d = load_watch()
+    now = time.time()
+    if any(it.get("until", 0) <= now for it in d["items"]):
+        d["items"] = [it for it in d["items"] if it.get("until", 0) > now]
+        save_watch(d)
+    items = list(d["items"])
+    if not items:
+        return
+    sessions = load_sessions()
+    outs = await asyncio.gather(
+        *[_watch_check_one(it, sessions) for it in items],
+        return_exceptions=True)
+    events, changed = [], False
+    for r in outs:
+        if not isinstance(r, tuple):
+            continue
+        wid, st = r
+        if st == "error":
+            continue
+        cur = next((x for x in d["items"] if x["id"] == wid), None)
+        if cur is None:
+            continue
+        if st == "alive":
+            if cur.get("status") != "alive":
+                cur["status"] = "alive"
+                changed = True
+            continue
+        d["items"] = [x for x in d["items"] if x["id"] != wid]
+        events.append((cur, st))
+        changed = True
+    if changed:
+        save_watch(d, force=True)
+    for cur, st in events:
+        label = "сообщение удалено" if st == "msg_gone" \
+            else "цель удалена / заморожена"
+        esc = html_mod.escape(str(cur.get("raw") or cur["entity"]))
+        await push_send_log(
+            "Сторож: цель снята",
+            [f"🎯 <code>{esc}</code> — {label}",
+             f"👤 владелец: <code>{cur['uid']}</code>"])
+        if _BOT:
+            try:
+                await _BOT.send_message(
+                    cur["uid"], _cx(
+                        bq(f"<b>{NAME}</b>  —  👁 Сторож")
+                        + f"\n\n🔴 <b>{label}</b>"
+                        + f"\n🎯 <code>{esc}</code>"
+                        + f"\n🕒 {datetime.now().strftime('%d.%m %H:%M:%S')}"),
+                    parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+
+
+async def watch_loop() -> None:
+    log.info("watchdog: sweep every %ss", WATCH_INTERVAL)
+    await asyncio.sleep(WATCH_START_DELAY)
+    while True:
+        try:
+            await watch_sweep()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning("watchdog sweep failed: %s", e)
+        await asyncio.sleep(WATCH_INTERVAL)
+
+
+def kb_watch() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить цель", callback_data="watch:add")],
+        [InlineKeyboardButton(text="📋 Мои цели", callback_data="watch:list"),
+         InlineKeyboardButton(text="❌ Снять все", callback_data="watch:clear")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+    ])
+
+
+def watch_menu_text(uid: int) -> str:
+    mine = _watch_list(uid)
+    rows = "\n".join(
+        f"{'🟢' if it['status'] == 'alive' else '🔴'} "
+        f"<code>{html_mod.escape(str(it['raw'])[:60])}</code>"
+        for it in mine) or "<i>пусто</i>"
+    return (bq(f"<b>{NAME}</b>  —  👁 Сторож")
+            + "\n\nСледит за целями и присылает событие, когда цель удалят."
+            + f"\n\n<b>Под наблюдением ({len(mine)}/{WATCH_MAX_PER_USER}):</b>\n{rows}")
+
+
+@router.message(F.text.startswith("/watch"))
+async def watch_cmd(msg: Message, state: FSMContext):
+    subs = load_subs()
+    s, _ = sub_quality(subs, msg.from_user.id)
+    if s in ("free", "expired") and not user_is_admin(msg.from_user.id):
+        await msg.answer(_cx(
+            bq(f"<b>{NAME}</b>") + "\n\n🔒 Сторож доступен с подпиской."),
+            parse_mode=ParseMode.HTML)
+        return
+    await state.clear()
+    await msg.answer(_cx(watch_menu_text(msg.from_user.id)),
+                     parse_mode=ParseMode.HTML, reply_markup=kb_watch())
+
+
+@router.callback_query(F.data.startswith("watch:"))
+async def watch_menu(cb: CallbackQuery, state: FSMContext):
+    act = cb.data.split(":", 1)[1]
+    uid = cb.from_user.id
+    subs = load_subs()
+    s, _ = sub_quality(subs, uid)
+    if s in ("free", "expired") and not user_is_admin(uid):
+        await cb.answer("🔒 Нужна подписка", show_alert=True)
+        return
+    if act == "add":
+        await safe_edit(cb.message, _cx(
+            bq(f"<b>{NAME}</b>  —  👁 Сторож")
+            + "\n\n🎯 Пришли цель одним сообщением:"
+            + "\n<code>@username</code> · <code>t.me/ссылка</code> · "
+              "пригл-ссылка <code>t.me/+...</code> · http-ссылка"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="watch:menu")],
+            ]))
+        await state.set_state(WatchFSM.enter)
+        await cb.answer()
+        return
+    if act == "clear":
+        n = _watch_remove_all(uid)
+        await safe_edit(cb.message, _cx(watch_menu_text(uid)),
+                        parse_mode=ParseMode.HTML, reply_markup=kb_watch())
+        await cb.answer(f"снято: {n}" if n else "пусто",
+                        show_alert=bool(n))
+        return
+    await safe_edit(cb.message, _cx(watch_menu_text(uid)),
+                    parse_mode=ParseMode.HTML, reply_markup=kb_watch())
+    await cb.answer()
+
+
+@router.message(WatchFSM.enter)
+async def watch_enter(msg: Message, state: FSMContext):
+    item, why = _watch_add(msg.from_user.id, msg.text or "")
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if item is None:
+        await msg.answer(_cx(f"❌ {why}"), parse_mode=ParseMode.HTML)
+        return
+    await msg.answer(_cx(watch_menu_text(msg.from_user.id)),
+                     parse_mode=ParseMode.HTML, reply_markup=kb_watch())
+    await state.clear()
+
+
 @router.message(Report.target)
 async def got_target(msg: Message, state: FSMContext):
     _m = (await state.get_data()).get("method")
@@ -4450,14 +4778,13 @@ async def got_target(msg: Message, state: FSMContext):
     if not target["entity"]:
         await msg.answer("\u274c \u041D\u0435\u0432\u0435\u0440\u043D\u0430\u044F \u0446\u0435\u043B\u044C. \u041F\u043E\u043F\u0440\u043E\u0431\u0443\u0439\u0442\u0435 \u0441\u043D\u043E\u0432\u0430.")
         return
-    await state.update_data(target=target)
-    # auto-jump to confirm — comment is auto-decided via templates downstream
+    await state.update_data(target=target, comment="")
+    # text step: user picks their own complaint text or the auto template pool
     data = await state.get_data()
-    data["comment"] = ""   # will be substituted by template at send time
-    await state.update_data(comment="")
-    await msg.answer(_cx(
-        summary_text(data)), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
-    await state.set_state(Report.confirm)
+    await msg.answer(_cx(comment_step_text(data)),
+                     parse_mode=ParseMode.HTML,
+                     reply_markup=kb_comment_step())
+    await state.set_state(Report.comment)
 
 
 @router.callback_query(Report.bank, F.data.startswith("bank:"))
@@ -4568,11 +4895,54 @@ async def skip_comment(cb: CallbackQuery, state: FSMContext):
 
 @router.message(Report.comment)
 async def got_comment(msg: Message, state: FSMContext):
-    await state.update_data(comment=msg.text or "")
+    await state.update_data(comment=(msg.text or "").strip()[:3800])
     data = await state.get_data()
     await msg.answer(_cx(
         summary_text(data)), parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
     await state.set_state(Report.confirm)
+
+
+@router.callback_query(Report.comment, F.data == "cmt:custom")
+async def cmt_custom(cb: CallbackQuery, state: FSMContext):
+    await safe_edit(cb.message, _cx(
+        bq(f"<b>{NAME}</b>  —  Свой текст")
+        + "\n\n✍️ Пришли текст жалобы одним сообщением — он уйдёт "
+        "в каждую жалобу как есть."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="cmt:menu")],
+        ]))
+    await cb.answer()
+
+
+@router.callback_query(Report.comment, F.data == "cmt:auto")
+async def cmt_auto(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(comment="")
+    data = await state.get_data()
+    await safe_edit(cb.message, _cx(summary_text(data)),
+                    parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
+    await cb.answer()
+
+
+@router.callback_query(Report.comment, F.data == "cmt:menu")
+async def cmt_menu(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await safe_edit(cb.message, _cx(comment_step_text(data)),
+                    parse_mode=ParseMode.HTML, reply_markup=kb_comment_step())
+    await cb.answer()
+
+
+@router.callback_query(Report.comment, F.data == "cmt:back")
+async def cmt_back(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    m = METHODS.get(data.get("method", "message"), METHODS["message"])
+    await safe_edit(cb.message, _cx(
+        bq(f"<b>{NAME}</b>")
+        + f"\n\n{m['e']} <b>{m['l']}</b>"
+        + "\n\n⚠️ Выберите причину жалобы:"),
+        parse_mode=ParseMode.HTML, reply_markup=kb_reasons())
+    await state.set_state(Report.reason)
+    await cb.answer()
 
 
 @router.callback_query(Report.confirm, F.data.startswith("confirm:"))
@@ -6568,6 +6938,9 @@ async def main():
                 globals()["_hb_started"] = True
                 logging.getLogger().addHandler(_ErrCounter())
                 asyncio.create_task(hb_loop(bot))
+            if not globals().get("_watch_started"):
+                globals()["_watch_started"] = True
+                asyncio.create_task(watch_loop())
             await dp.start_polling(bot)
             break
         except TelegramNetworkError as e:
