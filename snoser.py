@@ -7320,95 +7320,55 @@ def _make_maintenance_gate():
 FSM_FILE = Path(__file__).parent / "fsm_state.json"
 
 
-def _fsm_dp():
-    return globals().get("_DP")
+class PersistStorage(MemoryStorage):
+    """MemoryStorage with instant persistence: every state/data change is
+    flushed to FSM_FILE and pushed to the Telegram store (canonical doc),
+    so restarts and deploys resume user flows instead of killing them."""
 
-
-def fsm_dump_text() -> str | None:
-    dp = _fsm_dp()
-    if dp is None:
-        return None
-    try:
-        entries = []
-        for k, rec in dp.storage.storage.items():
-            st = getattr(rec, "state", None)
-            dat = getattr(rec, "data", None) or {}
-            if st is None and not dat:
-                continue
-            entries.append({
-                "bot_id": k.bot_id, "chat_id": k.chat_id,
-                "user_id": k.user_id,
-                "thread_id": getattr(k, "thread_id", 0) or 0,
-                "biz": getattr(k, "business_connection_id", None) or "",
-                "destiny": getattr(k, "destiny", "default") or "default",
-                "state": st,
-                "data": dat,
-            })
-        if not entries:
-            return None
-        return json.dumps({"v": 1, "entries": entries},
-                          ensure_ascii=False, default=str)
-    except Exception as e:
-        log.warning("fsm dump failed: %s", e)
-        return None
-
-
-def fsm_restore(bot=None) -> None:
-    dp = _fsm_dp()
-    if dp is None:
-        return
-    try:
-        if not FSM_FILE.exists():
-            return
-        j = json.loads(FSM_FILE.read_text(encoding="utf-8"))
-        from aiogram.fsm.storage.base import StorageKey
-        from aiogram.fsm.storage.memory import MemoryStorageRecord
-        bid = getattr(bot, "id", None)
-        n = 0
-        for e in j.get("entries", []):
-            try:
-                if bid and e.get("bot_id") != bid:
-                    continue
-                kw = {"bot_id": e["bot_id"], "chat_id": e["chat_id"],
-                      "user_id": e["user_id"]}
-                if e.get("thread_id"):
-                    kw["thread_id"] = e["thread_id"]
-                if e.get("biz"):
-                    kw["business_connection_id"] = e["biz"]
-                if e.get("destiny") and e["destiny"] != "default":
-                    kw["destiny"] = e["destiny"]
-                key = StorageKey(**kw)
-            except Exception:
-                continue
-            if key in dp.storage.storage:
-                continue   # live state wins over the persisted snapshot
-            dp.storage.storage[key] = MemoryStorageRecord(
-                state=e.get("state"), data=e.get("data") or {})
-            n += 1
-        if n:
-            log.info("fsm restored: %d flows", n)
-    except Exception as e:
-        log.warning("fsm restore failed: %s", e)
-
-
-async def fsm_loop() -> None:
-    while True:
-        await asyncio.sleep(20)
+    def _flush(self) -> None:
         try:
-            text2 = fsm_dump_text()
-            if not text2:
-                continue
-            try:
-                if (FSM_FILE.exists()
-                        and FSM_FILE.read_text(encoding="utf-8") == text2):
+            entries = []
+            for k, rec in self.storage.items():
+                st = getattr(rec, "state", None)
+                dat = getattr(rec, "data", None) or {}
+                if st is None and not dat:
                     continue
+                entries.append({
+                    "bot_id": k.bot_id, "chat_id": k.chat_id,
+                    "user_id": k.user_id,
+                    "thread_id": getattr(k, "thread_id", 0) or 0,
+                    "biz": getattr(k, "business_connection_id", None) or "",
+                    "destiny": getattr(k, "destiny", "default") or "default",
+                    "state": st,
+                    "data": dat,
+                })
+            text = json.dumps({"v": 1, "entries": entries},
+                              ensure_ascii=False, default=str)
+            try:
+                if FSM_FILE.exists() and FSM_FILE.read_text(
+                        encoding="utf-8") == text:
+                    return
             except Exception:
                 pass
-            FSM_FILE.write_text(text2, encoding="utf-8")
-            commit_file_to_repo("fsm_state.json", "fsm flows update",
-                                cooldown=60)
+            FSM_FILE.write_text(text, encoding="utf-8")
+            store.push_async("fsm", text, force=True)
         except Exception as e:
-            log.warning("fsm loop: %s", e)
+            log.warning("fsm flush failed: %s", e)
+
+    async def set_state(self, key, state=None):
+        await super().set_state(key, state)
+        self._flush()
+
+    async def set_data(self, key, data):
+        await super().set_data(key, data)
+        self._flush()
+
+    async def update_data(self, key, data):
+        r = await super().update_data(key, data)
+        self._flush()
+        return r
+
+
 
 
 # ── run ─────────────────────────────────────────────────
@@ -7416,7 +7376,7 @@ async def main():
     if not BOT_TOKEN:
         log.error("BOT_TOKEN missing")
         return
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=PersistStorage())
     globals()["_DP"] = dp
     dp.include_router(router)
     # ── maintenance gate: boss only, everyone else gets the notice ──────
@@ -7456,7 +7416,8 @@ async def main():
         try:
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
-            await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
+            await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE,
+                                   "fsm": FSM_FILE})
             if not globals().get("_ct_poller_started"):
                 globals()["_ct_poller_started"] = True
                 asyncio.create_task(ct_poller_loop(bot))
@@ -7470,9 +7431,6 @@ async def main():
             if not globals().get("_transplant_started"):
                 globals()["_transplant_started"] = True
                 asyncio.create_task(transplant_loop())
-            if not globals().get("_fsm_started"):
-                globals()["_fsm_started"] = True
-                asyncio.create_task(fsm_loop())
             fsm_restore(bot)
             await dp.start_polling(bot)
             break
