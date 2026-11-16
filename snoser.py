@@ -7471,6 +7471,28 @@ async def main():
             if not globals().get("_transplant_started"):
                 globals()["_transplant_started"] = True
                 asyncio.create_task(transplant_loop())
+            # one-time bridge: v32-era flow states live in the store
+            # doc; the carrier is the repo file now — pull the doc
+            # (read-only fetch, no chat writes) when the file is missing
+            # or holds no entries
+            try:
+                _need = True
+                try:
+                    if FSM_FILE.exists():
+                        _need = not json.loads(
+                            FSM_FILE.read_text(encoding="utf-8")
+                        ).get("entries")
+                except Exception:
+                    _need = True
+                if _need:
+                    _fid = (store._INDEX.get("fsm") or {}).get("file_id")
+                    if _fid:
+                        _txt = await store._tg_read("fsm", _fid)
+                        if _txt:
+                            FSM_FILE.write_text(_txt, encoding="utf-8")
+                            log.info("fsm: bridged flow states from store doc")
+            except Exception as e:
+                log.warning("fsm bridge failed: %s", e)
             fsm_restore(bot)
             await dp.start_polling(bot)
             break
