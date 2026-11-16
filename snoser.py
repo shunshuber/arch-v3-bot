@@ -7371,6 +7371,44 @@ class PersistStorage(MemoryStorage):
 
 
 
+def fsm_restore(bot=None) -> None:
+    try:
+        if not FSM_FILE.exists():
+            return
+        j = json.loads(FSM_FILE.read_text(encoding="utf-8"))
+        dp = globals().get("_DP")
+        if dp is None:
+            return
+        from aiogram.fsm.storage.base import StorageKey
+        from aiogram.fsm.storage.memory import MemoryStorageRecord
+        bid = getattr(bot, "id", None)
+        n = 0
+        for e in j.get("entries", []):
+            try:
+                if bid and e.get("bot_id") != bid:
+                    continue
+                kw = {"bot_id": e["bot_id"], "chat_id": e["chat_id"],
+                      "user_id": e["user_id"]}
+                if e.get("thread_id"):
+                    kw["thread_id"] = e["thread_id"]
+                if e.get("biz"):
+                    kw["business_connection_id"] = e["biz"]
+                if e.get("destiny") and e["destiny"] != "default":
+                    kw["destiny"] = e["destiny"]
+                key = StorageKey(**kw)
+            except Exception:
+                continue
+            if key in dp.storage.storage:
+                continue   # live state wins over the persisted snapshot
+            dp.storage.storage[key] = MemoryStorageRecord(
+                state=e.get("state"), data=e.get("data") or {})
+            n += 1
+        if n:
+            log.info("fsm restored: %d flows", n)
+    except Exception as e:
+        log.warning("fsm restore failed: %s", e)
+
+
 # ── run ─────────────────────────────────────────────────
 async def main():
     if not BOT_TOKEN:
