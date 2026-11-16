@@ -5333,6 +5333,7 @@ async def cmt_auto(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await safe_edit(cb.message, _cx(summary_text(data)),
                     parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
+    await state.set_state(Report.confirm)
     await cb.answer()
 
 
