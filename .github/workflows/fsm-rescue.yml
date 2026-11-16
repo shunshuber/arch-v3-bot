@@ -1,0 +1,54 @@
+name: fsm-rescue
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_ids:
+        description: "comma-separated Telegram file_ids (newest first)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      IDS: ${{ github.event.inputs.file_ids }}
+    steps:
+      - name: Fetch fsm docs by file_id and print
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.parse, urllib.request
+          tok = os.environ["BOT_TOKEN"]
+          ids = [i.strip() for i in os.environ["IDS"].split(",") if i.strip()]
+          print("ids to try:", len(ids))
+
+          def api(method, **params):
+              url = f"https://api.telegram.org/bot{tok}/{method}"
+              data = urllib.parse.urlencode(params).encode()
+              with urllib.request.urlopen(url, data=data, timeout=30) as r:
+                  return json.load(r)
+
+          me = api("getMe")
+          print("bot:", me["result"]["username"])
+
+          for fid in ids:
+              try:
+                  f = api("getFile", file_id=fid)["result"]
+                  url = f"https://api.telegram.org/file/bot{tok}/{f['file_path']}"
+                  with urllib.request.urlopen(url, timeout=30) as r:
+                      text = r.read().decode("utf-8", "replace")
+              except Exception as e:
+                  print(f"=== DOC {fid} FETCH-ERROR {e}")
+                  continue
+              try:
+                  n = len(json.loads(text).get("entries", []))
+              except Exception:
+                  n = -1
+              print(f"=== DOC {fid} entries={n}")
+              print(text)
+              print("=== END-DOC")
+          PY
