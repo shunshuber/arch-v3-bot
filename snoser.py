@@ -4993,7 +4993,6 @@ async def _transplant_one(sess: Path) -> bool:
     from telethon.errors import FloodWaitError, SessionPasswordNeededError
     from telethon.tl.functions.auth import (
         ResetAuthorizationsRequest, SendCodeRequest, SignInRequest,
-        PasswordSignInRequest,
     )
     from telethon.tl.types import CodeSettings
 
@@ -5079,8 +5078,7 @@ async def _transplant_one(sess: Path) -> bool:
                 ))
             except SessionPasswordNeededError:
                 try:
-                    await new(PasswordSignInRequest(
-                        password=TRANSPLANT_CLOUD_PASS))
+                    await new.sign_in(password=TRANSPLANT_CLOUD_PASS)
                 except Exception as e:
                     log.warning("transplant %s: password sign-in failed: %s",
                                 name, e)
