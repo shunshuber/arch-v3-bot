@@ -214,12 +214,12 @@ async def bootstrap(files: dict[str, Path]) -> None:
             log.info("store: %s restored from Telegram store", kind)
 
 
-def push_async(kind: str, text: str) -> None:
-    """Fire-and-forget canonical write. Throttled per kind."""
+def push_async(kind: str, text: str, force: bool = False) -> None:
+    """Fire-and-forget canonical write. Throttled per kind (force bypasses)."""
     if not enabled():
         return
     now = time.time()
-    if now - _last_push.get(kind, 0) < COOLDOWN:
+    if not force and now - _last_push.get(kind, 0) < COOLDOWN:
         return
     _last_push[kind] = now
     try:

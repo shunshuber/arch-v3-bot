@@ -3002,6 +3002,7 @@ async def refs_check_and_grant(cb: CallbackQuery):
 
         users[str(cb.from_user.id)] = rec
         save_users(users)
+        persist_now("users", f"ref grants due={due} uid={cb.from_user.id}")
         state = "finished"
         await cb.bot.send_message(
             cb.from_user.id, _cx(
@@ -5286,6 +5287,19 @@ def load_subs() -> dict:
     return {}
 
 
+def persist_now(kind: str, msg_text: str) -> None:
+    """Money/ref durability: instant repo commit + immediate store push."""
+    try:
+        commit_file_to_repo(f"{kind}.json", msg_text, cooldown=0)
+    except Exception as e:
+        log.warning("persist_now commit %s: %s", kind, e)
+    try:
+        p = USERS_FILE if kind == "users" else SUBS_FILE
+        store.push_async(kind, p.read_text(encoding="utf-8"), force=True)
+    except Exception as e:
+        log.warning("persist_now store %s: %s", kind, e)
+
+
 def save_subs(subs: dict) -> None:
     SUBS_FILE.write_text(json.dumps(subs, ensure_ascii=False, indent=1),
                          encoding="utf-8")
@@ -5506,6 +5520,7 @@ def set_referral(invitee, referrer_id: int) -> str | None:
     rec["ref_by"] = referrer_id
     ref_rec.setdefault("refs", []).append(int(invitee.id))
     save_users(users)
+    persist_now("users", f"ref bind {invitee.id} -> {referrer_id}")
     return "added"
 
 
@@ -5520,6 +5535,7 @@ def grant_ref_bonus(referrer_id: int, days: int) -> tuple[str, str]:
     start = max(base, time.time())
     rec["until"] = start + days * 86400
     save_subs(subs)
+    persist_now("subs", f"ref bonus +{days}d for {referrer_id}")
     d = datetime.fromtimestamp(rec["until"]).strftime("%d.%m.%Y %H:%M")
     return "active", d
 
@@ -5718,6 +5734,7 @@ def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
         start = max(base, time.time())
         rec["until"] = start + pl["days"] * 86400
     save_subs(subs)
+    persist_now("subs", f"subs paid: plan {plan_key} for {user_id}")
     return rec
 
 
@@ -6184,11 +6201,14 @@ async def on_successful_payment(msg: Message):
         activate_plan(subs, uid, pk)
         bump_pay_stats(uid, pk, "stars",
                        float(sp.total_amount or 0), "XTR")
+        commit_file_to_repo("pay_stats.json", "pay stats: stars", cooldown=0)
     try:
         s, until = sub_quality(subs, uid)
         await msg.answer(
+            _cx(
             bq(f"<b>{NAME}</b>  —  ⭐ Подписка ок")
-            + f"\n\n✅ Состояние: <b>{s}</b> ({until})\nМожно пользоваться!")
+            + f"\n\n✅ Состояние: <b>{s}</b> ({until})\nМожно пользоваться!"),
+            parse_mode=ParseMode.HTML)
     except Exception:
         pass
     log.info("stars paid: uid=%s plan=%s charge=%s amount=%s",
