@@ -7148,20 +7148,29 @@ async def stale_cb(cb: CallbackQuery):
         if _REPORT_CB_RE.match(d):
             dp = globals().get("_DP")
             ent = await _fsm_last_entry(cb.from_user.id)
-            if dp is not None and ent:
+            if dp is not None:
                 from aiogram.fsm.storage.base import StorageKey
                 from aiogram.fsm.storage.memory import MemoryStorageRecord
-                key = StorageKey(bot_id=int(ent.get("bot_id") or 0),
-                                 chat_id=cb.from_user.id,
-                                 user_id=cb.from_user.id)
+                key = StorageKey(
+                    bot_id=int((ent or {}).get("bot_id") or 0)
+                    or int(getattr(_BOT, "id", 0) or 0),
+                    chat_id=cb.from_user.id, user_id=cb.from_user.id)
                 live = dp.storage.storage.get(key)
-                if not getattr(live, "state", None):
+                live_state = getattr(live, "state", None)
+                if live_state:
+                    # a real flow is live — this press came from a dead
+                    # screen; re-render the live flow's current screen
+                    ent = {"state": live_state,
+                           "data": getattr(live, "data", None) or {},
+                           "bot_id": key.bot_id}
+                elif ent:
                     dp.storage.storage[key] = MemoryStorageRecord(
                         state=ent.get("state"), data=ent.get("data") or {})
                     try:
                         dp.storage._flush()
                     except Exception:
                         pass
+                if ent:
                     await _fsm_render_state(cb, ent)
                     try:
                         await push_send_log(
