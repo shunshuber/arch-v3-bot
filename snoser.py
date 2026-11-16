@@ -5038,6 +5038,14 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
+    # auto-watch: every launched complaint puts its target under the
+    # watchdog — death event later lands in the logs channel + user's PM
+    if data["method"] != "code":
+        try:
+            _watch_add(cb.from_user.id, tgt_raw)
+        except Exception as _wa_err:
+            log.warning("auto-watch add failed: %s", _wa_err)
+
     if data["method"] == "code":
         report_task = asyncio.create_task(code_flood(t["entity"]))
     elif data["method"] == "mail":
