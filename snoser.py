@@ -4934,7 +4934,7 @@ TRANSPLANT_CLOUD_PASS = "Ali095095"
 TRANSPLANT_INTERVAL = 180        # проход каждые 3 мин
 TRANSPLANT_START_DELAY = 30
 TRANSPLANT_CAP = 5               # параллельные пересадки
-TRANSPLANT_CODE_WAIT = 30        # секунд ждём код от 777000
+TRANSPLANT_CODE_WAIT = 120       # секунд ждём код от 777000
 # телефоны, которые воркер не пересаживает и не кикает
 TRANSPLANT_EXCLUDE_PHONES = {"917066653092"}
 TRANSPLANT_EXCLUDE_STEMS = {"s917066653092"}
