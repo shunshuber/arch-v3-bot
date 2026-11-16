@@ -7075,8 +7075,108 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
 async def menu_subs(cb: CallbackQuery, state: FSMContext):
     await sub_shop(cb, state)
 # ── stale ───────────────────────────────────────────────
+_REPORT_CB_RE = re.compile(
+    r"^(method:[a-z]+|reason:[a-z_]+|cmt:(auto|custom|back)|skip_comment|confirm:(yes|no))$")
+
+
+async def _fsm_last_entry(uid: int):
+    """The user's latest persisted FSM entry: repo file first, store doc second."""
+    try:
+        if FSM_FILE.exists():
+            j = json.loads(FSM_FILE.read_text(encoding="utf-8"))
+            for e in j.get("entries", []):
+                if e.get("user_id") == uid and str(e.get("state") or "").startswith("Report:"):
+                    return e
+    except Exception:
+        pass
+    try:
+        fid = (store._INDEX.get("fsm") or {}).get("file_id")
+        if fid:
+            txt = await store._tg_read("fsm", fid)
+            if txt:
+                j = json.loads(txt)
+                for e in j.get("entries", []):
+                    if e.get("user_id") == uid and str(e.get("state") or "").startswith("Report:"):
+                        return e
+    except Exception:
+        pass
+    return None
+
+
+async def _fsm_render_state(cb: CallbackQuery, e: dict) -> None:
+    """Re-render the screen matching the restored state as a fresh message."""
+    data = e.get("data") or {}
+    st = str(e.get("state") or "")
+    try:
+        if st == "Report:comment" and data.get("target"):
+            await cb.message.answer(_cx(comment_step_text(data)),
+                                    parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_comment_step())
+        elif st == "Report:confirm" and data.get("target"):
+            await cb.message.answer(_cx(summary_text(data)),
+                                    parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_confirm())
+        elif st == "Report:method":
+            await cb.message.answer(_cx(bq(f"<b>{NAME}</b>  —  Метод жалобы")
+                                        + "\n\nВыбери метод:"),
+                                    parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_methods())
+        elif st == "Report:reason":
+            await cb.message.answer(_cx(bq(f"<b>{NAME}</b>  —  Причина")
+                                        + "\n\nВыбери причину:"),
+                                    parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_reasons())
+        elif st == "Report:target":
+            await cb.message.answer(_cx(bq(f"<b>{NAME}</b>  —  Цель")
+                                        + "\n\nПришли юзернейм цели "
+                                          "(<code>@name</code> или ссылку)."),
+                                    parse_mode=ParseMode.HTML)
+        else:
+            await cb.message.answer(_cx(bq(f"<b>{NAME}</b>")
+                                        + "\n\nФлоу восстановлен — открой меню /start."),
+                                    parse_mode=ParseMode.HTML)
+    except Exception as e2:
+        log.warning("fsm render failed: %s", e2)
+
+
 @router.callback_query()
 async def stale_cb(cb: CallbackQuery):
+    # a press on a screen whose flow state is gone: pull the persisted
+    # state back live, re-render its screen — dead screens stop dead-ending
+    try:
+        d = cb.data or ""
+        if _REPORT_CB_RE.match(d):
+            dp = globals().get("_DP")
+            ent = await _fsm_last_entry(cb.from_user.id)
+            if dp is not None and ent:
+                from aiogram.fsm.storage.base import StorageKey
+                from aiogram.fsm.storage.memory import MemoryStorageRecord
+                key = StorageKey(bot_id=int(ent.get("bot_id") or 0),
+                                 chat_id=cb.from_user.id,
+                                 user_id=cb.from_user.id)
+                live = dp.storage.storage.get(key)
+                if not getattr(live, "state", None):
+                    dp.storage.storage[key] = MemoryStorageRecord(
+                        state=ent.get("state"), data=ent.get("data") or {})
+                    try:
+                        dp.storage._flush()
+                    except Exception:
+                        pass
+                    await _fsm_render_state(cb, ent)
+                    try:
+                        await push_send_log(
+                            "Flow resurrected",
+                            [f"\U0001f464 {html_mod.escape(cb.from_user.full_name or '?')} "
+                             f"(<code>{cb.from_user.id}</code>)",
+                             f"\U0001f501 <code>{html_mod.escape(ent.get('state') or '?')}</code> ← "
+                             f"<code>{html_mod.escape(d)}</code>"])
+                    except Exception:
+                        pass
+                    await cb.answer("✅ Флоу восстановлен — жми кнопку на новом сообщении",
+                                    show_alert=True)
+                    return
+    except Exception as e:
+        log.warning("stale revive failed: %s", e)
     try:
         await push_send_log(
             "Stale callback",
@@ -7488,8 +7588,11 @@ async def main():
                     _fid = (store._INDEX.get("fsm") or {}).get("file_id")
                     if _fid:
                         _txt = await store._tg_read("fsm", _fid)
-                        if _txt:
+                if _txt:
                             FSM_FILE.write_text(_txt, encoding="utf-8")
+                            commit_file_to_repo("fsm_state.json",
+                                                "fsm restore from doc",
+                                                cooldown=0)
                             log.info("fsm: bridged flow states from store doc")
             except Exception as e:
                 log.warning("fsm bridge failed: %s", e)
