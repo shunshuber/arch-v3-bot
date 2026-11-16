@@ -2863,7 +2863,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "bank":     "Банк",
         "mail":     "Mail",
         "bot":      "Bot",
-        "channel":  "📢 Канал",
+        "channel":  "Канал",
     }
     short_icons = {
         "web":      "5258423306255604960",
@@ -2876,7 +2876,7 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["mail"], icon_custom_emoji_id=short_icons["mail"], callback_data="method:mail")],
         [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank"),
          InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
-        [InlineKeyboardButton(text=short["channel"], callback_data="method:channel")],
+        [InlineKeyboardButton(text=short["channel"], icon_custom_emoji_id="5260325873688518261", callback_data="method:channel")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
