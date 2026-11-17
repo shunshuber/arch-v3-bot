@@ -7108,9 +7108,7 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
     if m == "xtr":
         caption = (
             bq(f"<b>{NAME}</b>  —  ⭐ Telegram Stars")
-            + f"\n\nОплата в один клик — звёзды идут на баланс "
-              f"@{ARCH_BOT_USERNAME}.\nПодписка включится здесь "
-              "автоматически в течение минуты.\nТарифы:"
+            + "\n\nТарифы:"
         )
         for pk, pl in SUB_PLANS.items():
             caption += f"\n• <b>{pl['label']}</b> — <b>{STARS_PRICES[pk]} ⭐</b>"
