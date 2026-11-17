@@ -490,11 +490,49 @@ COMMENT_TEMPLATES = {
 }
 
 
+# ── exact per-method complaint texts (auto template) ────
+METHOD_TEXT_OVERRIDES = {
+    ("message", "drugs"): (
+        "Способ на сообщения о продаже котиков:\n"
+        "Данная публикация представляет собой спам-рекламу сбыта наркотиков "
+        "с использованием кастомных эмодзи для обхода автоматических "
+        "фильтров. В тексте открыто предлагаются запрещённые вещества и "
+        "приём заказов в ЛС. Это создаёт прямую угрозу безопасности "
+        "пользователей. Прошу оперативно отреагировать и удалить сообщение!"
+    ),
+    ("bot", "drugs"): (
+        "Бот используется для незаконной продажи наркотических веществ и "
+        "психотропных препаратов в автоматическом режиме. Через него "
+        "клиенты выбирают товар, оформляют заказы и получают координаты "
+        "тайников. Такие действия грубо нарушают законодательство и правила "
+        "платформы. Прошу срочно проверить этого бота и заблокировать его!"
+    ),
+    ("account", "drugs"): (
+        "Пользователь использует этот профиль для распространения "
+        "наркотических средств и спам-рассылки с использованием "
+        "декоративных символов для маскировки текста. Через аккаунт ведётся "
+        "прямой приём заказов от покупателей. Подобная противоправная "
+        "деятельность грубо нарушает правила платформы. Прошу принять "
+        "незамедлительные меры и удалить аккаунт!"
+    ),
+    ("bot", "personal"): (
+        "Бот предоставляет данные людей без их согласия. Через него можно "
+        "получить конфиденциальную информацию включая номера телефонов и "
+        "другие частные сведения. Такие действия нарушают право на "
+        "приватность и могут использоваться для доксинга и преследование. "
+        "Прошу проверить этого бота и принять меры включая его блокировку!"
+    ),
+}
+
+
 def pick_comment(reason_key: str, method: str = "") -> str:
     """Strong auto-template for the category; falls back to 'other' pool.
     The leading entity noun is swapped to match the real target type
     (bot/channel/account) so a probiv-bot complaint never reads as a
     complaint about a channel or a person."""
+    _fixed = METHOD_TEXT_OVERRIDES.get((method, reason_key))
+    if _fixed:
+        return _fixed
     if method == "channel":
         # Brown pool: category + general mix, no entity swap needed
         return report_texts.get_random_text(reason_key)
@@ -681,6 +719,8 @@ METHODS = {
                  "hint": "Пришли ссылку на сообщение."},
     "telegraph": {"e": "\U0001f4dd", "l": "Telegraph",
                   "hint": "Пришли ссылку на статью: <code>telegra.ph/...</code>"},
+    "account":   {"e": "\U0001f464", "l": "Аккаунт",
+                  "hint": "Цель — аккаунт: @username или t.me/ссылка."},
 }
 
 
@@ -3309,6 +3349,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "bot":      "Bot",
         "channel":  "Канал",
         "message":  "Сообщение",
+        "account":  "Аккаунт",
         "telegraph": "Telegraph",
     }
     short_icons = {
@@ -3324,7 +3365,8 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
         [InlineKeyboardButton(text=short["channel"], icon_custom_emoji_id="5260325873688518261", callback_data="method:channel"),
          InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
-        [InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
+        [InlineKeyboardButton(text=short["account"], callback_data="method:account"),
+         InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3529,11 +3571,13 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
         await cb.answer("\u274c", show_alert=True)
         return
     _extra = {"method": key}
-    if key in ("session", "telegraph"):
+    if key == "account":
+        _extra["reason"] = "drugs"
+    elif key in ("session", "telegraph"):
         _extra["reason"] = "other"
     await state.update_data(**_extra)
     m = METHODS[key]
-    if key in ("session", "telegraph"):
+    if key in ("session", "telegraph", "account"):
         await cb.message.edit_caption(
             caption=_cx((
                 bq(f"<b>{NAME}</b>")
@@ -5755,6 +5799,8 @@ async def got_bank_card(msg: Message, state: FSMContext):
 @router.callback_query(Report.reason, F.data.startswith("reason:"))
 async def got_reason(cb: CallbackQuery, state: FSMContext):
     key = cb.data.split(":", 1)[1]
+    if (await state.get_data()).get("method") == "account":
+        key = "drugs"
     if key not in REASONS:
         await cb.answer("\u274c", show_alert=True)
         return
@@ -5828,8 +5874,9 @@ async def cmt_custom(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(Report.comment, F.data == "cmt:auto")
 async def cmt_auto(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(comment="")
     data = await state.get_data()
+    _fixed = METHOD_TEXT_OVERRIDES.get((data.get("method"), data.get("reason")))
+    await state.update_data(comment=_fixed or "")
     await safe_edit(cb.message, _cx(summary_text(data)),
                     parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
     await state.set_state(Report.confirm)
@@ -5953,7 +6000,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     # auto-watch: every launched complaint puts its target under the
     # watchdog — death event later lands in the logs channel + user's PM
     # сторож только на аккаунты и ботов — каналы/посты/письма не сторожим
-    if data["method"] == "bot" or (data["method"] == "web"
+    if data["method"] in ("bot", "account") or (data["method"] == "web"
                                    and t["type"] in ("username", "raw")):
         try:
             _watch_add(cb.from_user.id, tgt_raw)
