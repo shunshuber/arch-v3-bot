@@ -8122,7 +8122,7 @@ async def cashier_buy(cb: CallbackQuery):
         await cb.bot.send_invoice(
             chat_id=cb.from_user.id,
             title=f"{NAME} — {pl['label']}"[:32],
-            description=f"Подписка {pl['label']}: все методы сноса"[:255],
+            description=f"Оплата доступа: {pl['label']}"[:255],
             payload=f"star:{pk}:{cb.from_user.id}",
             currency="XTR",
             provider_token="",   # digital goods/service — no provider
