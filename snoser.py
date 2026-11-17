@@ -2240,7 +2240,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     return results
 
 
-# ── channel-method engine (BR port: 2 shots/session, 3-step probe w/ msg_ids) ──
+# ── channel-method engine (1 report/session, 3-step probe w/ msg_ids) ──
 CH_BATCH_SIZE = 8
 
 
@@ -2271,7 +2271,7 @@ async def _ch_three_step(client, entity, reason_key: str, text: str,
 
 async def fire_channel_reports(target_entity: str, reason_key: str, comment: str,
                                msg_id: int | None) -> dict:
-    # BR channel-method: every usable session fires TWO reports on the
+    # BR channel-method: every usable session fires ONE report on the
     # channel (or on a single post when msg_id is present). Text per
     # session: custom comment, else Brown pool (category + general) cut
     # to 200 chars. 3-step probe first, reason-class fallback second;
@@ -2321,7 +2321,7 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
                     return name, px_name, 0, "not authorized"
                 entity = await client.get_entity(target_entity)
                 msg_ids = [msg_id] if msg_id else []
-                for _attempt in range(2):
+                for _attempt in range(1):
                     try:
                         ok3, _err3 = await _ch_three_step(
                             client, entity, reason_key, text, msg_ids)
@@ -2380,7 +2380,7 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
         })
         real_lines.append(
             f"{'✅' if ok else '❌'} <code>{name}</code>"
-            f" | {html_mod.escape(px_name)} | {sent}/2"
+            f" | {html_mod.escape(px_name)} | {sent}/1"
             + (f" | {html_mod.escape(err)}" if err else ""))
 
     sample = (comment or report_texts.get_random_text(reason_key))[:200]
