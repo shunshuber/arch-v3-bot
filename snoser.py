@@ -2047,7 +2047,7 @@ def session_usable(name: str, ledger: dict | None = None) -> tuple[bool, str]:
     led = (ledger or {}).get(name) or {}
     rest_until = led.get("rest_until") or 0
     if time.time() < rest_until:
-        return False, "rest " + str(int((rest_until - time.time()) // 3600)) + "h"
+        return False, "rest " + str(int(rest_until - time.time())) + "s"
     if led.get("day") != time.strftime("%Y-%m-%d"):
         return True, ""
     if (led.get("day_count") or 0) >= REPORTS_PER_SESSION_DAY:
@@ -2065,8 +2065,12 @@ def _ledger_bump(name: str) -> int:
     e["day_count"] = e.get("day_count", 0) + 1
     e["total"] = e.get("total", 0) + 1
     e["last_ts"] = int(time.time())
+    if e["total"] % 3 == 0:
+        e["rest_until"] = time.time() + SESSION_REST_SEC
     led[name] = e
     _ledger_save(led)
+    if e.get("rest_until"):
+        commit_file_to_repo("report_ledger.json", "session rest", cooldown=0)
     return e["day_count"]
 
 
@@ -3545,9 +3549,94 @@ async def count_valid_refs_async_check():
 
 
 # ── main menu ───────────────────────────────────────────
+# ── wash flag / per-method cooldown / session-rest gates ──
+METHOD_COOLDOWN_SEC = 20 * 60
+SESSION_REST_SEC = 400
+WASH_ETA_SEC = 300
+COOLDOWN_FILE = Path(__file__).parent / "method_cooldown.json"
+_wash_cache: tuple[float, int] = (0, 0)
+
+
+def _cooldown_local() -> dict:
+    try:
+        return json.loads(COOLDOWN_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+async def wash_active_seconds() -> int:
+    """>0 = washer running: seconds until sessions are back."""
+    global _wash_cache
+    now = time.time()
+    if now - _wash_cache[0] < 20:
+        return _wash_cache[1]
+    eta = 0
+    txt = await store._gh_get_text("wash_status.json")
+    if txt:
+        try:
+            st = json.loads(txt)
+            if st.get("active"):
+                started = float(st.get("started") or now)
+                eta = max(1, int(min(
+                    float(st.get("eta") or WASH_ETA_SEC),
+                    WASH_ETA_SEC - (now - started))))
+        except Exception:
+            eta = 0
+    _wash_cache = (now, eta)
+    return eta
+
+
+async def method_cooldown_left(uid: int, method: str) -> int:
+    d = _cooldown_local()
+    txt = await store._gh_get_text("method_cooldown.json")
+    if txt:
+        try:
+            for k, v in (json.loads(txt) or {}).items():
+                if k not in d or (v.get(method) or 0) > (d[k].get(method) or 0):
+                    d[k] = v
+        except Exception:
+            pass
+    ts = (d.get(str(uid)) or {}).get(method) or 0
+    return max(0, int(METHOD_COOLDOWN_SEC - (time.time() - float(ts))))
+
+
+async def method_cooldown_set(uid: int, method: str) -> None:
+    d = _cooldown_local()
+    d.setdefault(str(uid), {})[method] = time.time()
+    txt = json.dumps(d, ensure_ascii=False, indent=1)
+    try:
+        COOLDOWN_FILE.write_text(txt, encoding="utf-8")
+    except Exception:
+        pass
+    try:
+        await store._gh_put_text(
+            "method_cooldown.json", txt, f"cooldown {uid} {method}")
+    except Exception:
+        pass
+
+
+def sessions_rest_left() -> int:
+    """0 if any session can attack; else seconds until the first thaws."""
+    led = _ledger_load()
+    waits = []
+    for s in load_sessions():
+        ok, _why = session_usable(s.stem, led)
+        if ok:
+            return 0
+        rest = (led.get(s.stem) or {}).get("rest_until") or 0
+        if rest > time.time():
+            waits.append(int(rest - time.time()))
+    return min(waits) if waits else 0
+
+
 @router.callback_query(F.data == "menu:launch")
 async def menu_launch(cb: CallbackQuery, state: FSMContext):
     botRefCtx["bot"] = cb.bot   # ref counting needs the bot anywhere
+    if await wash_active_seconds():
+        await cb.answer(
+            "Сессии на данный момент обновляются. Подождите 5 минут.",
+            show_alert=True)
+        return
     if not await channel_gate(cb, state):
         return
     if not await sub_gate(cb, state):
@@ -5923,6 +6012,24 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         return
 
     data = await state.get_data()
+    if await wash_active_seconds():
+        await cb.answer(
+            "Сессии на данный момент обновляются. Подождите 5 минут.",
+            show_alert=True)
+        return
+    _cd = await method_cooldown_left(cb.from_user.id, data.get("method", ""))
+    if _cd:
+        await cb.answer(
+            f"Метод доступен через {_cd} сек. Дай сессиям отдохнуть.",
+            show_alert=True)
+        return
+    _rest = sessions_rest_left()
+    if _rest:
+        await cb.answer(
+            f"Сессии остывают. Попробуйте через {_rest} секунд.",
+            show_alert=True)
+        return
+    await method_cooldown_set(cb.from_user.id, data.get("method", ""))
     t = data["target"]
     r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
     m = METHODS[data["method"]]

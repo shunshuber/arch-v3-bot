@@ -2,7 +2,7 @@ name: session-check
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -19,6 +19,7 @@ jobs:
     env:
       API_ID: ${{ secrets.API_ID }}
       API_HASH: ${{ secrets.API_HASH }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,8 +29,23 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Mark wash active
+        run: |
+          python - <<'PY'
+          import asyncio, json, time, store
+          txt = json.dumps({"active": True, "started": time.time(), "eta": 300})
+          asyncio.run(store._gh_put_text("wash_status.json", txt, "wash started"))
+          PY
       - name: Probe sessions
         run: python check_sessions.py
+      - name: Mark wash done
+        if: always()
+        run: |
+          python - <<'PY'
+          import asyncio, json, time, store
+          txt = json.dumps({"active": False, "finished": time.time()})
+          asyncio.run(store._gh_put_text("wash_status.json", txt, "wash done"))
+          PY
       - name: Commit health status
         run: |
           git config user.name "arch-bot"
