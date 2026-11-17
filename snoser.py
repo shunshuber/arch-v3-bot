@@ -1580,7 +1580,7 @@ async def _snos_sendcode_flood(phone: str, sessions: list,
     rows = [(r[0], r[1]) for r in results
             if isinstance(r, tuple) and len(r) == 2]
     sent = sum(1 for _, st in rows if st == "sent")
-    return {"sent": sent, "total": len(rows)}
+    return {"sent": sent, "total": len(rows), "rows": rows}
 
 
 async def _snos_oauth_flood(phone: str, proxies: list) -> dict:
@@ -1722,7 +1722,10 @@ async def fire_session_snos(victim_username: str, victim_phone: str,
     await push_send_log("Снос сессий", [
         f"🎯 <code>@{html_mod.escape(victim_username)}</code> ({info['id']})",
         f"📱 <code>{html_mod.escape(victim_phone)}</code>",
-        f"📱 SendCode-флуд: {sc['sent']}/{sc['total']}",
+        f"📱 SendCode-флуд: {sc['sent']}/{sc['total']}"]
+       + [f"• <code>{html_mod.escape(str(n))}</code>: {html_mod.escape(str(s))}"
+          for n, s in sc.get("rows", [])[:12]]
+       + [
         f"🌐 OAuth-флуд: {oa['sent']}/{oa['total']}",
         f"📨 Web support: {ws['sent']}/{ws['total']}",
         f"🔁 монитор раз в {SESSION_SNOS_MONITOR_STEP // 60} мин — "
@@ -7098,13 +7101,15 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
     if m == "xtr":
         caption = (
             bq(f"<b>{NAME}</b>  —  ⭐ Telegram Stars")
-            + "\n\nНативная оплата звёздами, без внешних сервисов.\nТарифы:"
+            + f"\n\nОплата звёздами идёт через @{ARCH_BOT_USERNAME} — "
+              "звёзды падают на его баланс.\nПодписка активируется здесь "
+              "автоматически.\nТарифы:"
         )
         for pk, pl in SUB_PLANS.items():
             caption += f"\n• <b>{pl['label']}</b> — <b>{STARS_PRICES[pk]} ⭐</b>"
         rows = [[InlineKeyboardButton(
                     text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
-                    callback_data=f"sub:buy:xtr:{pk}")]
+                    url=f"https://t.me/{ARCH_BOT_USERNAME}?start=buy_xtr_{pk}")]
                 for pk, pl in SUB_PLANS.items()]
     elif m == "ct":
         caption = (
@@ -7145,25 +7150,9 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         return
 
     if method == "xtr":
-        if _pilot_only(cb):
-            await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
-            return
-        try:
-            await cb.bot.send_invoice(
-                chat_id=cb.from_user.id,
-                title=f"{NAME} — {pl['label']}"[:32],
-                description=f"Подписка {pl['label']}: все методы сноса"[:255],
-                payload=f"star:{pk}:{cb.from_user.id}",
-                currency="XTR",
-                provider_token="",   # digital goods/service — no provider
-                prices=[LabeledPrice(label=pl["label"][:32],
-                                     amount=STARS_PRICES[pk])],
-            )
-        except Exception as e:
-            log.error("stars invoice failed: %s", e)
-            await cb.answer(f"❌ Инвойс не создан: {type(e).__name__}", show_alert=True)
-            return
-        await cb.answer()
+        # stars now collect on the cashier bot — point the user there
+        await cb.answer(f"⭐ Оплата звёздами идёт в @{ARCH_BOT_USERNAME}",
+                        show_alert=True)
         return
 
     if method == "ct":
@@ -8056,9 +8045,217 @@ def fsm_restore(bot=None) -> None:
 
 
 # ── run ─────────────────────────────────────────────────
+# ── ArchV3Bot cashier mode: stars land on @ArchV3Bot ─────
+# ARCH_CASHIER=1 → snoser.py runs a tiny stars-only bot on the ARCH token:
+# deep link ?start=buy_xtr_<plan> → XTR invoice → successful_payment writes
+# star_orders.json to the repo. The MAIN bot polls that file and activates
+# the plans — the purchase is granted from the other bot.
+ARCH_CASHIER = (os.getenv("ARCH_CASHIER", "").strip() == "1")
+STAR_ORDERS_FILE = Path(__file__).parent / "star_orders.json"
+ARCH_BOT_USERNAME = (os.getenv("ARCH_BOT_USERNAME", "").strip()
+                     or "ArchV3Bot")
+
+
+def _star_orders_local() -> list:
+    try:
+        j = json.loads(STAR_ORDERS_FILE.read_text(encoding="utf-8"))
+        return j.get("orders") or []
+    except Exception:
+        return []
+
+
+async def star_orders_read() -> list:
+    txt = await store._gh_get_text("star_orders.json")
+    if txt:
+        try:
+            return json.loads(txt).get("orders") or []
+        except Exception:
+            pass
+    return _star_orders_local()
+
+
+async def star_orders_write(orders: list, msg: str) -> bool:
+    txt = json.dumps({"orders": orders}, ensure_ascii=False, indent=1)
+    ok = await store._gh_put_text("star_orders.json", txt, msg)
+    try:
+        STAR_ORDERS_FILE.write_text(txt, encoding="utf-8")
+    except Exception:
+        pass
+    return ok
+
+
+cashier_router = Router(name="cashier")
+
+
+@cashier_router.message(CommandStart())
+async def cashier_start(msg: Message, state: FSMContext):
+    """?start=buy_xtr_<plan> (or plain /start) → stars plan picker."""
+    arg = (msg.text or "").split(maxsplit=1)
+    pk = "d30"
+    if len(arg) > 1 and arg[1].startswith("buy_xtr_"):
+        pk = arg[1][len("buy_xtr_"):]
+    if pk not in SUB_PLANS:
+        pk = "d30"
+    caption = (
+        bq(f"<b>{NAME}</b>  —  ⭐ Оплата звёздами")
+        + "\n\nОплата проходит здесь — звёзды идут на баланс этого бота, "
+          "подписка активируется в рабочем боте автоматически.\n\n"
+          "Выбери тариф:"
+    )
+    rows = []
+    for _pk, _pl in SUB_PLANS.items():
+        rows.append([InlineKeyboardButton(
+            text=f"⭐ {_pl['label']} — {STARS_PRICES[_pk]}⭐",
+            callback_data=f"sub:buy:xtr:{_pk}")])
+    await msg.answer(_cx(caption), parse_mode=ParseMode.HTML,
+                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@cashier_router.callback_query(F.data.startswith("sub:buy:xtr:"))
+async def cashier_buy(cb: CallbackQuery):
+    pk = cb.data.rsplit(":", 1)[1]
+    if pk not in SUB_PLANS:
+        await cb.answer("❌", show_alert=True)
+        return
+    pl = SUB_PLANS[pk]
+    try:
+        await cb.bot.send_invoice(
+            chat_id=cb.from_user.id,
+            title=f"{NAME} — {pl['label']}"[:32],
+            description=f"Подписка {pl['label']}: все методы сноса"[:255],
+            payload=f"star:{pk}:{cb.from_user.id}",
+            currency="XTR",
+            provider_token="",   # digital goods/service — no provider
+            prices=[LabeledPrice(label=pl["label"][:32],
+                                 amount=STARS_PRICES[pk])],
+        )
+    except Exception as e:
+        log.error("cashier stars invoice failed: %s", e)
+        await cb.answer(f"❌ Инвойс не создан: {type(e).__name__}",
+                        show_alert=True)
+        return
+    await cb.answer()
+
+
+@cashier_router.pre_checkout_query()
+async def cashier_pre_checkout(q: PreCheckoutQuery):
+    """Stars invoice per user+plan — nothing to verify, approve in 10s."""
+    await q.answer(ok=True)
+
+
+@cashier_router.message(F.successful_payment)
+async def cashier_paid(msg: Message):
+    sp = msg.successful_payment
+    try:
+        _, pk, uid_s = (sp.invoice_payload or "").split(":")
+        uid = int(uid_s)
+    except Exception:
+        log.warning("cashier payload broken: %r", sp.invoice_payload)
+        return
+    orders = await star_orders_read()
+    orders.append({"uid": uid, "plan": pk, "amount": sp.total_amount,
+                   "ts": time.time(), "done": False})
+    await star_orders_write(orders, f"star order {uid} {pk}")
+    bump_pay_stats(uid, pk, "stars", float(sp.total_amount or 0), "XTR")
+    commit_file_to_repo("pay_stats.json", "pay stats: stars (cashier)",
+                        cooldown=0)
+    try:
+        await msg.answer(
+            _cx(bq(f"<b>{NAME}</b>  —  ✅ Платёж принят")
+                + f"\n\n⭐ {sp.total_amount} — тариф "
+                  f"<b>{SUB_PLANS[pk]['label']}</b>"
+                + "\n\nПодписка активируется в рабочем боте в течение "
+                  "минуты."),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    await push_send_log("Оплата (Stars @касса)",
+                        [f"✅ <code>{uid}</code> — <b>{pk}</b> "
+                         f"({sp.total_amount}⭐)"])
+
+
+async def star_orders_grant_loop():
+    """MAIN-bot side: poll star_orders.json and activate paid plans."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            orders = await star_orders_read()
+            todo = [o for o in orders if isinstance(o, dict)
+                    and not o.get("done")]
+            if todo:
+                changed = False
+                for o in todo:
+                    uid, pk = int(o.get("uid", 0) or 0), o.get("plan", "")
+                    if pk not in SUB_PLANS:
+                        o["done"] = True
+                        o["note"] = "bad plan"
+                        changed = True
+                        continue
+                    subs = load_subs()
+                    activate_plan(subs, uid, pk)
+                    bump_pay_stats(uid, pk, "stars",
+                                   float(o.get("amount") or 0), "XTR")
+                    commit_file_to_repo("pay_stats.json",
+                                        "pay stats: stars grant", cooldown=0)
+                    o["done"] = True
+                    o["granted_ts"] = time.time()
+                    changed = True
+                    s, until = sub_quality(subs, uid)
+                    try:
+                        await _BOT.send_message(
+                            uid,
+                            _cx(bq(f"<b>{NAME}</b> — ⭐ Подписка ок")
+                                + f"\n\n✅ Состояние: <b>{s}</b> ({until})\n"
+                                  "Можно пользоваться!"),
+                            parse_mode=ParseMode.HTML)
+                    except Exception:
+                        pass
+                    await push_send_log(
+                        "Оплата (Stars)",
+                        [f"✅ <code>{uid}</code> — план <b>{pk}</b> выдан "
+                         f"({o.get('amount')}⭐, касса @{ARCH_BOT_USERNAME})"])
+                if changed:
+                    await star_orders_write(orders, "star orders granted")
+        except Exception as e:
+            log.warning("star orders loop: %s", e)
+        await asyncio.sleep(40)
+
+
+async def cashier_main():
+    if not BOT_TOKEN:
+        log.error("cashier: BOT_TOKEN (ARCH token) missing")
+        return
+    dp = Dispatcher()
+    dp.include_router(cashier_router)
+    log.info("%s cashier mode starting...", NAME)
+    while True:
+        bot = Bot(token=BOT_TOKEN)
+        try:
+            globals()["_BOT"] = bot
+            store.init(bot, BOT_TOKEN)
+            await dp.start_polling(bot)
+            break
+        except TelegramNetworkError:
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+        except Exception as e:
+            log.error("cashier polling crashed: %s — retry in 5s", e)
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+
 async def main():
     if not BOT_TOKEN:
         log.error("BOT_TOKEN missing")
+        return
+    if ARCH_CASHIER:
+        await cashier_main()
         return
     dp = Dispatcher(storage=PersistStorage())
     globals()["_DP"] = dp
@@ -8114,6 +8311,9 @@ async def main():
             if not globals().get("_transplant_started"):
                 globals()["_transplant_started"] = True
                 asyncio.create_task(transplant_loop())
+            if not globals().get("_stars_started"):
+                globals()["_stars_started"] = True
+                asyncio.create_task(star_orders_grant_loop())
             # one-time bridge: v32-era flow states live in the store
             # doc; the carrier is the repo file now — pull the doc
             # (read-only fetch, no chat writes) when the file is missing

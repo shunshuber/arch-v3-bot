@@ -1,0 +1,48 @@
+name: arch-cashier
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: arch-v3-cashier
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  cashier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      BOT_TOKEN: ${{ secrets.ARCH_BOT_TOKEN }}
+      ARCH_CASHIER: "1"
+      ARCH_BOT_USERNAME: "ArchV3Bot"
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
+      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run stars cashier
+        run: |
+          if [ -z "$BOT_TOKEN" ]; then
+            echo "ARCH_BOT_TOKEN secret missing — add it to repo secrets"
+            exit 1
+          fi
+          echo "cashier started at $(date -u +%H:%M:%S)"
+          tries=0
+          while true; do
+            try=$((tries+1))
+            echo "--- attempt $try ---"
+            python snoser.py || true
+            sleep 5
+          done
