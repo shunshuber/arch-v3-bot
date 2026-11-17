@@ -3632,10 +3632,10 @@ def sessions_rest_left() -> int:
 @router.callback_query(F.data == "menu:launch")
 async def menu_launch(cb: CallbackQuery, state: FSMContext):
     botRefCtx["bot"] = cb.bot   # ref counting needs the bot anywhere
+    await cb.answer()   # ack NOW — GitHub reads below may exceed Telegram's 10s
     if await wash_active_seconds():
-        await cb.answer(
-            "Сессии на данный момент обновляются. Подождите 5 минут.",
-            show_alert=True)
+        await cb.message.answer(
+            "Сессии на данный момент обновляются. Подождите 5 минут.")
         return
     if not await channel_gate(cb, state):
         return
@@ -3649,7 +3649,6 @@ async def menu_launch(cb: CallbackQuery, state: FSMContext):
         reply_markup=kb_methods(),
     )
     await state.set_state(Report.method)
-    await cb.answer()
 
 
 @router.callback_query(Report.method, F.data.startswith("method:"))
@@ -6011,23 +6010,21 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         return
 
+    await cb.answer()   # ack before slow GitHub reads
     data = await state.get_data()
     if await wash_active_seconds():
-        await cb.answer(
-            "Сессии на данный момент обновляются. Подождите 5 минут.",
-            show_alert=True)
+        await cb.message.answer(
+            "Сессии на данный момент обновляются. Подождите 5 минут.")
         return
     _cd = await method_cooldown_left(cb.from_user.id, data.get("method", ""))
     if _cd:
-        await cb.answer(
-            f"Метод доступен через {_cd} сек. Дай сессиям отдохнуть.",
-            show_alert=True)
+        await cb.message.answer(
+            f"Метод доступен через {_cd} сек. Дай сессиям отдохнуть.")
         return
     _rest = sessions_rest_left()
     if _rest:
-        await cb.answer(
-            f"Сессии остывают. Попробуйте через {_rest} секунд.",
-            show_alert=True)
+        await cb.message.answer(
+            f"Сессии остывают. Попробуйте через {_rest} секунд.")
         return
     await method_cooldown_set(cb.from_user.id, data.get("method", ""))
     t = data["target"]
@@ -6038,8 +6035,6 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     if cb.from_user:
         set_current_user(f"{cb.from_user.full_name} ( id {cb.from_user.id} )")
-
-    await cb.answer("\u23f3 \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430...")
 
     is_web = data["method"] == "web"
     # what actually goes out when the admin skipped the comment step —
@@ -6063,7 +6058,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     probe_note = ""
     hit = is_target_whitelisted(tgt_raw)
     if hit:
-        await cb.answer("⛔️ Цель в протект-листе!", show_alert=True)
+        await cb.message.answer("⛔️ Цель в протект-листе!")
         await push_send_log(
             "Попытка снести цель из протект-листа",
             [f"\U0001f3af <code>{esc_raw}</code> (паттерн: <code>{html_mod.escape(hit)}</code>)",
@@ -6082,8 +6077,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             pass
         pr = await bot_probe_target(tgt_raw)
         if not pr.get("found") and pr.get("error"):
-            await cb.answer("\u26a0\ufe0f \u0426\u0435\u043b\u044c \u043d\u0435 \u043e\u0442\u0432\u0435\u0447\u0430\u0435\u0442: "
-                            + pr["error"][:120], show_alert=True)
+            await cb.message.answer(
+                "⚠️ Цель не отвечает: " + pr["error"][:120])
             await state.clear()
             return
         if pr.get("ok"):
@@ -6125,7 +6120,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             fire_channel_reports(t["entity"], data["reason"], c, t.get("msg_id")))
     elif data["method"] == "message":
         if not t.get("msg_id"):
-            await cb.answer("Нужна ссылка на сообщение", show_alert=True)
+            await cb.message.answer("Нужна ссылка на сообщение")
             await state.clear()
             return
         report_task = asyncio.create_task(
