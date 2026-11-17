@@ -6636,6 +6636,17 @@ def user_is_admin(user_id: int) -> bool:
     return user_id in FOREVER
 
 
+@router.message(Command("starbalance"))
+async def cmd_starbalance(msg: Message):
+    if not (msg.from_user and user_is_admin(msg.from_user.id)):
+        return
+    j = await arch_api("getMyStarBalance", {})
+    bal = (j.get("result") or {}).get("balance", "?")
+    await msg.answer(
+        _cx(f"⭐ Баланс @{ARCH_BOT_USERNAME}: <b>{bal}</b>"),
+        parse_mode=ParseMode.HTML)
+
+
 # ── /setlogs — bind the real-logs destination ────────────
 @router.message(F.text.startswith("/setlogs"))
 async def cmd_setlogs(msg: Message, state: FSMContext):
@@ -7097,16 +7108,18 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
     if m == "xtr":
         caption = (
             bq(f"<b>{NAME}</b>  —  ⭐ Telegram Stars")
-            + f"\n\nОплата звёздами идёт через @{ARCH_BOT_USERNAME} — "
-              "звёзды падают на его баланс.\nПодписка активируется здесь "
-              "автоматически.\nТарифы:"
+            + f"\n\nОплата в один клик — звёзды идут на баланс "
+              f"@{ARCH_BOT_USERNAME}.\nПодписка включится здесь "
+              "автоматически в течение минуты.\nТарифы:"
         )
         for pk, pl in SUB_PLANS.items():
             caption += f"\n• <b>{pl['label']}</b> — <b>{STARS_PRICES[pk]} ⭐</b>"
-        rows = [[InlineKeyboardButton(
-                    text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
-                    url=f"https://t.me/{ARCH_BOT_USERNAME}?start=buy_xtr_{pk}")]
-                for pk, pl in SUB_PLANS.items()]
+        rows = []
+        for pk, pl in SUB_PLANS.items():
+            link = await arch_star_link(pk, cb.from_user.id)
+            rows.append([InlineKeyboardButton(
+                text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
+                url=link or f"https://t.me/{ARCH_BOT_USERNAME}?start=buy_xtr_{pk}")])
     elif m == "ct":
         caption = (
             bq(f"<b>{NAME}</b>  —  💳 Карта РФ / СБП")
@@ -8246,6 +8259,155 @@ async def cashier_main():
             await asyncio.sleep(5)
 
 
+# ── stateless stars: invoice links + transaction poller ────
+# The cashier token alone is enough: createInvoiceLink issues an XTR payment
+# link owned by @ArchV3Bot (stars land on its balance), and
+# getStarTransactions exposes source.invoice_payload + source.user.id, so
+# the MAIN bot grants plans without any live cashier process or order file.
+ARCH_TOKEN = os.getenv("ARCH_BOT_TOKEN", "").strip()
+_star_link_cache: dict[tuple[int, str], tuple[str, float]] = {}
+
+
+async def arch_api(method: str, params: dict | None = None) -> dict:
+    """Call the cashier bot's Bot API directly (no polling process needed)."""
+    if not ARCH_TOKEN:
+        return {}
+    url = f"https://api.telegram.org/bot{ARCH_TOKEN}/{method}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            if params:
+                async with s.post(url, json=params) as r:
+                    j = await r.json(content_type=None)
+            else:
+                async with s.get(url) as r:
+                    j = await r.json(content_type=None)
+        return j if j and j.get("ok") else {}
+    except Exception as e:
+        log.warning("arch_api %s: %s", method, e)
+        return {}
+
+
+async def arch_star_link(pk: str, uid: int) -> str:
+    """One-click XTR invoice link issued by @ArchV3Bot — its balance gets the stars."""
+    key = (uid, pk)
+    hit = _star_link_cache.get(key)
+    if hit and time.time() - hit[1] < 300:
+        return hit[0]
+    pl = SUB_PLANS.get(pk) or SUB_PLANS["d30"]
+    j = await arch_api("createInvoiceLink", {
+        "title": f"{NAME} — {pl['label']}"[:32],
+        "description": f"Оплата доступа: {pl['label']}"[:255],
+        "payload": f"star:{pk}:{uid}",
+        "currency": "XTR",
+        "provider_token": "",
+        "prices": [{"label": pl["label"][:32],
+                    "amount": STARS_PRICES.get(pk, 400)}],
+    })
+    link = (j.get("result") or "") if isinstance(j.get("result"), str) else ""
+    if link:
+        _star_link_cache[key] = (link, time.time())
+    return link
+
+
+STAR_PAID_FILE = Path(__file__).parent / "star_paid.json"
+
+
+def _star_paid_local() -> list:
+    try:
+        j = json.loads(STAR_PAID_FILE.read_text(encoding="utf-8"))
+        return j.get("ids") or []
+    except Exception:
+        return []
+
+
+async def star_paid_read() -> list:
+    txt = await store._gh_get_text("star_paid.json")
+    if txt:
+        try:
+            return json.loads(txt).get("ids") or []
+        except Exception:
+            pass
+    return _star_paid_local()
+
+
+async def star_paid_write(ids: list) -> None:
+    txt = json.dumps({"ids": ids[-500:]}, ensure_ascii=False, indent=1)
+    await store._gh_put_text("star_paid.json", txt, "stars paid dedupe")
+    try:
+        STAR_PAID_FILE.write_text(txt, encoding="utf-8")
+    except Exception:
+        pass
+
+
+async def star_tx_grant_loop():
+    """Watch @ArchV3Bot's incoming XTR transactions; grant plans here."""
+    await asyncio.sleep(10)
+    last_bal = None
+    while True:
+        try:
+            if not ARCH_TOKEN:
+                log.warning("stars: ARCH_BOT_TOKEN missing — tx poll idle")
+            else:
+                j = await arch_api("getStarTransactions", {"limit": 100})
+                txs = ((j.get("result") or {}).get("transactions") or [])
+                paid = await star_paid_read()
+                seen = set(paid)
+                new_ids = []
+                for tx in txs:
+                    tid = str(tx.get("id") or "")
+                    src = tx.get("source") or {}
+                    pay = src.get("invoice_payload") or ""
+                    if (not tid or tid in seen
+                            or src.get("type") != "user"
+                            or src.get("transaction_type") != "invoice_payment"
+                            or not pay.startswith("star:")):
+                        continue
+                    try:
+                        _, pk, uid_s = pay.split(":")
+                        uid = int(uid_s)
+                    except Exception:
+                        continue
+                    if pk not in SUB_PLANS:
+                        continue
+                    subs = load_subs()
+                    activate_plan(subs, uid, pk)
+                    bump_pay_stats(uid, pk, "stars",
+                                   int(tx.get("amount") or 0), "XTR")
+                    commit_file_to_repo("pay_stats.json",
+                                        "pay stats: stars tx", cooldown=0)
+                    seen.add(tid)
+                    new_ids.append(tid)
+                    s, until = sub_quality(subs, uid)
+                    try:
+                        await _BOT.send_message(
+                            uid,
+                            _cx(bq(f"<b>{NAME}</b> — ⭐ Подписка ок")
+                                + f"\n\n✅ Состояние: <b>{s}</b> ({until})\n"
+                                  "Можно пользоваться!"),
+                            parse_mode=ParseMode.HTML)
+                    except Exception:
+                        pass
+                    await push_send_log(
+                        "Оплата (Stars)",
+                        [f"✅ <code>{uid}</code> — план <b>{pk}</b> "
+                         f"({tx.get('amount')}⭐) · "
+                         f"<code>{html_mod.escape(tid)}</code> · "
+                         f"касса @{ARCH_BOT_USERNAME}"])
+                if new_ids:
+                    await star_paid_write(paid + new_ids)
+                bj = await arch_api("getMyStarBalance", {})
+                bal = (bj.get("result") or {}).get("balance")
+                if bal is not None and bal != last_bal:
+                    last_bal = bal
+                    await push_send_log(
+                        "Касса @ArchV3Bot",
+                        [f"⭐ баланс: <b>{bal}</b>"])
+        except Exception as e:
+            log.warning("star tx loop: %s", e)
+        await asyncio.sleep(30)
+
+
 async def main():
     if not BOT_TOKEN:
         log.error("BOT_TOKEN missing")
@@ -8309,7 +8471,7 @@ async def main():
                 asyncio.create_task(transplant_loop())
             if not globals().get("_stars_started"):
                 globals()["_stars_started"] = True
-                asyncio.create_task(star_orders_grant_loop())
+                asyncio.create_task(star_tx_grant_loop())
             # one-time bridge: v32-era flow states live in the store
             # doc; the carrier is the repo file now — pull the doc
             # (read-only fetch, no chat writes) when the file is missing
