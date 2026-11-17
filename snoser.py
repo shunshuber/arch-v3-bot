@@ -679,8 +679,6 @@ METHODS = {
                   "hint": "Цель — канал: t.me/username или @username.\nЕсли в ссылке есть ID поста (t.me/user/123) — жалоба уйдёт на пост."},
     "message":  {"e": "💬", "l": "Сообщение",
                  "hint": "Пришли ссылку на сообщение."},
-    "session":  {"e": "\U0001f511", "l": "Сессии",
-                 "hint": "Пришли юзернейм и номер жертвы одним сообщением:\n• <code>@username +79991234567</code>"},
     "telegraph": {"e": "\U0001f4dd", "l": "Telegraph",
                   "hint": "Пришли ссылку на статью: <code>telegra.ph/...</code>"},
 }
@@ -3311,7 +3309,6 @@ def kb_methods() -> InlineKeyboardMarkup:
         "bot":      "Bot",
         "channel":  "Канал",
         "message":  "Сообщение",
-        "session":  "Сессии",
         "telegraph": "Telegraph",
     }
     short_icons = {
@@ -3327,8 +3324,7 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
         [InlineKeyboardButton(text=short["channel"], icon_custom_emoji_id="5260325873688518261", callback_data="method:channel"),
          InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
-        [InlineKeyboardButton(text=short["session"], icon_custom_emoji_id="5359529383319084413", callback_data="method:session"),
-         InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
+        [InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
