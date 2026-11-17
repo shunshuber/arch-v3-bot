@@ -5777,9 +5777,41 @@ async def transplant_loop() -> None:
         await asyncio.sleep(TRANSPLANT_INTERVAL)
 
 
+async def report_gate_block(uid: int, method: str) -> str | None:
+    """Shared launch gate: wash flag, 20min method CD, 400s session rest."""
+    if await wash_active_seconds():
+        return "Сессии на данный момент обновляются. Подождите 5 минут."
+    _cd = await method_cooldown_left(uid, method)
+    if _cd:
+        return f"Метод доступен через {_cd} сек. Дай сессиям отдохнуть."
+    _rest = sessions_rest_left()
+    if _rest:
+        return f"Сессии остывают. Попробуйте через {_rest} секунд."
+    await method_cooldown_set(uid, method)
+    return None
+
+
 @router.message(Report.target)
 async def got_target(msg: Message, state: FSMContext):
     _m = (await state.get_data()).get("method")
+    if _m == "account":
+        target = parse_target(msg.text or "")
+        if not target["entity"]:
+            await msg.answer("❌ Неверная цель. Пришли @username.")
+            return
+        _block = await report_gate_block(msg.from_user.id, "account")
+        if _block:
+            await msg.answer(_block)
+            return
+        await state.clear()
+        asyncio.create_task(fire_profile_reports(
+            target["entity"], PROFILE_REPORT_TEXT))
+        await msg.answer(_cx(
+            bq(f"<b>{NAME}</b>  —  👤 Аккаунт")
+            + f"\n\n🎯 Цель: <code>{html_mod.escape(str(target['raw']))}</code>"
+            + "\n\nЖалоба отправлена."),
+            parse_mode=ParseMode.HTML)
+        return
     if _m == "session":
         parts = (msg.text or "").split()
         uname = parts[0].lstrip("@") if parts else ""
@@ -6017,21 +6049,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     await cb.answer()   # ack before slow GitHub reads
     data = await state.get_data()
-    if await wash_active_seconds():
-        await cb.message.answer(
-            "Сессии на данный момент обновляются. Подождите 5 минут.")
+    _block = await report_gate_block(cb.from_user.id, data.get("method", ""))
+    if _block:
+        await cb.message.answer(_block)
         return
-    _cd = await method_cooldown_left(cb.from_user.id, data.get("method", ""))
-    if _cd:
-        await cb.message.answer(
-            f"Метод доступен через {_cd} сек. Дай сессиям отдохнуть.")
-        return
-    _rest = sessions_rest_left()
-    if _rest:
-        await cb.message.answer(
-            f"Сессии остывают. Попробуйте через {_rest} секунд.")
-        return
-    await method_cooldown_set(cb.from_user.id, data.get("method", ""))
     t = data["target"]
     r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
     m = METHODS[data["method"]]
