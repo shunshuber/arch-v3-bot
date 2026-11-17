@@ -8253,52 +8253,15 @@ cashier_router = Router(name="cashier")
 
 @cashier_router.message(CommandStart())
 async def cashier_start(msg: Message, state: FSMContext):
-    """?start=buy_xtr_<plan> (or plain /start) → stars plan picker."""
-    arg = (msg.text or "").split(maxsplit=1)
-    pk = "d30"
-    if len(arg) > 1 and arg[1].startswith("buy_xtr_"):
-        pk = arg[1][len("buy_xtr_"):]
-    if pk not in SUB_PLANS:
-        pk = "d30"
-    caption = (
-        bq(f"<b>{NAME}</b>  —  ⭐ Оплата звёздами")
-        + "\n\nОплата проходит здесь — звёзды идут на баланс этого бота, "
-          "подписка активируется в рабочем боте автоматически.\n\n"
-          "Выбери тариф:"
-    )
-    rows = []
-    for _pk, _pl in SUB_PLANS.items():
-        rows.append([InlineKeyboardButton(
-            text=f"⭐ {_pl['label']} — {STARS_PRICES[_pk]}⭐",
-            callback_data=f"sub:buy:xtr:{_pk}")])
-    await msg.answer(_cx(caption), parse_mode=ParseMode.HTML,
-                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    """cashier stays SILENT — /start produces no answer at all."""
+    return
 
 
 @cashier_router.callback_query(F.data.startswith("sub:buy:xtr:"))
 async def cashier_buy(cb: CallbackQuery):
-    pk = cb.data.rsplit(":", 1)[1]
-    if pk not in SUB_PLANS:
-        await cb.answer("❌", show_alert=True)
-        return
-    pl = SUB_PLANS[pk]
-    try:
-        await cb.bot.send_invoice(
-            chat_id=cb.from_user.id,
-            title=f"{NAME} — {pl['label']}"[:32],
-            description=f"Оплата доступа: {pl['label']}"[:255],
-            payload=f"star:{pk}:{cb.from_user.id}",
-            currency="XTR",
-            provider_token="",   # digital goods/service — no provider
-            prices=[LabeledPrice(label=pl["label"][:32],
-                                 amount=STARS_PRICES[pk])],
-        )
-    except Exception as e:
-        log.error("cashier stars invoice failed: %s", e)
-        await cb.answer(f"❌ Инвойс не создан: {type(e).__name__}",
-                        show_alert=True)
-        return
+    """Old plan buttons: silent ack, no invoice (links come from the main bot)."""
     await cb.answer()
+    return
 
 
 @cashier_router.pre_checkout_query()
@@ -8309,6 +8272,7 @@ async def cashier_pre_checkout(q: PreCheckoutQuery):
 
 @cashier_router.message(F.successful_payment)
 async def cashier_paid(msg: Message):
+    """Record the payment ONLY — no user message, no log-chat message."""
     sp = msg.successful_payment
     try:
         _, pk, uid_s = (sp.invoice_payload or "").split(":")
@@ -8323,19 +8287,6 @@ async def cashier_paid(msg: Message):
     bump_pay_stats(uid, pk, "stars", float(sp.total_amount or 0), "XTR")
     commit_file_to_repo("pay_stats.json", "pay stats: stars (cashier)",
                         cooldown=0)
-    try:
-        await msg.answer(
-            _cx(bq(f"<b>{NAME}</b>  —  ✅ Платёж принят")
-                + f"\n\n⭐ {sp.total_amount} — тариф "
-                  f"<b>{SUB_PLANS[pk]['label']}</b>"
-                + "\n\nПодписка активируется в рабочем боте в течение "
-                  "минуты."),
-            parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-    await push_send_log("Оплата (Stars @касса)",
-                        [f"✅ <code>{uid}</code> — <b>{pk}</b> "
-                         f"({sp.total_amount}⭐)"])
 
 
 async def star_orders_grant_loop():
@@ -8389,6 +8340,9 @@ async def cashier_main():
     if not BOT_TOKEN:
         log.error("cashier: BOT_TOKEN (ARCH token) missing")
         return
+    async def _silent_log(title: str, lines: list) -> None:
+        pass
+    globals()["push_send_log"] = _silent_log   # zero Telegram output from cashier
     dp = Dispatcher()
     dp.include_router(cashier_router)
     log.info("%s cashier mode starting...", NAME)
