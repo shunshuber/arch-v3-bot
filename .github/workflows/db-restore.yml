@@ -1,0 +1,53 @@
+name: db-restore
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "write merged db back (empty = report only)"
+        required: false
+        default: "1"
+
+concurrency:
+  group: db-restore
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Merge store docs into repo copies
+        run: |
+          if [ "${{ github.event.inputs.apply }}" = "1" ]; then
+            python db_merge.py --apply
+          else
+            python db_merge.py
+          fi
+      - name: Commit merged db
+        run: |
+          git config user.name arch-bot
+          git config user.email arch@users.noreply.github.com
+          git add users.json subs.json db/db_index.json 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no db change"
+            exit 0
+          fi
+          git commit -m "db restore: union merge of store docs"
+          git pull --rebase origin main || true
+          git push origin HEAD:main || true

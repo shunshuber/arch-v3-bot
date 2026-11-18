@@ -165,6 +165,64 @@ async def _tg_read(kind: str, file_id: str) -> str | None:
     return None
 
 
+def merge_records(kind: str, local, doc):
+    """Union of the local copy and the store doc. Never drops an entry.
+    Returns None for shapes we do not know (plain overwrite stays)."""
+    if not isinstance(local, dict) or not isinstance(doc, dict):
+        return None
+    if kind == "fsm":
+        le = local.get("entries") or {}
+        de = doc.get("entries") or {}
+        if len(de) <= len(le):
+            return local
+        out = dict(doc)
+        out["entries"] = {**de, **le}
+        return out
+    if kind == "subs":
+        out = {}
+        for src in (doc, local):
+            for k, v in src.items():
+                if not isinstance(v, dict):
+                    continue
+                cur = out.get(k)
+                until = float(v.get("until") or 0)
+                if cur is None:
+                    out[k] = {**v, "until": until}
+                else:
+                    cur["until"] = max(float(cur.get("until") or 0), until)
+                    for kk, vv in v.items():
+                        if kk != "until":
+                            cur.setdefault(kk, vv)
+        return out
+    out = {}
+    for src in (doc, local):
+        for k, v in src.items():
+            if not isinstance(v, dict):
+                continue
+            cur = out.get(k)
+            if cur is None:
+                out[k] = dict(v)
+                continue
+            if (v.get("last_seen") or "") > (cur.get("last_seen") or ""):
+                cur["last_seen"] = v.get("last_seen")
+            if v.get("first_seen") and (
+                    not cur.get("first_seen")
+                    or v["first_seen"] < cur["first_seen"]):
+                cur["first_seen"] = v["first_seen"]
+            for kk in ("username", "name", "ref_by"):
+                if not cur.get(kk) and v.get(kk):
+                    cur[kk] = v[kk]
+            refs = list(dict.fromkeys(
+                (cur.get("refs") or []) + (v.get("refs") or [])))
+            if refs:
+                cur["refs"] = refs
+            for kk in ("ref_grants", "deep_refs"):
+                cur[kk] = max(int(cur.get(kk) or 0), int(v.get(kk) or 0))
+            for kk, vv in v.items():
+                cur.setdefault(kk, vv)
+    return out
+
+
 async def bootstrap(files: dict[str, Path]) -> None:
     """Restore canonical docs over the repo working copies on boot."""
     _load_local_index()
@@ -201,17 +259,33 @@ async def bootstrap(files: dict[str, Path]) -> None:
                 log.warning("store reseed %s failed: %s", kind, e)
             continue
         try:
-            json.loads(text)   # sanity
+            doc = json.loads(text)
         except Exception:
             log.warning("store: %s corrupt — keeping repo copy", kind)
             continue
         try:
-            if path.read_text(encoding="utf-8").strip() != text.strip():
+            local_txt = path.read_text(encoding="utf-8")
+            local = json.loads(local_txt)
+        except Exception:
+            local_txt, local = "", None
+        merged = merge_records(kind, local, doc)
+        if merged is None:
+            try:
+                if local_txt.strip() != text.strip():
+                    path.write_text(text, encoding="utf-8")
+                    log.info("store: %s restored from Telegram store", kind)
+            except Exception:
                 path.write_text(text, encoding="utf-8")
                 log.info("store: %s restored from Telegram store", kind)
-        except Exception:
-            path.write_text(text, encoding="utf-8")
-            log.info("store: %s restored from Telegram store", kind)
+            continue
+        new_txt = json.dumps(merged, ensure_ascii=False, indent=1)
+        if new_txt.strip() != local_txt.strip():
+            path.write_text(new_txt, encoding="utf-8")
+            log.info("store: %s merged %s local + %s store -> %s",
+                     kind, len(local or {}), len(doc), len(merged))
+        if len(merged) > len(doc):
+            push_async(kind, new_txt, force=True)
+            log.info("store: %s doc re-seeded from the merged copy", kind)
 
 
 def push_async(kind: str, text: str, force: bool = False) -> None:
