@@ -723,7 +723,18 @@ METHODS = {
                   "hint": "Пришли ссылку на статью: <code>telegra.ph/...</code>"},
     "account":   {"e": "\U0001f464", "l": "Аккаунт",
                   "hint": "Цель — аккаунт: @username или t.me/ссылка."},
+    "manual":    {"e": "\U0001f6e0", "l": "Ручной",
+                  "hint": "Ручное удаление через @eraser_support, предоплата 300 ⭐."},
 }
+
+# ручной метод: предоплата звёздами, ценник в USD/RUB
+MANUAL_STARS = 300
+STAR_USD = float(os.getenv("STAR_USD", "0.013"))
+
+
+def manual_price() -> tuple[float, float]:
+    usd = round(MANUAL_STARS * STAR_USD, 2)
+    return usd, round(usd * CLOUDTIPS_RATE)
 
 
 # ── proxy loader ────────────────────────────────────────
@@ -3360,6 +3371,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "message":  "Сообщение",
         "account":  "Аккаунт",
         "telegraph": "Telegraph",
+        "manual":   f"Ручной — {MANUAL_STARS}⭐",
     }
     short_icons = {
         "web":      "5258423306255604960",
@@ -3376,6 +3388,7 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
         [InlineKeyboardButton(text=short["account"], callback_data="method:account"),
          InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
+        [InlineKeyboardButton(text=short["manual"], callback_data="method:manual")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -3672,6 +3685,30 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
         _extra["reason"] = "other"
     await state.update_data(**_extra)
     m = METHODS[key]
+    if key == "manual":
+        usd, rub = manual_price()
+        await cb.message.edit_caption(
+            caption=_cx((
+                bq(f"<b>{NAME}</b>")
+                + "\n\n🛠 <b>Ручное удаление</b>\n\n"
+                + "Напиши <code>@eraser_support</code> за ручным удалением — "
+                  "вся команда Arch V3 серьёзно попотеет над целью.\n"
+                + "Работаем <b>только по предоплате</b>.\n\n"
+                + f"💳 Цена: <b>{MANUAL_STARS} ⭐</b> "
+                  f"(≈ <b>{usd:.2f} $</b> / <b>{rub} ₽</b>)"
+            )),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="@eraser_support",
+                    url="https://t.me/eraser_support")],
+                [InlineKeyboardButton(
+                    text="Назад", icon_custom_emoji_id="5258132936401624790",
+                    callback_data="back:methods")],
+            ]))
+        await state.clear()
+        await cb.answer()
+        return
     if key in ("session", "telegraph", "account"):
         await cb.message.edit_caption(
             caption=_cx((
