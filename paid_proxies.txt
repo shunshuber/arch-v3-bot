@@ -2,3 +2,4 @@
 # free farm pool (proxies.txt) is frozen fallback only
 # format: socks5://user:pass@host:port  (one per line)
 socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417
+socks5://modeler_4nG5gF:CFGRm4F41eIW@139.144.99.147:23989

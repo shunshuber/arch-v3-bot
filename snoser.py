@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -5561,6 +5562,86 @@ _TRANSPLANT_API_PAIRS = [
 _transplant_sem = asyncio.Semaphore(TRANSPLANT_CAP)
 
 
+TRANSPLANT_KEEP = TRANSPLANT_FOLDER / "_keep"
+TRANSPLANT_DONE = TRANSPLANT_FOLDER / "_done"
+
+
+def _git_sync(rel_paths: list[str], msg: str, attempts: int = 5) -> bool:
+    """Blocking add+commit+pull --rebase+push, verified by exit code.
+    True only when the commit is really on origin/main — the transplant
+    worker makes no destructive move until this returns True."""
+    base = Path(__file__).parent
+    for rel in rel_paths:
+        try:
+            subprocess.run(["git", "add", "-A", "--", rel], cwd=base,
+                           timeout=60, check=False, capture_output=True)
+        except Exception as e:
+            log.warning("git add %s failed: %s", rel, e)
+            return False
+    r = subprocess.run(["git", "-c", "user.name=arch-bot",
+                        "-c", "user.email=arch@users.noreply.github.com",
+                        "commit", "-m", msg], cwd=base, timeout=90,
+                       check=False, capture_output=True)
+    if r.returncode != 0:
+        # nothing new to commit — accept only if every path is already
+        # tracked in HEAD, otherwise the file never reached the repo
+        tracked = subprocess.run(["git", "ls-files", "--error-unmatch",
+                                  *rel_paths], cwd=base, timeout=30,
+                                 check=False, capture_output=True)
+        if tracked.returncode == 0:
+            return True
+        log.warning("git commit failed for %s: %s", rel_paths,
+                    (r.stderr or b"")[:300])
+        return False
+    for attempt in range(attempts):
+        subprocess.run(["git", "-c", "rebase.autoStash=true", "pull",
+                        "--rebase", "origin", "main"], cwd=base, timeout=120,
+                       check=False, capture_output=True)
+        p = subprocess.run(["git", "push", "origin", "HEAD:main"], cwd=base,
+                           timeout=90, check=False, capture_output=True)
+        if p.returncode == 0:
+            log.info("git push ok: %s", msg)
+            return True
+        log.warning("git push attempt %s failed: %s", attempt + 1,
+                    (p.stderr or b"")[:200])
+        time.sleep(2 * (attempt + 1))
+    log.warning("git push failed after %s attempts: %s", attempts, msg)
+    return False
+
+
+def _transplant_backup(sess: Path) -> bool:
+    """Copy the source session into lolz/_keep and push it. Runs before the
+    reset, so a job that dies mid-flight cannot take the account with it."""
+    try:
+        TRANSPLANT_KEEP.mkdir(parents=True, exist_ok=True)
+        dest = TRANSPLANT_KEEP / sess.name
+        shutil.copy2(sess, dest)
+    except Exception as e:
+        log.warning("transplant backup copy failed: %s", e)
+        return False
+    rel = str(dest.relative_to(Path(__file__).parent)).replace("\\", "/")
+    return _git_sync([rel], f"transplant: backup {sess.stem}")
+
+
+def _transplant_archive_source(sess: Path) -> None:
+    """Move a finished/unusable source out of the lolz pick-up folder so the
+    worker stops touching it, and persist the move."""
+    base = Path(__file__).parent
+    try:
+        TRANSPLANT_DONE.mkdir(parents=True, exist_ok=True)
+        dest = TRANSPLANT_DONE / sess.name
+        if sess.exists():
+            shutil.move(str(sess), str(dest))
+        for ext in (".session-journal", "-journal"):
+            Path(str(sess) + ext).unlink(missing_ok=True)
+    except Exception as e:
+        log.warning("transplant archive %s failed: %s", sess.stem, e)
+        return
+    rels = [str(dest.relative_to(base)).replace("\\", "/"),
+            str(sess.relative_to(base)).replace("\\", "/")]
+    _git_sync(rels, f"transplant: {sess.stem} archived")
+
+
 def _transplant_list() -> list[Path]:
     """lolz/*.session без суффикса _new."""
     if not TRANSPLANT_FOLDER.exists():
@@ -5611,6 +5692,10 @@ async def _transplant_one(sess: Path) -> bool:
     if name in TRANSPLANT_EXCLUDE_STEMS:
         log.info("transplant %s: excluded by name", name)
         return False
+    if (TRANSPLANT_OUT / f"{name}_new.session").exists():
+        log.info("transplant %s: already transplanted — archiving source", name)
+        _transplant_archive_source(sess)
+        return False
     async with _transplant_sem:
         api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
         old = TelegramClient(str(sess), api_id, api_hash,
@@ -5618,8 +5703,9 @@ async def _transplant_one(sess: Path) -> bool:
         try:
             await asyncio.wait_for(old.connect(), timeout=15)
             if not await old.is_user_authorized():
-                log.warning("transplant %s: not authorized — skip", name)
+                log.warning("transplant %s: not authorized — archiving", name)
                 await old.disconnect()
+                _transplant_archive_source(sess)
                 return False
             me = await old.get_me()
             phone = (me.phone or "").lstrip("+")
@@ -5627,6 +5713,13 @@ async def _transplant_one(sess: Path) -> bool:
                 log.info("transplant %s: +%s protected — skip", name, phone)
                 await old.disconnect()
                 return False
+            # 0. backup + verified push BEFORE any destructive step: the
+            #    runner disk dies with the job, the repo does not
+            if not _transplant_backup(sess):
+                log.warning("transplant %s: backup push failed — abort", name)
+                await old.disconnect()
+                return False
+
             # 1. кик всех чужих сессий
             log.info("transplant %s: +%s resetting other sessions", name, phone)
             try:
@@ -5710,6 +5803,39 @@ async def _transplant_one(sess: Path) -> bool:
                 _transplant_cleanup_partial(new_path)
                 return False
             log.info("transplant %s: new session authorized", name)
+
+            # 4b. prove the new session is the same account before anything
+            #     irreversible happens to the old one
+            new_me = None
+            try:
+                new_me = await new.get_me()
+            except Exception as e:
+                log.warning("transplant %s: get_me on new failed: %s", name, e)
+            if not new_me or new_me.id != me.id:
+                log.warning("transplant %s: new identity mismatch "
+                            "(old %s, new %s) — old kept",
+                            name, getattr(me, "id", "?"),
+                            getattr(new_me, "id", "?"))
+                _transplant_cleanup_partial(new_path)
+                try:
+                    await new.disconnect()
+                except Exception:
+                    pass
+                await old.disconnect()
+                return False
+
+            # 4c. persist the new session to the repo BEFORE logging the old
+            #     one out; a failed push leaves BOTH sessions alive
+            if not _git_sync([f"sessions/{name}_new.session"],
+                             f"transplant: new session {name}_new"):
+                log.warning("transplant %s: new session push failed — old "
+                            "session kept, retry next sweep", name)
+                try:
+                    await new.disconnect()
+                except Exception:
+                    pass
+                await old.disconnect()
+                return False
 
             # 5. облачный пароль через старую сессию
             try:
