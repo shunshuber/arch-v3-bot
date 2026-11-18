@@ -225,6 +225,7 @@ class Snos(StatesGroup):
 class GrantFSM(StatesGroup):
     uid = State()
     days = State()
+    revoke_uid = State()
 
 
 class AddSession(StatesGroup):
@@ -3893,6 +3894,9 @@ async def menu_grant(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Отозвать подписку", style="danger",
+                                  icon_custom_emoji_id="5267123797600783095",
+                                  callback_data="grant:revoke")],
             [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
         ]))
     await cb.answer()
@@ -3978,6 +3982,111 @@ async def cmd_unsub(msg: Message):
         await msg.answer(_cx(
             f"⚠️ У <b>{uid}</b> активной записи нет — подписка не числится."),
             parse_mode=ParseMode.HTML)
+
+
+def _uid_from_raw(raw: str) -> int | None:
+    """Telegram ID or @username → uid, resolved through users.json."""
+    raw = (raw or "").strip()
+    if raw.lstrip("-").isdigit():
+        return int(raw)
+    uname = raw.lstrip("@").lower()
+    if not uname:
+        return None
+    try:
+        users = load_users() or {}
+    except Exception:
+        return None
+    for uid, rec in users.items():
+        if not isinstance(rec, dict):
+            continue
+        if str(rec.get("username") or "").lower() == uname:
+            try:
+                return int(uid)
+            except ValueError:
+                return None
+    return None
+
+
+@router.callback_query(F.data == "grant:revoke")
+async def grant_revoke_menu(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await state.set_state(GrantFSM.revoke_uid)
+    await cb.message.edit_caption(
+        caption=_cx((
+            bq(f"<b>{NAME}</b>  ·  \U0001f6ab Отзыв подписки")
+            + "\n\nПришли <b>ID</b> или <code>@username</code> — покажу, что снимаю."
+        )),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+        ]))
+    await cb.answer()
+
+
+@router.message(GrantFSM.revoke_uid)
+async def grant_revoke_uid(msg: Message, state: FSMContext):
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    uid = _uid_from_raw(msg.text or "")
+    if uid is None:
+        await msg.answer(_cx(
+            "❌ Не нашёл такой ID или username. Пришли цифры или <code>@ник</code>."),
+            parse_mode=ParseMode.HTML)
+        return
+    subs = load_subs()
+    rec = subs.get(str(uid))
+    await state.clear()
+    if not rec:
+        await msg.answer(_cx(
+            f"⚠️ У <code>{uid}</code> подписки нет — снимать нечего."),
+            parse_mode=ParseMode.HTML)
+        return
+    s, until = sub_quality(subs, uid)
+    await msg.answer(_cx(
+        f"🚫 Снять подписку с <code>{uid}</code>?\n"
+        + f"Сейчас: <b>{s}</b> ({until})"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Отозвать", style="danger",
+                                 icon_custom_emoji_id="5267123797600783095",
+                                 callback_data=f"grant:revoke:yes:{uid}"),
+            InlineKeyboardButton(text="Отмена", icon_custom_emoji_id="5258132936401624790",
+                                 callback_data="back:home")]]))
+
+
+@router.callback_query(F.data.startswith("grant:revoke:yes:"))
+async def grant_revoke_yes(cb: CallbackQuery):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    try:
+        uid = int(cb.data.rsplit(":", 1)[1])
+    except ValueError:
+        await cb.answer("битый id", show_alert=True)
+        return
+    subs = load_subs()
+    gone = subs.pop(str(uid), None)
+    if not gone:
+        await cb.answer("уже снята", show_alert=True)
+        return
+    save_subs(subs)
+    if gone.get("forever"):
+        was = "навсегда"
+    else:
+        until = float(gone.get("until") or 0)
+        was = datetime.fromtimestamp(until).strftime("%d.%m.%Y %H:%M") if until else "—"
+    await push_send_log("Отзыв подписки",
+                        [f"🚫 <code>{uid}</code> — снята (была: {was})"])
+    try:
+        await cb.message.edit_caption(
+            caption=_cx(bq(f"<b>{NAME}</b>  ·  🚫 Подписка снята")
+                        + f"\n\n<code>{uid}</code> — отозвана (была: {was})."),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    await cb.answer("снято")
 
 
 @router.message(Command("wl"))
@@ -6771,10 +6880,10 @@ XROCKET_API = "https://pay.api.xrocket.exchange/api/v1"
 XROCKET_CURRENCY = "USDT"
 
 SUB_PLANS = {
-    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.5},
-    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.0},
-    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 6.0},
-    "fore": {"label": "\u041d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 12.0},
+    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.75},
+    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 3.0},
+    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 9.0},
+    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 18.0},
 }
 
 # ── Cloudtips (RU cards / SBP) ───────────────────────────
@@ -7167,7 +7276,7 @@ CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
                    or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
-STARS_PRICES = {"d1": 50, "d7": 150, "d30": 400, "fore": 800}
+STARS_PRICES = {"d1": 75, "d7": 225, "d30": 600, "d90": 1200}
 
 
 async def cryptobot_api(method: str, params: dict | None = None) -> dict:
@@ -7263,7 +7372,7 @@ def user_is_admin(user_id: int) -> bool:
     if bool(ADMIN_ID) and user_id == int(ADMIN_ID):
         return True
     # also recognise both hardcoded forever users as "admins"
-    FOREVER = {8813226008, 8661362112, 8901835539}
+    FOREVER = {8661362112}   # owner: 8661362112 (8901835539 removed)
     return user_id in FOREVER
 
 
@@ -7689,7 +7798,10 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
 
 
 def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
-    pl = SUB_PLANS[plan_key]
+    pl = SUB_PLANS.get(plan_key)
+    if pl is None:
+        log.warning("activate_plan: unknown plan %s — ignored", plan_key)
+        return subs.setdefault(str(user_id), {})
     rec = subs.setdefault(str(user_id), {})
     if pl["days"] is None:
         rec["forever"] = True
