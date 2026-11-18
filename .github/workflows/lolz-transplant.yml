@@ -3,13 +3,17 @@ name: lolz-transplant
 on:
   workflow_dispatch:
 
+concurrency:
+  group: lolz-transplant
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
   transplant:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       API_ID: ${{ secrets.API_ID }}
       API_HASH: ${{ secrets.API_HASH }}

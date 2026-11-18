@@ -5835,9 +5835,23 @@ async def _transplant_one(sess: Path) -> bool:
                 await old.disconnect()
                 return False
 
-            # 4c. persist the new session to the repo BEFORE logging the old
+            # 4c. fingerprint json: the bot must reconnect with the SAME
+            #     api pair that authorized this session
+            fp_new = {"app_id": int(new_api_id), "app_hash": new_api_hash,
+                      "device": "Desktop", "sdk": "Windows 10",
+                      "app_version": "4.16.30 x64", "lang_code": "en",
+                      "system_lang_code": "en-US", "phone": f"+{phone}"}
+            try:
+                (TRANSPLANT_OUT / f"{name}_new.json").write_text(
+                    json.dumps(fp_new, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+            except Exception as e:
+                log.warning("transplant %s: fp write failed: %s", name, e)
+
+            # 4d. persist the new session to the repo BEFORE logging the old
             #     one out; a failed push leaves BOTH sessions alive
-            if not _git_sync([f"sessions/{name}_new.session"],
+            if not _git_sync([f"sessions/{name}_new.session",
+                              f"sessions/{name}_new.json"],
                              f"transplant: new session {name}_new"):
                 log.warning("transplant %s: new session push failed — old "
                             "session kept, retry next sweep", name)
