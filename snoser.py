@@ -6771,12 +6771,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    # auto-watch: every launched complaint puts its target under the
-    # watchdog — death event later lands in the logs channel + user's PM
-    # сторож только на аккаунты и ботов — каналы/посты/письма не сторожим
-    if (data["method"] in ("bot", "account", "message")
-            or (data["method"] == "web"
-                and t["type"] in ("username", "raw"))):
+    # auto-watch only bots: сообщения, аккаунты, каналы и ссылки не сторожим
+    if data["method"] == "bot":
         try:
             _watch_add(cb.from_user.id, tgt_raw)
         except Exception as _wa_err:
