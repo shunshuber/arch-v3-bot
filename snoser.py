@@ -5410,6 +5410,7 @@ class WatchFSM(StatesGroup):
 
 
 WATCH_FILE = Path(__file__).parent / "watchdog.json"
+WATCH_SUCCESS_CHAT = -1003968104917   # канал успешных удалений
 WATCH_INTERVAL = 150        # один проход каждые 2.5 мин (окно рана ~5 мин)
 WATCH_START_DELAY = 45
 WATCH_MAX_PER_USER = 5
@@ -5597,7 +5598,8 @@ async def watch_sweep() -> None:
     for cur, st in events:
         label = "сообщение удалено" if st == "msg_gone" \
             else "цель удалена / заморожена"
-        esc = html_mod.escape(str(cur.get("raw") or cur["entity"]))
+        plain = str(cur.get("raw") or cur["entity"])
+        esc = html_mod.escape(plain)
         await push_send_log(
             "Сторож: цель снята",
             [f"🎯 <code>{esc}</code> — {label}",
@@ -5605,9 +5607,15 @@ async def watch_sweep() -> None:
         if _BOT:
             try:
                 await _BOT.send_message(
+                    WATCH_SUCCESS_CHAT,
+                    f"⚡ Успешное удаление: {plain}")
+            except Exception as e:
+                log.warning("watch success channel send failed: %s", e)
+            try:
+                await _BOT.send_message(
                     cur["uid"], _cx(
                         bq(f"<b>{NAME}</b>  —  👁 Сторож")
-                        + f"\n\n🔴 <b>{label}</b>"
+                        + f"\n\n⚡ <b>Успешное удаление</b>"
                         + f"\n🎯 <code>{esc}</code>"
                         + f"\n🕒 {datetime.now().strftime('%d.%m %H:%M:%S')}"),
                     parse_mode=ParseMode.HTML)
@@ -6837,8 +6845,9 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     # auto-watch: every launched complaint puts its target under the
     # watchdog — death event later lands in the logs channel + user's PM
     # сторож только на аккаунты и ботов — каналы/посты/письма не сторожим
-    if data["method"] in ("bot", "account") or (data["method"] == "web"
-                                   and t["type"] in ("username", "raw")):
+    if (data["method"] in ("bot", "account", "message")
+            or (data["method"] == "web"
+                and t["type"] in ("username", "raw"))):
         try:
             _watch_add(cb.from_user.id, tgt_raw)
         except Exception as _wa_err:
