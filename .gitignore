@@ -6,3 +6,6 @@ logs/
 _*.ps1
 _artifacts/
 *.log
+
+sessions/.tmp_*
+sessions/*.session-journal
