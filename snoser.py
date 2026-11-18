@@ -5348,7 +5348,6 @@ class WatchFSM(StatesGroup):
 
 
 WATCH_FILE = Path(__file__).parent / "watchdog.json"
-WATCH_SUCCESS_CHAT = -1003968104917   # канал успешных удалений
 WATCH_INTERVAL = 150        # один проход каждые 2.5 мин (окно рана ~5 мин)
 WATCH_START_DELAY = 45
 WATCH_MAX_PER_USER = 5
@@ -5543,12 +5542,6 @@ async def watch_sweep() -> None:
             [f"🎯 <code>{esc}</code> — {label}",
              f"👤 владелец: <code>{cur['uid']}</code>"])
         if _BOT:
-            try:
-                await _BOT.send_message(
-                    WATCH_SUCCESS_CHAT,
-                    f"⚡ Успешное удаление: {plain}")
-            except Exception as e:
-                log.warning("watch success channel send failed: %s", e)
             try:
                 await _BOT.send_message(
                     cur["uid"], _cx(
