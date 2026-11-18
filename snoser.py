@@ -5719,6 +5719,67 @@ async def _transplant_archive_source(sess: Path) -> None:
     await _persist_paths(rels, f"transplant: {sess.stem} archived")
 
 
+TRANSPLANT_QUEUE = Path(__file__).parent / "lolz_queue.json"
+TRANSPLANT_RETRY_SEC = 30 * 60      # 30 минут между попытками
+
+
+def _queue_load() -> dict:
+    try:
+        return json.loads(TRANSPLANT_QUEUE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _queue_save(q: dict) -> None:
+    try:
+        TRANSPLANT_QUEUE.write_text(
+            json.dumps(q, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        log.warning("transplant queue save failed: %s", e)
+
+
+def _transplant_due_list() -> list[Path]:
+    """Sources whose cooldown is over. A newly seen source is scheduled
+    now+30min and skipped, so a fresh drop never runs on arrival."""
+    q = _queue_load()
+    now = time.time()
+    due, changed = [], False
+    for sess in _transplant_list():
+        e = q.get(sess.stem)
+        if not e:
+            q[sess.stem] = {"next_try": now + TRANSPLANT_RETRY_SEC,
+                            "tries": 0, "added": int(now)}
+            changed = True
+            log.info("transplant %s: queued, first try in %ss", sess.stem,
+                     TRANSPLANT_RETRY_SEC)
+            continue
+        left = float(e.get("next_try") or 0) - now
+        if left <= 0:
+            due.append(sess)
+        else:
+            log.info("transplant %s: cooling down %ss", sess.stem, int(left))
+    if changed:
+        _queue_save(q)
+    return due
+
+
+async def _transplant_mark(sess: Path, ok: bool) -> None:
+    """Success drops the source from the queue; failure re-arms 30 minutes."""
+    q = _queue_load()
+    if ok:
+        q.pop(sess.stem, None)
+    else:
+        e = q.get(sess.stem) or {"tries": 0}
+        e["tries"] = int(e.get("tries") or 0) + 1
+        e["next_try"] = time.time() + TRANSPLANT_RETRY_SEC
+        e["last_try"] = int(time.time())
+        q[sess.stem] = e
+        log.info("transplant %s: failed, retry in %ss (try %s)", sess.stem,
+                 TRANSPLANT_RETRY_SEC, e["tries"])
+    _queue_save(q)
+    await _persist_paths(["lolz_queue.json"], f"transplant queue: {sess.stem}")
+
+
 def _transplant_list() -> list[Path]:
     """lolz/*.session без суффикса _new."""
     if not TRANSPLANT_FOLDER.exists():
@@ -6001,15 +6062,16 @@ async def transplant_loop() -> None:
     await asyncio.sleep(TRANSPLANT_START_DELAY)
     while True:
         try:
-            sessions = _transplant_list()
+            sessions = _transplant_due_list()
             if sessions:
-                log.info("transplant: %d lolz sessions", len(sessions))
-                outs = await asyncio.gather(
-                    *[_transplant_one(s) for s in sessions],
-                    return_exceptions=True)
-                ok = sum(1 for r in outs if r is True)
-                if ok:
-                    log.info("transplant: %d/%d done", ok, len(sessions))
+                log.info("transplant: %d lolz sessions due", len(sessions))
+                for s in sessions:
+                    try:
+                        res = await _transplant_one(s)
+                    except Exception as e:
+                        log.warning("transplant %s crashed: %s", s.stem, e)
+                        res = False
+                    await _transplant_mark(s, res is True)
         except asyncio.CancelledError:
             return
         except Exception as e:

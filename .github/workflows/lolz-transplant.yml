@@ -1,6 +1,8 @@
 name: lolz-transplant
 
 on:
+  schedule:
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -40,8 +42,9 @@ jobs:
           snoser.push_send_log = fake_push
 
           async def go():
-              sess = snoser._transplant_list()
-              print("[TRANSPLANT] sources:", [p.name for p in sess], flush=True)
+              sess = snoser._transplant_due_list()
+              print("[TRANSPLANT] due:", [p.name for p in sess], flush=True)
+              print("[TRANSPLANT] queue:", snoser._queue_load(), flush=True)
               for s in sess:
                   print(f"[TRANSPLANT] start {s.stem}", flush=True)
                   try:
@@ -49,6 +52,9 @@ jobs:
                       print(f"[TRANSPLANT] result {s.stem}: {ok}", flush=True)
                   except Exception as e:
                       print(f"[TRANSPLANT] EXCEPTION {s.stem}: {type(e).__name__}: {e}", flush=True)
+                      ok = False
+                  await snoser._transplant_mark(s, ok is True)
+                  print(f"[TRANSPLANT] queue:", await asyncio.to_thread(snoser._queue_load), flush=True)
 
           asyncio.run(go())
           PY
