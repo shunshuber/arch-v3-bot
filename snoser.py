@@ -6054,30 +6054,55 @@ def _transplant_cleanup_partial(path: Path) -> None:
 
 
 async def _transplant_read_code(client, timeout: float) -> str | None:
-    """Ждём 5-значный код входа из входящих (диалог с Telegram, 777000)."""
+    """5–6 digit login code from the 777000 service chat. Live updates are
+    the fast path; a polling loop covers runners that never deliver updates."""
     from telethon import events as _tlev
     fut = asyncio.get_running_loop().create_future()
+    rx = re.compile(r"\b(\d{5,6})\b")
+
+    def _pick(text: str) -> str | None:
+        m = rx.search(text or "")
+        return m.group(1) if m else None
+
+    def _offer(text: str, where: str) -> None:
+        code = _pick(text)
+        if code and not fut.done():
+            log.info("transplant: code via %s — %s", where, code[:2] + "***")
+            fut.set_result(code)
 
     async def _h(event):
-        if fut.done():
-            return
-        text = event.message.text or event.message.message or ""
-        m = re.search(r"\b(\d{5,6})\b", text)
-        if not m:
-            return
-        # prefer the Telegram service chat, but any code-shaped message wins
-        sender = getattr(event.message, "sender_id", None)
-        if sender is not None and int(sender) != 777000:
-            log.info("transplant: code-shaped msg from %s — using anyway",
-                     sender)
-        fut.set_result(m.group(1))
+        msg = event.message
+        _offer(getattr(msg, "text", None) or getattr(msg, "message", None)
+               or "", "update")
 
     client.add_event_handler(_h, _tlev.NewMessage(incoming=True))
+
+    async def _poll_service_code():
+        seen_n = -1
+        while not fut.done():
+            try:
+                msgs = await asyncio.wait_for(
+                    client.get_messages(777000, limit=5), timeout=12)
+                if seen_n < 0:
+                    log.info("transplant: 777000 history=%s", len(msgs))
+                    seen_n = len(msgs)
+                for m in msgs:
+                    _offer(getattr(m, "message", None) or "", "poll")
+                    if fut.done():
+                        break
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                log.warning("transplant: 777000 poll failed: %s", e)
+            await asyncio.sleep(5)
+
+    poller = asyncio.create_task(_poll_service_code())
     try:
         return await asyncio.wait_for(fut, timeout=timeout)
     except asyncio.TimeoutError:
         return None
     finally:
+        poller.cancel()
         client.remove_event_handler(_h)
 
 
