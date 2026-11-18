@@ -3371,7 +3371,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "message":  "Сообщение",
         "account":  "Аккаунт",
         "telegraph": "Telegraph",
-        "manual":   f"Ручной — {MANUAL_STARS}⭐",
+        "manual":   "Ручной",
     }
     short_icons = {
         "web":      "5258423306255604960",
