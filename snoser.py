@@ -3623,6 +3623,68 @@ async def method_cooldown_set(uid: int, method: str) -> None:
         pass
 
 
+TARGET_CD_FILE = Path(__file__).parent / "target_cooldown.json"
+TARGET_CD_SEC = 5 * 3600        # 5 часов на одну цель
+
+
+def _target_key(raw: str) -> str:
+    """One key for @name, t.me/name and t.me/c/<channel>/<msg> links."""
+    s = (raw or "").strip()
+    parts = s.split()
+    if parts:
+        s = parts[0]
+    m = re.search(r"t\.me/(?:c/)?([A-Za-z0-9_\-]+)", s, re.I)
+    if m:
+        return "@" + m.group(1).lower()
+    if s.startswith("@"):
+        return s.lower()
+    if s.startswith("+"):
+        return re.sub(r"\D", "", s)
+    return s.lower()
+
+
+def _target_block_text(left: int) -> str:
+    return ("На данный аккаунт уже кидали жалобы. Подождите 5 часов "
+            "и попробуйте снова на этот аккаунт."
+            f"\nОсталось: ~{max(1, left // 3600)} ч.")
+
+
+def _target_cd_local() -> dict:
+    try:
+        return json.loads(TARGET_CD_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+async def target_report_gate(raw: str) -> int:
+    """Seconds left before this target may be reported again (0 = free)."""
+    key = _target_key(raw)
+    d = _target_cd_local()
+    txt = await store._gh_get_text("target_cooldown.json")
+    if txt:
+        try:
+            for k, v in (json.loads(txt) or {}).items():
+                if k not in d or float(v) > float(d[k]):
+                    d[k] = v
+        except Exception:
+            pass
+    left = TARGET_CD_SEC - (time.time() - float(d.get(key) or 0))
+    return max(0, int(left))
+
+
+async def target_report_mark(raw: str) -> None:
+    key = _target_key(raw)
+    d = _target_cd_local()
+    d[key] = time.time()
+    txt = json.dumps(d, ensure_ascii=False, indent=1)
+    try:
+        TARGET_CD_FILE.write_text(txt, encoding="utf-8")
+    except Exception as e:
+        log.warning("target cooldown write failed: %s", e)
+    await _persist_paths(["target_cooldown.json"],
+                         f"target cooldown: {key}")
+
+
 def sessions_rest_left() -> int:
     """0 if any session can attack; else seconds until the first thaws."""
     led = _ledger_load()
@@ -6387,6 +6449,10 @@ async def got_target(msg: Message, state: FSMContext):
         if not target["entity"]:
             await msg.answer("❌ Неверная цель. Пришли @username.")
             return
+        _tg = await target_report_gate(target["raw"])
+        if _tg:
+            await msg.answer(_target_block_text(_tg))
+            return
         _block = await report_gate_block(msg.from_user.id, "account")
         if _block:
             await msg.answer(_block)
@@ -6637,11 +6703,16 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     await cb.answer()   # ack before slow GitHub reads
     data = await state.get_data()
+    t = data["target"]
+    _tg = await target_report_gate(t["raw"])
+    if _tg:
+        await cb.message.answer(_target_block_text(_tg))
+        await state.clear()
+        return
     _block = await report_gate_block(cb.from_user.id, data.get("method", ""))
     if _block:
         await cb.message.answer(_block)
         return
-    t = data["target"]
     r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
     m = METHODS[data["method"]]
     c = data.get("comment", "")   # empty = per-session unique templates downstream
@@ -6752,6 +6823,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     else:
         report_task = asyncio.create_task(
             fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
+
+    await target_report_mark(tgt_raw)
 
     # ── loading animation while workers run ──
     is_code = data["method"] == "code"
