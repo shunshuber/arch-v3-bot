@@ -5609,13 +5609,23 @@ def _git_sync(rel_paths: list[str], msg: str, attempts: int = 5) -> bool:
     return False
 
 
+def _transplant_file(sess: Path) -> Path:
+    """_transplant_list() hands back suffix-less stems (Telethon adds
+    .session on connect) — resolve the real file on disk."""
+    if sess.suffix == ".session":
+        return sess
+    cand = Path(str(sess) + ".session")
+    return cand if cand.exists() else sess
+
+
 def _transplant_backup(sess: Path) -> bool:
     """Copy the source session into lolz/_keep and push it. Runs before the
     reset, so a job that dies mid-flight cannot take the account with it."""
+    src = _transplant_file(sess)
     try:
         TRANSPLANT_KEEP.mkdir(parents=True, exist_ok=True)
-        dest = TRANSPLANT_KEEP / sess.name
-        shutil.copy2(sess, dest)
+        dest = TRANSPLANT_KEEP / f"{sess.stem}.session"
+        shutil.copy2(src, dest)
     except Exception as e:
         log.warning("transplant backup copy failed: %s", e)
         return False
@@ -5627,18 +5637,19 @@ def _transplant_archive_source(sess: Path) -> None:
     """Move a finished/unusable source out of the lolz pick-up folder so the
     worker stops touching it, and persist the move."""
     base = Path(__file__).parent
+    src = _transplant_file(sess)
     try:
         TRANSPLANT_DONE.mkdir(parents=True, exist_ok=True)
-        dest = TRANSPLANT_DONE / sess.name
-        if sess.exists():
-            shutil.move(str(sess), str(dest))
+        dest = TRANSPLANT_DONE / f"{sess.stem}.session"
+        if src.exists():
+            shutil.move(str(src), str(dest))
         for ext in (".session-journal", "-journal"):
-            Path(str(sess) + ext).unlink(missing_ok=True)
+            Path(str(src) + ext).unlink(missing_ok=True)
     except Exception as e:
         log.warning("transplant archive %s failed: %s", sess.stem, e)
         return
     rels = [str(dest.relative_to(base)).replace("\\", "/"),
-            str(sess.relative_to(base)).replace("\\", "/")]
+            str(src.relative_to(base)).replace("\\", "/")]
     _git_sync(rels, f"transplant: {sess.stem} archived")
 
 
