@@ -50,7 +50,7 @@ jobs:
         run: |
           git config user.name "arch-bot"
           git config user.email "arch@users.noreply.github.com"
-          git add session_status.json || true
+          git add -A
           if git diff --cached --quiet; then
             echo "no status change"
           else
