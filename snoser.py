@@ -7120,7 +7120,7 @@ async def ct_poll_once(bot) -> None:
     changed = False
     for uid_s in list(pend):
         rec = pend[uid_s]
-        plan = rec.get("plan", "")
+        plan = plan_key(rec.get("plan", ""))
         if plan not in SUB_PLANS:
             pend.pop(uid_s)
             changed = True
@@ -7277,6 +7277,14 @@ CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
 STARS_PRICES = {"d1": 75, "d7": 225, "d30": 600, "d90": 1200}
+
+# старые инвойсы «Навсегда» (fore) уже оплачены у части людей в ссылках —
+# они гасятся как 90 дней, чтобы деньги не пропали
+LEGACY_PLANS = {"fore": "d90"}
+
+
+def plan_key(pk: str) -> str:
+    return LEGACY_PLANS.get(pk, pk)
 
 
 async def cryptobot_api(method: str, params: dict | None = None) -> dict:
@@ -8152,6 +8160,7 @@ async def sub_ct_ok(cb: CallbackQuery, state: FSMContext):
         await cb.answer("⛔️", show_alert=True)
         return
     _, _, uid_s, pk = cb.data.split(":")
+    pk = plan_key(pk)
     if pk not in SUB_PLANS:
         await cb.answer("❌", show_alert=True)
         return
@@ -8207,6 +8216,7 @@ async def sub_cryptobot_check(cb: CallbackQuery, state: FSMContext):
         return
     parts = cb.data.split(":")
     inv_id, pk = parts[2], parts[3]
+    pk = plan_key(pk)
     if not SUB_PLANS.get(pk):
         await cb.answer("❌", show_alert=True)
         return
@@ -8258,6 +8268,7 @@ async def on_successful_payment(msg: Message):
         log.warning("stars payload broken: %r", payload)
         await msg.answer("⚠️ Платёж принят, но план не распознан — напиши админу.")
         return
+    pk = plan_key(pk)
     if pk in SUB_PLANS:
         subs = load_subs()
         activate_plan(subs, uid, pk)
@@ -8866,6 +8877,7 @@ async def cashier_paid(msg: Message):
     except Exception:
         log.warning("cashier payload broken: %r", sp.invoice_payload)
         return
+    pk = plan_key(pk)
     orders = await star_orders_read()
     orders.append({"uid": uid, "plan": pk, "amount": sp.total_amount,
                    "ts": time.time(), "done": False})
@@ -8887,6 +8899,7 @@ async def star_orders_grant_loop():
                 changed = False
                 for o in todo:
                     uid, pk = int(o.get("uid", 0) or 0), o.get("plan", "")
+                    pk = plan_key(pk)
                     if pk not in SUB_PLANS:
                         o["done"] = True
                         o["note"] = "bad plan"
@@ -9063,6 +9076,7 @@ async def star_tx_grant_loop():
                         uid = int(uid_s)
                     except Exception:
                         continue
+                    pk = plan_key(pk)
                     if pk not in SUB_PLANS:
                         continue
                     subs = load_subs()
