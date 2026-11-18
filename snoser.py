@@ -6115,7 +6115,8 @@ def _transplant_cleanup_partial(path: Path) -> None:
             pass
 
 
-async def _transplant_read_code(client, timeout: float) -> str | None:
+async def _transplant_read_code(client, timeout: float,
+                                after_ts: float | None = None) -> str | None:
     """5–6 digit login code from the 777000 service chat. Live updates are
     the fast path; a polling loop covers runners that never deliver updates."""
     from telethon import events as _tlev
@@ -6126,16 +6127,24 @@ async def _transplant_read_code(client, timeout: float) -> str | None:
         m = rx.search(text or "")
         return m.group(1) if m else None
 
-    def _offer(text: str, where: str) -> None:
+    def _offer(text: str, where: str, date=None) -> None:
         code = _pick(text)
-        if code and not fut.done():
-            log.info("transplant: code via %s — %s", where, code[:2] + "***")
-            fut.set_result(code)
+        if not code or fut.done():
+            return
+        if after_ts is not None and date is not None:
+            try:
+                if float(date.timestamp()) < after_ts - 10:
+                    log.info("transplant: stale code ignored (%s)", where)
+                    return
+            except Exception:
+                pass
+        log.info("transplant: code via %s — %s", where, code[:2] + "***")
+        fut.set_result(code)
 
     async def _h(event):
         msg = event.message
         _offer(getattr(msg, "text", None) or getattr(msg, "message", None)
-               or "", "update")
+               or "", "update", getattr(msg, "date", None))
 
     client.add_event_handler(_h, _tlev.NewMessage(incoming=True))
 
@@ -6149,7 +6158,8 @@ async def _transplant_read_code(client, timeout: float) -> str | None:
                     log.info("transplant: 777000 history=%s", len(msgs))
                     seen_n = len(msgs)
                 for m in msgs:
-                    _offer(getattr(m, "message", None) or "", "poll")
+                    _offer(getattr(m, "message", None) or "", "poll",
+                           getattr(m, "date", None))
                     if fut.done():
                         break
             except asyncio.CancelledError:
@@ -6222,6 +6232,7 @@ async def _transplant_one(sess: Path) -> bool:
                                  system_version="4.16.30-vxCUSTOM")
             try:
                 await asyncio.wait_for(new.connect(), timeout=15)
+                code_sent_at = time.time()
                 sent = await asyncio.wait_for(new(SendCodeRequest(
                     phone_number=f"+{phone}",
                     api_id=new_api_id,
@@ -6246,7 +6257,8 @@ async def _transplant_one(sess: Path) -> bool:
 
             # 3. читаем код через старую сессию, с прогрессом в лог
             _code_task = asyncio.create_task(
-                _transplant_read_code(old, TRANSPLANT_CODE_WAIT))
+                _transplant_read_code(old, TRANSPLANT_CODE_WAIT,
+                                      code_sent_at))
             _t0 = time.time()
             while not _code_task.done():
                 await asyncio.sleep(20)
