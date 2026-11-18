@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextvars
 import hashlib
 import html as html_mod
@@ -5609,6 +5610,71 @@ def _git_sync(rel_paths: list[str], msg: str, attempts: int = 5) -> bool:
     return False
 
 
+async def _persist_paths(rel_paths: list[str], msg: str) -> bool:
+    """Push the given repo paths through the Contents API. No rebase, no
+    merge conflicts, one honest ok/fail per file. Falls back to _git_sync
+    when the token or repo name is missing (local runs)."""
+    tok = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    repo = os.getenv("GITHUB_REPOSITORY")
+    if not (tok and repo):
+        return _git_sync(rel_paths, msg)
+    headers = {"Authorization": f"Bearer {tok}",
+               "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    base = Path(__file__).parent
+    ok = True
+    timeout = aiohttp.ClientTimeout(total=45)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        for rel in rel_paths:
+            p = base / rel
+            url = f"https://api.github.com/repos/{repo}/contents/{rel}"
+            done = False
+            for attempt in range(3):
+                sha = None
+                try:
+                    async with s.get(url, headers=headers,
+                                     params={"ref": "main"}) as r:
+                        if r.status == 200:
+                            sha = (await r.json(content_type=None)).get("sha")
+                except Exception as e:
+                    log.warning("api get %s: %s", rel, e)
+                try:
+                    if p.exists():
+                        body = {"message": msg, "branch": "main",
+                                "content": base64.b64encode(
+                                    p.read_bytes()).decode("ascii")}
+                        if sha:
+                            body["sha"] = sha
+                        async with s.put(url, headers=headers, json=body) as r:
+                            if r.status in (200, 201):
+                                log.info("api put ok: %s", rel)
+                                done = True
+                                break
+                            log.warning("api put %s -> %s", rel, r.status)
+                    else:
+                        if not sha:
+                            done = True
+                            break
+                        async with s.delete(url, headers=headers,
+                                            json={"message": msg,
+                                                  "sha": sha,
+                                                  "branch": "main"}) as r:
+                            if r.status in (200, 204):
+                                log.info("api delete ok: %s", rel)
+                                done = True
+                                break
+                            log.warning("api delete %s -> %s", rel, r.status)
+                except Exception as e:
+                    log.warning("api persist %s: %s", rel, e)
+                await asyncio.sleep(1.5 * (attempt + 1))
+            if not done:
+                ok = False
+    if ok:
+        return True
+    log.warning("api persist incomplete for %s — git fallback", rel_paths)
+    return _git_sync(rel_paths, msg)
+
+
 def _transplant_file(sess: Path) -> Path:
     """_transplant_list() hands back suffix-less stems (Telethon adds
     .session on connect) — resolve the real file on disk."""
@@ -5618,7 +5684,7 @@ def _transplant_file(sess: Path) -> Path:
     return cand if cand.exists() else sess
 
 
-def _transplant_backup(sess: Path) -> bool:
+async def _transplant_backup(sess: Path) -> bool:
     """Copy the source session into lolz/_keep and push it. Runs before the
     reset, so a job that dies mid-flight cannot take the account with it."""
     src = _transplant_file(sess)
@@ -5630,10 +5696,10 @@ def _transplant_backup(sess: Path) -> bool:
         log.warning("transplant backup copy failed: %s", e)
         return False
     rel = str(dest.relative_to(Path(__file__).parent)).replace("\\", "/")
-    return _git_sync([rel], f"transplant: backup {sess.stem}")
+    return await _persist_paths([rel], f"transplant: backup {sess.stem}")
 
 
-def _transplant_archive_source(sess: Path) -> None:
+async def _transplant_archive_source(sess: Path) -> None:
     """Move a finished/unusable source out of the lolz pick-up folder so the
     worker stops touching it, and persist the move."""
     base = Path(__file__).parent
@@ -5650,7 +5716,7 @@ def _transplant_archive_source(sess: Path) -> None:
         return
     rels = [str(dest.relative_to(base)).replace("\\", "/"),
             str(src.relative_to(base)).replace("\\", "/")]
-    _git_sync(rels, f"transplant: {sess.stem} archived")
+    await _persist_paths(rels, f"transplant: {sess.stem} archived")
 
 
 def _transplant_list() -> list[Path]:
@@ -5711,7 +5777,7 @@ async def _transplant_one(sess: Path) -> bool:
         return False
     if (TRANSPLANT_OUT / f"{name}_new.session").exists():
         log.info("transplant %s: already transplanted — archiving source", name)
-        _transplant_archive_source(sess)
+        await _transplant_archive_source(sess)
         return False
     async with _transplant_sem:
         api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
@@ -5722,7 +5788,7 @@ async def _transplant_one(sess: Path) -> bool:
             if not await old.is_user_authorized():
                 log.warning("transplant %s: not authorized — archiving", name)
                 await old.disconnect()
-                _transplant_archive_source(sess)
+                await _transplant_archive_source(sess)
                 return False
             me = await old.get_me()
             phone = (me.phone or "").lstrip("+")
@@ -5732,7 +5798,7 @@ async def _transplant_one(sess: Path) -> bool:
                 return False
             # 0. backup + verified push BEFORE any destructive step: the
             #    runner disk dies with the job, the repo does not
-            if not _transplant_backup(sess):
+            if not await _transplant_backup(sess):
                 log.warning("transplant %s: backup push failed — abort", name)
                 await old.disconnect()
                 return False
@@ -5746,12 +5812,12 @@ async def _transplant_one(sess: Path) -> bool:
                                  system_version="4.16.30-vxCUSTOM")
             try:
                 await asyncio.wait_for(new.connect(), timeout=15)
-                sent = await new(SendCodeRequest(
+                sent = await asyncio.wait_for(new(SendCodeRequest(
                     phone_number=f"+{phone}",
                     api_id=new_api_id,
                     api_hash=new_api_hash,
                     settings=CodeSettings(),
-                ))
+                )), timeout=60)
                 phone_code_hash = sent.phone_code_hash
                 log.info("transplant %s: code requested | type=%s next=%s "
                          "timeout=%s", name,
@@ -5768,8 +5834,16 @@ async def _transplant_one(sess: Path) -> bool:
                 _transplant_cleanup_partial(new_path)
                 return False
 
-            # 3. читаем код через старую сессию
-            code = await _transplant_read_code(old, TRANSPLANT_CODE_WAIT)
+            # 3. читаем код через старую сессию, с прогрессом в лог
+            _code_task = asyncio.create_task(
+                _transplant_read_code(old, TRANSPLANT_CODE_WAIT))
+            _t0 = time.time()
+            while not _code_task.done():
+                await asyncio.sleep(20)
+                if not _code_task.done():
+                    log.info("transplant %s: waiting for code %ss/%ss", name,
+                             int(time.time() - _t0), TRANSPLANT_CODE_WAIT)
+            code = _code_task.result()
             if not code:
                 log.warning("transplant %s: no code in %ss", name,
                             TRANSPLANT_CODE_WAIT)
@@ -5848,9 +5922,9 @@ async def _transplant_one(sess: Path) -> bool:
 
             # 4d. persist the new session to the repo BEFORE logging the old
             #     one out; a failed push leaves BOTH sessions alive
-            if not _git_sync([f"sessions/{name}_new.session",
-                              f"sessions/{name}_new.json"],
-                             f"transplant: new session {name}_new"):
+            if not await _persist_paths([f"sessions/{name}_new.session",
+                                        f"sessions/{name}_new.json"],
+                                       f"transplant: new session {name}_new"):
                 log.warning("transplant %s: new session push failed — old "
                             "session kept, retry next sweep", name)
                 try:
