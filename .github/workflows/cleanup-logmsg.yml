@@ -1,0 +1,53 @@
+name: cleanup-logmsg
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Delete stray logs-binding message
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+
+          from telethon import TelegramClient
+
+          CHAT = -1003968104917
+          NEEDLES = ("JS взял Logs каналом", "реальные логи всех отправок")
+
+
+          async def main():
+              client = TelegramClient(
+                  "cleanup_logmsg", int(os.environ["API_ID"]),
+                  os.environ["API_HASH"])
+              await client.start(bot_token=os.environ["BOT_TOKEN"])
+              deleted = 0
+              async for msg in client.iter_messages(CHAT, limit=50):
+                  text = msg.message or ""
+                  if any(n in text for n in NEEDLES):
+                      await msg.delete()
+                      deleted += 1
+                      print("deleted", msg.id, flush=True)
+              print("total deleted:", deleted, flush=True)
+              await client.disconnect()
+
+
+          asyncio.run(main())
+          PY

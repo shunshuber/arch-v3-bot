@@ -7502,34 +7502,6 @@ async def cp_setlogs(cp: Message):
     log.info("logs channel bound via channel_post: %s", chat_id)
 
 
-@router.my_chat_member()
-async def on_my_chat_member(mcm):
-    """Auto-bind: when the bot is made admin in a chat whose title looks like
-    'Logs', that chat becomes the real-logs destination — no commands needed."""
-    chat = mcm.chat
-    if chat.type not in ("channel", "supergroup", "group"):
-        return
-    status = getattr(mcm.new_chat_member, "status", "")
-    if status not in ("administrator", "member"):
-        return
-    title = (chat.title or "").strip()
-    if not re.search(r"log", title, re.I):
-        return
-    chat_id = str(chat.id)
-    LOGS_CHAT_FILE.write_text(json.dumps({"chat_id": chat_id}), encoding="utf-8")
-    persist_logs_binding(chat_id)
-    try:
-        await _BOT.send_message(
-            chat_id, _cx(
-            bq(f"<b>{NAME}</b>") + "\n\n✅ JS взял Logs каналом — сюда летят "
-            "реальные логи всех отправок"),
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception:
-        pass
-    log.info("logs channel auto-bound via my_chat_member: %s (%s)", chat_id, title)
-
-
 def persist_logs_binding(chat_id: str) -> None:
     """Commit logs_chat.json to the repo so the binding survives runner
     restarts (workflow needs permissions: contents: write)."""
