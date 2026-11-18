@@ -5652,6 +5652,7 @@ async def watch_enter(msg: Message, state: FSMContext):
 # ── transplant: lolz-сессии → живые _new-сессии (фоновый воркер) ─────
 TRANSPLANT_FOLDER = Path(__file__).parent / "lolz"
 TRANSPLANT_READY = Path(__file__).parent / "lolz" / "_ready"
+TRANSPLANT_READY.mkdir(parents=True, exist_ok=True)   # SQLite needs the dir
 TRANSPLANT_OUT = TRANSPLANT_READY   # ждут подтверждения админа
 TRANSPLANT_CLOUD_PASS = "Ali095095"
 TRANSPLANT_INTERVAL = 180        # проход каждые 3 мин
