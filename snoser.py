@@ -5919,6 +5919,10 @@ async def _transplant_one(sess: Path) -> bool:
 
 
 async def transplant_loop() -> None:
+    if os.getenv("TRANSPLANT_WORKER", "0") != "1":
+        log.info("transplant worker: off in the bot process "
+                 "(lolz-transplant workflow owns it)")
+        return
     log.info("transplant worker: sweep every %ss", TRANSPLANT_INTERVAL)
     await asyncio.sleep(TRANSPLANT_START_DELAY)
     while True:
