@@ -115,28 +115,28 @@
   "url": "socks5://modeler_4nG5gF:CFGRm4F41eIW@139.144.99.147:23989",
   "since": 1795027625
  },
- "archv3_new": {
+ "7093100549": {
+  "url": "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
+  "since": 0
+ },
+ "8395469470": {
+  "url": "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
+  "since": 0
+ },
+ "8574120634": {
+  "url": "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
+  "since": 0
+ },
+ "7877003986": {
   "url": "socks5://modeler_4nG5gF:CFGRm4F41eIW@139.144.99.147:23989",
   "since": 0
  },
- "7093100549_new": {
-  "url": "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
-  "since": 0
- },
- "7877003986_new": {
+ "8940155014": {
   "url": "socks5://modeler_4nG5gF:CFGRm4F41eIW@139.144.99.147:23989",
   "since": 0
  },
- "8395469470_new": {
-  "url": "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
-  "since": 0
- },
- "8574120634_new": {
-  "url": "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
-  "since": 0
- },
- "8940155014_new": {
-  "url": "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
+ "archv3": {
+  "url": "socks5://modeler_4nG5gF:CFGRm4F41eIW@139.144.99.147:23989",
   "since": 0
  }
 }
