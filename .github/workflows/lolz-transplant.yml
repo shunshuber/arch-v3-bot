@@ -20,6 +20,8 @@ jobs:
       API_ID: ${{ secrets.API_ID }}
       API_HASH: ${{ secrets.API_HASH }}
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      ARCH_BOT_TOKEN: ${{ secrets.ARCH_BOT_TOKEN }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4

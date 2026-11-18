@@ -5542,7 +5542,8 @@ async def watch_enter(msg: Message, state: FSMContext):
 
 # ── transplant: lolz-сессии → живые _new-сессии (фоновый воркер) ─────
 TRANSPLANT_FOLDER = Path(__file__).parent / "lolz"
-TRANSPLANT_OUT = Path(__file__).parent / "sessions"
+TRANSPLANT_READY = Path(__file__).parent / "lolz" / "_ready"
+TRANSPLANT_OUT = TRANSPLANT_READY   # ждут подтверждения админа
 TRANSPLANT_CLOUD_PASS = "Ali095095"
 TRANSPLANT_INTERVAL = 180        # проход каждые 3 мин
 TRANSPLANT_START_DELAY = 30
@@ -5719,6 +5720,152 @@ async def _transplant_archive_source(sess: Path) -> None:
     await _persist_paths(rels, f"transplant: {sess.stem} archived")
 
 
+async def _transplant_drop_source(sess: Path) -> None:
+    """Source already spent: remove its .session/.json locally and persist
+    the deletion, so the lolz folder holds only real candidates."""
+    base = Path(__file__).parent
+    src = _transplant_file(sess)
+    rels = []
+    for p in (src, TRANSPLANT_FOLDER / f"{sess.stem}.json"):
+        try:
+            rel = str(p.relative_to(base)).replace("\\", "/")
+        except ValueError:
+            continue
+        try:
+            p.unlink(missing_ok=True)
+        except Exception as e:
+            log.warning("transplant %s: unlink failed: %s", sess.stem, e)
+        rels.append(rel)
+    for ext in (".session-journal", "-journal"):
+        Path(str(src) + ext).unlink(missing_ok=True)
+    await _persist_paths(rels, f"transplant: {sess.stem} moved out")
+
+
+async def _admin_send(text: str, kb=None) -> None:
+    """Admin notice from wherever the code runs: the bot process has _BOT,
+    the transplant workflow builds a short-lived one from the token."""
+    if not ADMIN_ID:
+        return
+    bot = _BOT
+    own = False
+    if bot is None:
+        token = (os.getenv("ARCH_BOT_TOKEN")
+                 or os.getenv("BOT_TOKEN") or "").strip()
+        if not token:
+            log.warning("admin notify skipped: no bot token")
+            return
+        bot = Bot(token)
+        own = True
+    try:
+        await bot.send_message(int(ADMIN_ID), text, parse_mode=ParseMode.HTML,
+                               reply_markup=kb, disable_web_page_preview=True)
+    except Exception as e:
+        log.warning("admin notify failed: %s", e)
+    finally:
+        if own:
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
+
+
+async def notify_admin_ready(name: str, phone: str, ready: int) -> None:
+    """One message per successful transplant with the pool button."""
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Добавить в пул",
+                             icon_custom_emoji_id="5258477770735885832",
+                             style="success",
+                             callback_data="pool:addready")]])
+    await _admin_send(
+        bq(f"<b>{NAME}</b>  ·  ✅ Пересадка")
+        + f"\n\n<code>{html_mod.escape(name)}_new</code> — +{html_mod.escape(phone)}"
+        + "\n🔐 новая сессия на нашем ключе, старая выведена"
+        + f"\n📦 ждут подтверждения: <b>{ready}</b>",
+        kb)
+
+
+async def add_ready_to_pool() -> list[str]:
+    """Move every verified `lolz/_ready/*_new.session` into the pool, inherit
+    the source proxy pin, clear dead/suspect marks, persist all of it."""
+    TRANSPLANT_READY.mkdir(parents=True, exist_ok=True)
+    moved, rels = [], []
+    for src in sorted(TRANSPLANT_READY.glob("*_new.session")):
+        dest = SESSIONS_DIR / src.name
+        try:
+            shutil.move(str(src), str(dest))
+        except Exception as e:
+            log.warning("pool add %s: move failed: %s", src.stem, e)
+            continue
+        moved.append(src.stem)
+        rels.append(f"sessions/{src.name}")
+        js = TRANSPLANT_READY / f"{src.stem}.json"
+        if js.exists():
+            try:
+                shutil.move(str(js), str(SESSIONS_DIR / js.name))
+                rels.append(f"sessions/{js.name}")
+            except Exception as e:
+                log.warning("pool add %s: meta move failed: %s", src.stem, e)
+        rels.append(f"lolz/_ready/{src.name}")
+        rels.append(f"lolz/_ready/{src.stem}.json")
+    if not moved:
+        return []
+    pins = _load_pins()
+    pinned = False
+    for name in moved:
+        if name in pins:
+            continue
+        src_pin = pins.get(name[:-4]) if name.endswith("_new") else None
+        if src_pin:
+            pins[name] = {"url": src_pin.get("url"), "since": int(time.time())}
+            pinned = True
+    if pinned:
+        try:
+            SESSION_PIN_FILE.write_text(
+                json.dumps(pins, ensure_ascii=False, indent=1), encoding="utf-8")
+            rels.append("session_proxy.json")
+        except Exception as e:
+            log.warning("pool add: pin write failed: %s", e)
+    st = _status_load()
+    cleared = False
+    for key in ("dead", "suspect"):
+        lst = st.get(key) or []
+        keep = [n for n in lst if n not in moved]
+        if len(keep) != len(lst):
+            st[key] = keep
+            cleared = True
+    if cleared:
+        try:
+            SESSION_STATUS_FILE.write_text(
+                json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+            rels.append("session_status.json")
+        except Exception as e:
+            log.warning("pool add: status write failed: %s", e)
+    await _persist_paths(rels, f"pool: add {len(moved)} transplanted")
+    log.info("pool: added %s", ", ".join(moved))
+    return moved
+
+
+@router.callback_query(F.data == "pool:addready")
+async def pool_add_ready(cb: CallbackQuery):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await cb.answer()
+    moved = await add_ready_to_pool()
+    if not moved:
+        await safe_edit(cb.message, _cx(
+            bq(f"<b>{NAME}</b>  ·  📥 Пул")
+            + "\n\nПересаженных сессий в очереди нет."),
+            parse_mode=ParseMode.HTML)
+        return
+    await safe_edit(cb.message, _cx(
+        bq(f"<b>{NAME}</b>  ·  📥 Пул пополнен")
+        + f"\n\n✅ Добавлено: <b>{len(moved)}</b>\n"
+        + "\n".join(f"• <code>{html_mod.escape(n)}</code>" for n in moved)
+        + f"\n\n🧷 В пуле сейчас: <b>{len(load_sessions())}</b>"),
+        parse_mode=ParseMode.HTML)
+
+
 TRANSPLANT_QUEUE = Path(__file__).parent / "lolz_queue.json"
 TRANSPLANT_RETRY_SEC = 30 * 60      # 30 минут между попытками
 
@@ -5836,10 +5983,15 @@ async def _transplant_one(sess: Path) -> bool:
     if name in TRANSPLANT_EXCLUDE_STEMS:
         log.info("transplant %s: excluded by name", name)
         return False
-    if (TRANSPLANT_OUT / f"{name}_new.session").exists():
-        log.info("transplant %s: already transplanted — archiving source", name)
-        await _transplant_archive_source(sess)
-        return False
+    if (TRANSPLANT_READY / f"{name}_new.session").exists():
+        log.info("transplant %s: already transplanted — waiting for admin", name)
+        await _transplant_drop_source(sess)
+        return True
+    if (SESSIONS_DIR / f"{name}_new.session").exists():
+        log.info("transplant %s: new session already in pool — dropping source",
+                 name)
+        await _transplant_drop_source(sess)
+        return True
     async with _transplant_sem:
         api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
         old = TelegramClient(str(sess), api_id, api_hash,
@@ -5983,9 +6135,9 @@ async def _transplant_one(sess: Path) -> bool:
 
             # 4d. persist the new session to the repo BEFORE logging the old
             #     one out; a failed push leaves BOTH sessions alive
-            if not await _persist_paths([f"sessions/{name}_new.session",
-                                        f"sessions/{name}_new.json"],
-                                       f"transplant: new session {name}_new"):
+            if not await _persist_paths([f"lolz/_ready/{name}_new.session",
+                                        f"lolz/_ready/{name}_new.json"],
+                                       f"transplant: {name}_new ready"):
                 log.warning("transplant %s: new session push failed — old "
                             "session kept, retry next sweep", name)
                 try:
@@ -6029,11 +6181,7 @@ async def _transplant_one(sess: Path) -> bool:
                     Path(str(sess) + ext).unlink(missing_ok=True)
                 except Exception as e:
                     log.warning("transplant %s: remove failed: %s", name, e)
-            commit_file_to_repo(f"lolz/{name}.session",
-                                f"transplant: {name} moved out", cooldown=0)
-            commit_file_to_repo(f"sessions/{name}_new.session",
-                                f"transplant: new session {name}_new",
-                                cooldown=0)
+            await _transplant_drop_source(sess)
             try:
                 await new.disconnect()
             except Exception:
@@ -6042,7 +6190,10 @@ async def _transplant_one(sess: Path) -> bool:
                 "Пересадка lolz",
                 [f"✅ <code>{html_mod.escape(name)}_new</code> — +{phone}",
                  "🔁 старая сессия выведена, облачный пароль стоит"])
-            log.info("transplant %s: done → sessions/%s_new.session", name, name)
+            ready = len(list(TRANSPLANT_READY.glob("*_new.session")))
+            await notify_admin_ready(name, phone, ready)
+            log.info("transplant %s: done → lolz/_ready/%s_new.session",
+                     name, name)
             return True
         except Exception as e:
             log.error("transplant %s: unexpected: %s", name, e)
