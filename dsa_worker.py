@@ -1,6 +1,7 @@
 """DSA Report worker for Arch V3 — browser form at telegram.org/dsa-report.
 
-Turnstile sitekey supplied by Kanha: 3d29ac4caebf423aace64bcc5730616d.
+Turnstile sitekey comes from the original worker: 0x4AAAAAABCHiDxTcTJ4azUp.
+CapMonster API key lives in the CAPMONSTER_KEY secret.
 Complaint text comes from free_llm (no paid Groq key needed).
 """
 import asyncio
@@ -10,7 +11,7 @@ import random
 import aiohttp
 
 TARGET_URL = "https://telegram.org/dsa-report"
-TURNSTILE_SITEKEY = "3d29ac4caebf423aace64bcc5730616d"
+TURNSTILE_SITEKEY = "0x4AAAAAABCHiDxTcTJ4azUp"
 
 # Arch V3 reason -> radio label on the DSA form
 REASON_SITE = {
