@@ -7,6 +7,7 @@ Complaint text comes from free_llm (no paid Groq key needed).
 import asyncio
 import os
 import random
+from urllib.parse import urlparse
 
 import aiohttp
 
@@ -39,14 +40,40 @@ def _pick(variants):
     return random.choice(variants)
 
 
-async def _solve_turnstile(page_url: str, key: str):
+def _browser_proxy():
+    """Playwright proxy dict from DSA_PROXY_URL (http/socks5 with login:pass)."""
+    raw = os.getenv("DSA_PROXY_URL", "").strip()
+    if not raw:
+        return None, None
+    u = urlparse(raw)
+    if not u.hostname:
+        return None, None
+    scheme = u.scheme or "http"
+    px = {"server": f"{scheme}://{u.hostname}:{u.port or (1080 if scheme == 'socks5' else 80)}"}
+    if u.username:
+        px["username"] = u.username
+    if u.password:
+        px["password"] = u.password
+    cap = {"proxyAddress": u.hostname, "proxyPort": u.port or 80,
+           "proxyType": "HTTP" if scheme == "http" else "SOCKS5"}
+    if u.username:
+        cap["proxyLogin"] = u.username
+    if u.password:
+        cap["proxyPassword"] = u.password
+    return px, cap
+
+
+async def _solve_turnstile(page_url: str, key: str, cap_proxy=None):
+    task = {"type": "TurnstileTask", "websiteURL": page_url,
+            "websiteKey": TURNSTILE_SITEKEY}
+    if cap_proxy:
+        task.update(cap_proxy)
+    else:
+        task["type"] = "TurnstileTaskProxyless"
     async with aiohttp.ClientSession() as s:
         async with s.post(
             "https://api.capmonster.cloud/createTask",
-            json={"clientKey": key, "task": {
-                "type": "TurnstileTaskProxyless",
-                "websiteURL": page_url,
-                "websiteKey": TURNSTILE_SITEKEY}},
+            json={"clientKey": key, "task": task},
             timeout=aiohttp.ClientTimeout(total=30)) as r:
             data = await r.json(content_type=None)
         if data.get("errorId") != 0:
@@ -138,9 +165,11 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox",
                   "--disable-blink-features=AutomationControlled"])
+        px, cap_proxy = _browser_proxy()
         context = await browser.new_context(
             viewport={"width": 1920, "height": 1080},
             locale="en-US",
+            proxy=px,
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
                        "Chrome/131.0.0.0 Safari/537.36")
@@ -150,7 +179,7 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
         try:
             await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
-            token, err = await _solve_turnstile(TARGET_URL, cap_key)
+            token, err = await _solve_turnstile(TARGET_URL, cap_key, cap_proxy)
             if not token:
                 return False, err or "no captcha token"
             await page.evaluate("""
