@@ -2239,8 +2239,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     # REAL log of this send → Logs channel, then mask the user view
     await push_send_log(
         "Report (сессии)",
-        [f"🎯 {html_mod.escape(str(target_entity))}"
-         + (f" #{msg_id}" if msg_id else "")
+        [f"🎯 {report_target_html(target_entity, msg_id)}"
          + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}",
          f"💬 {html_mod.escape((comment or pick_comment(reason_key, method))[:200])}"]
         + real_lines)
@@ -2403,8 +2402,7 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
     sample = (comment or report_texts.get_random_text(reason_key))[:200]
     await push_send_log(
         "Report (канал-метод)",
-        [f"🎯 {html_mod.escape(str(target_entity))}"
-         + (f" #{msg_id}" if msg_id else "")
+        [f"🎯 {report_target_html(target_entity, msg_id)}"
          + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}",
          f"💬 {html_mod.escape(sample)}"]
         + real_lines)
@@ -3343,6 +3341,27 @@ def parse_target(text: str) -> dict:
     if text.startswith("@"):
         return {"raw": text, "entity": text.lstrip("@"), "msg_id": None, "type": "username"}
     return {"raw": text, "entity": text, "msg_id": None, "type": "raw"}
+
+
+def report_target_link(raw, msg_id: int | None = None) -> str:
+    s = str(raw or "").strip()
+    if s.startswith(("http://", "https://")):
+        return s
+    if s.startswith("-100"):
+        base = f"https://t.me/c/{s[4:]}"
+    else:
+        base = f"https://t.me/{s.lstrip('@')}"
+    if msg_id:
+        base += f"/{msg_id}"
+    return base
+
+
+def report_target_html(raw, msg_id: int | None = None, label: str | None = None) -> str:
+    shown = label if label is not None else (
+        str(raw) + (f" #{msg_id}" if msg_id else ""))
+    href = html_mod.escape(report_target_link(raw, msg_id), quote=True)
+    return f'<a href="{href}">{html_mod.escape(shown)}</a>'
+
 
 
 def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
@@ -6453,7 +6472,10 @@ async def transplant_loop() -> None:
 
 
 async def report_gate_block(uid: int, method: str) -> str | None:
-    """Shared launch gate: wash flag, 20min method CD, 400s session rest."""
+    """Shared launch gate: wash flag, 20min method CD, 400s session rest.
+    Admin never waits — no cooldown is written for him either."""
+    if user_is_admin(uid):
+        return None
     if await wash_active_seconds():
         return "Сессии на данный момент обновляются. Подождите 5 минут."
     _cd = await method_cooldown_left(uid, method)
@@ -6858,7 +6880,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             bq(f"<b>{NAME}</b>  \u2014  \u041e\u0442\u043f\u0440\u0430\u0432\u043a\u0430")
             + "\n\n"
             + f"<b>{frame}</b> {act_label}\n\n"
-            + f"\U0001f3af <code>{esc_raw}</code>\n"
+            + f"\U0001f3af {report_target_html(tgt_raw, t.get('msg_id'), tgt_raw)}\n"
             + ("" if is_code else f"\u26a0\ufe0f {r['e']} {r['l']}\n")
             + f"\u23f1 {elapsed}s"
         )
@@ -6923,7 +6945,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         bq(f"<b>{NAME}</b>  \u2014  \u0413\u043e\u0442\u043e\u0432\u043e")
         + "\n\n"
         + head + "\n\n"
-        + f"\U0001f3af <code>{esc_raw}</code>\n"
+        + f"\U0001f3af {report_target_html(tgt_raw, t.get('msg_id'), tgt_raw)}\n"
         + ("" if is_code else f"\u26a0\ufe0f {r['e']} {r['l']}\n")
         + f"\u26a1 \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u043e \u0443\u0441\u043f\u0435\u0448\u043d\u043e\n"
         + f"\U0001f552 {ts}"
@@ -6967,7 +6989,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             bq(f"<b>{NAME}</b>  \u2014  {pool_head}")
             + f"\n\n\U0001f464 <b>\u041e\u0442:</b> {uname} (<code>{uid}</code>)"
             + f"\n{me} <b>\u041c\u0435\u0442\u043e\u0434:</b> {ml}"
-            + f"\n\U0001f3af <b>\u0426\u0435\u043b\u044c:</b> <code>{traw}</code>"
+            + f"\n\U0001f3af <b>\u0426\u0435\u043b\u044c:</b> "
+              + report_target_html(traw, t.get("msg_id"), traw)
             + ("" if is_code else
                f"\n\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> {re_} {rl}"
                + f"\n\U0001f4ac <b>\u041a\u043e\u043c\u043c\u0435\u043d\u0442:</b> {comment_text}")
