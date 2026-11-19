@@ -1,0 +1,33 @@
+name: dsa-relay-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install python-socks
+      - name: Start relay and check web access
+        run: |
+          set -e
+          URL=$(grep -m1 '^socks5://' paid_proxies.txt)
+          echo "upstream host: ${URL##*@}"
+          DSA_PROXY_URL="$URL" python socks_relay.py &
+          sleep 3
+          echo "--- ip via relay"
+          curl -sS --max-time 25 --socks5-hostname 127.0.0.1:1080 \
+            https://ipinfo.io/json || true
+          echo ""
+          echo "--- dsa-report via relay"
+          curl -sSL --max-time 25 --socks5-hostname 127.0.0.1:1080 \
+            -o /dev/null -w "final=%{url_effective} code=%{http_code}\n" \
+            https://telegram.org/dsa-report || true
