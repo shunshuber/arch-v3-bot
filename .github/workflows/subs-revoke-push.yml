@@ -1,0 +1,50 @@
+name: subs-revoke-push
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Push revoked subs doc to Telegram store
+        run: |
+          python - <<'PY'
+          import asyncio
+          import json
+          import os
+          from pathlib import Path
+
+          from aiogram import Bot
+
+          import store
+
+
+          async def go():
+              bot = Bot(os.environ["BOT_TOKEN"])
+              store.init(bot, os.environ["BOT_TOKEN"])
+              if not store.enabled():
+                  print("store disabled — doc not pushed", flush=True)
+                  return
+              text = Path("subs.json").read_text(encoding="utf-8")
+              print("pushing", len(json.loads(text)), "subs", flush=True)
+              await store._push_kind("subs", text)
+              print("store doc updated", flush=True)
+              await bot.session.close()
+
+
+          asyncio.run(go())
+          PY
