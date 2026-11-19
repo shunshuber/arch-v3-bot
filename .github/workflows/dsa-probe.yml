@@ -17,72 +17,47 @@ jobs:
           python-version: "3.11"
       - run: pip install playwright
       - run: python -m playwright install --with-deps chromium
-      - name: Probe DSA URLs
+      - name: Probe DSA form via proxies
         run: |
           python - <<'PY'
           import asyncio
+          from pathlib import Path
           from playwright.async_api import async_playwright
 
-          import os
-          from pathlib import Path
-
-          CANDIDATES = [
-              "https://telegram.org/report-dsa",
-              "https://telegram.org/tos/eu-dsa",
-              "https://telegram.org/dsa-report",
-          ]
-          lines = [l.strip() for l in Path("paid_proxies.txt").read_text(
+          URL = "https://telegram.org/dsa-report"
+          proxies = [l.strip() for l in Path("proxies.txt").read_text(
               encoding="utf-8").splitlines()
-              if l.strip() and not l.startswith("#")]
-          proxies = [{"server": line} for line in lines]
-          print("proxies:", len(proxies), flush=True)
+              if l.strip() and not l.startswith("#")][:15]
 
 
           async def main():
               async with async_playwright() as pw:
                   b = await pw.chromium.launch(args=["--no-sandbox"])
-                  p = None
-                  for px in proxies:
+                  for server in proxies:
+                      p = None
                       try:
-                          cand = await b.new_page(locale="en-US", proxy=px)
-                          await cand.goto("https://telegram.org/",
-                                          wait_until="domcontentloaded",
-                                          timeout=15000)
-                          p = cand
-                          print("working proxy:", px["server"].split("@")[-1],
-                                flush=True)
-                          break
-                      except Exception as e:
-                          print("proxy failed:", px["server"].split("@")[-1],
-                                type(e).__name__, flush=True)
-                  if p is None:
-                      print("no working proxy — direct", flush=True)
-                      p = await b.new_page(locale="en-US")
-                  links = await p.eval_on_selector_all(
-                      "a[href]",
-                      "els => els.map(e => e.href).filter(h => /dsa|report/i.test(h))")
-                  print("HOME DSA LINKS:", links[:20], flush=True)
-                  await p.goto("https://telegram.org/tos/eu-dsa",
-                               wait_until="domcontentloaded", timeout=20000)
-                  guide = await p.eval_on_selector_all(
-                      "a[href]",
-                      "els => els.map(e => [e.textContent.trim(), e.href])"
-                      ".filter(x => !x[1].includes('setln'))")
-                  print("GUIDE LINKS:", guide[:40], flush=True)
-                  body = (await p.locator("body").inner_text())[:1800]
-                  print("GUIDE BODY:", body.replace("\n", " | "), flush=True)
-                  for url in CANDIDATES:
-                      try:
-                          await p.goto(url, wait_until="domcontentloaded", timeout=20000)
-                          await p.wait_for_timeout(1500)
-                          title = await p.title()
-                          body = (await p.locator("body").inner_text())[:250].replace("\n", " ")
+                          p = await b.new_page(locale="en-US",
+                                               proxy={"server": server})
+                          await p.goto(URL, wait_until="domcontentloaded",
+                                       timeout=15000)
+                          await p.wait_for_timeout(1200)
                           start = await p.locator(".js-report-start-btn").count()
                           comment = await p.locator(".cd-comment-input").count()
-                          print(f"URL {url} -> {p.url} | {title} | start={start} "
-                                f"comment={comment} | {body}", flush=True)
+                          print(f"PX {server.split('@')[-1]} -> {p.url} | "
+                                f"start={start} comment={comment} | "
+                                f"{(await p.title())[:60]}", flush=True)
+                          if start or comment:
+                              print("FORM FOUND VIA", server, flush=True)
+                              break
                       except Exception as e:
-                          print(f"URL {url} -> ERR {type(e).__name__}: {e}", flush=True)
+                          print(f"PX {server.split('@')[-1]} ERR "
+                                f"{type(e).__name__}", flush=True)
+                      finally:
+                          if p is not None:
+                              try:
+                                  await p.close()
+                              except Exception:
+                                  pass
                   await b.close()
 
 
