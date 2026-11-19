@@ -92,13 +92,35 @@ async def _click(page, text):
 
 
 async def _fill(page, value):
-    await page.wait_for_selector(".cd-comment-input", timeout=40000)
+    sel = ".cd-comment-input"
+    try:
+        await page.wait_for_selector(sel, timeout=15000)
+    except Exception:
+        for alt in ("textarea", "input[type=text]", "input[placeholder]"):
+            if await page.locator(alt).count():
+                sel = alt
+                break
     await asyncio.sleep(0.3)
-    await page.locator(".cd-comment-input").first.click()
+    await page.locator(sel).first.click()
     for ch in str(value):
         await page.keyboard.type(ch, delay=random.randint(15, 45))
     await asyncio.sleep(0.2)
-    await page.locator(".cd-submit-comment-btn").first.click()
+    btn = page.locator(".cd-submit-comment-btn").first
+    if not await btn.count():
+        btn = page.locator("button:has-text('Submit'), button:has-text('Next')").first
+    await btn.click()
+
+
+async def _dump_pages(context, limit: int = 1200) -> str:
+    out = []
+    for p in context.pages:
+        try:
+            title = await p.title()
+            body = (await p.locator("body").inner_text(timeout=3000))[:500]
+            out.append(f"{p.url} | {title} | {body}")
+        except Exception as e:
+            out.append(f"{p.url} | dump {type(e).__name__}")
+    return " || ".join(out)[:limit]
 
 
 async def run_dsa(target: str, reason_key: str, complaint: str,
@@ -144,38 +166,49 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             """, token)
             await asyncio.sleep(1)
             btn = await page.query_selector(".js-report-start-btn")
-            if btn:
-                try:
-                    async with page.expect_popup(timeout=8000) as pi:
-                        await btn.click()
-                    pop = await pi.value
-                    await pop.wait_for_load_state("domcontentloaded", timeout=10000)
-                    for sel in ("a[href*='unauth=1']", ".login_footer_text a",
-                                "a:has-text('without logging in')"):
-                        try:
-                            el = await pop.wait_for_selector(sel, timeout=3000,
-                                                             state="visible")
-                            if el:
-                                await el.click()
-                                await asyncio.sleep(2)
-                                break
-                        except Exception:
-                            continue
-                except Exception:
+            if not btn:
+                return False, "start button missing; " + await _dump_pages(context)
+            try:
+                async with page.expect_popup(timeout=6000) as pi:
                     await btn.click()
-                    await asyncio.sleep(2)
+                pop = await pi.value
+                await pop.wait_for_load_state("domcontentloaded", timeout=10000)
+                for sel in ("a[href*='unauth=1']", ".login_footer_text a",
+                            "a:has-text('without logging in')",
+                            "a:has-text('Continue without')"):
+                    try:
+                        el = await pop.wait_for_selector(sel, timeout=2500,
+                                                         state="visible")
+                        if el:
+                            await el.click()
+                            await asyncio.sleep(2)
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                # no popup — the form can open in the same tab
+                await btn.click()
+                await asyncio.sleep(2)
 
             found = False
-            for p in page.context.pages:
-                try:
-                    await p.wait_for_selector(".cd-comment-input", timeout=8000)
-                    page = p
-                    found = True
+            for _ in range(25):
+                for p in context.pages:
+                    for sel in (".cd-comment-input", "textarea",
+                                "[placeholder*='link' i]", "[class*='comment']"):
+                        try:
+                            await p.wait_for_selector(sel, timeout=500)
+                            page = p
+                            found = True
+                            break
+                        except Exception:
+                            continue
+                    if found:
+                        break
+                if found:
                     break
-                except Exception:
-                    continue
+                await asyncio.sleep(1)
             if not found:
-                return False, "DSA form not found"
+                return False, "DSA form not found; " + await _dump_pages(context)
 
             for value in (target, reason, complaint or "Please review this content.",
                           target):
