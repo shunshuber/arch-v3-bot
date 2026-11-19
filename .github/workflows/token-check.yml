@@ -1,0 +1,37 @@
+name: token-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      DEV: ${{ secrets.TEST_BOT_TOKEN }}
+      MAIN: ${{ secrets.BOT_TOKEN }}
+    steps:
+      - name: Verify both bots
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          for label in ("DEV", "MAIN"):
+              token = os.environ.get(label, "")
+              if not token:
+                  print(f"{label}: missing", flush=True)
+                  continue
+              url = f"https://api.telegram.org/bot{token}/getMe"
+              try:
+                  with urllib.request.urlopen(url, timeout=15) as r:
+                      data = json.load(r)
+                  me = data.get("result", {})
+                  print(f"{label}: @{me.get('username')} id={me.get('id')}", flush=True)
+              except Exception as e:
+                  print(f"{label}: error {type(e).__name__}: {e}", flush=True)
+          PY
