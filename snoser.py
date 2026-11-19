@@ -65,6 +65,7 @@ from aiohttp_socks import ProxyConnector
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+MAIN_TOKEN = (os.getenv("MAIN_BOT_TOKEN") or "").strip()   # результаты/логи
 API_ID = int(os.getenv("API_ID") or "0")
 API_HASH = os.getenv("API_HASH") or ""
 POOL_CHAT_ID = os.getenv("POOL_CHAT_ID", "")
@@ -909,13 +910,39 @@ def _resolve_logs_chat() -> str | None:
     return None
 
 
+async def send_main(chat_id, text: str, parse_mode=None,
+                    reply_markup=None, disable_web_page_preview: bool = False) -> bool:
+    """Send a result/log from the MAIN bot while the polling bot is a test one."""
+    if not MAIN_TOKEN:
+        return False
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode is not None:
+        payload["parse_mode"] = getattr(parse_mode, "value", parse_mode)
+    if disable_web_page_preview:
+        payload["disable_web_page_preview"] = True
+    if reply_markup is not None:
+        try:
+            payload["reply_markup"] = reply_markup.model_dump(exclude_none=True)
+        except Exception:
+            pass
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                f"https://api.telegram.org/bot{MAIN_TOKEN}/sendMessage",
+                json=payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                return r.status == 200
+    except Exception as e:
+        log.debug("main bot send failed: %s", e)
+        return False
+
+
 async def push_send_log(title: str, lines: list[str]) -> None:
     """REAL internal log of every send action, from every user, to the Logs
     channel (admin is there). Long payloads (mail batches: 200+ rows) are
     split on line borders into several messages — Telegram's 4096-char cap
     would otherwise silently drop the whole log. Never fails the caller."""
     chat = _resolve_logs_chat()
-    if not chat or not _BOT:
+    if not chat:
         return
     head = (bq(f"<b>{NAME}</b>  \u2014  \U0001f4e4 {html_mod.escape(title)}")
             + f"\n\U0001f465 {html_mod.escape(get_current_user())}\n")
@@ -933,8 +960,8 @@ async def push_send_log(title: str, lines: list[str]) -> None:
         chunks.append(cur)
     for i, ch in enumerate(chunks):
         try:
-            await _BOT.send_message(chat, _cx( ch), parse_mode=ParseMode.HTML,
-                                    disable_web_page_preview=True)
+            await send_main(chat, _cx(ch), parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True)
         except Exception as e:
             log.debug("push_send_log chunk %d/%d failed: %s",
                       i + 1, len(chunks), e)
@@ -7103,7 +7130,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             + f"\n\U0001f552 {ts}"
         )
         try:
-            await cb.bot.send_message(int(POOL_CHAT_ID), pool_text, parse_mode=ParseMode.HTML)
+            await send_main(int(POOL_CHAT_ID), pool_text, parse_mode=ParseMode.HTML)
         except Exception as e:
             log.warning("pool send failed: %s", e)
 
