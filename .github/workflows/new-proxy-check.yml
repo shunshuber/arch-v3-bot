@@ -1,0 +1,66 @@
+name: new-proxy-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      RAW: ${{ secrets.DSA_TEST_PROXY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install aiohttp aiohttp-socks
+      - name: Check proxy geo and DSA form
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          import aiohttp
+          from aiohttp_socks import ProxyConnector
+
+          raw = os.environ["RAW"].strip()
+          hostport, creds = raw.split("@")
+          user, pwd = creds.split(":", 1)
+
+
+          async def main():
+              for scheme in ("http", "socks5"):
+                  url = f"{scheme}://{user}:{pwd}@{hostport}"
+                  print("SCHEME", scheme, flush=True)
+                  connector = ProxyConnector.from_url(url)
+                  try:
+                      async with aiohttp.ClientSession(connector=connector) as s:
+                          try:
+                              async with s.get("https://ipinfo.io/json",
+                                      timeout=aiohttp.ClientTimeout(total=15)) as r:
+                                  geo = await r.json(content_type=None)
+                              print("GEO", geo.get("country"), geo.get("city"),
+                                    geo.get("org"), flush=True)
+                          except Exception as e:
+                              print("GEO ERR", type(e).__name__, str(e)[:100],
+                                    flush=True)
+                          try:
+                              async with s.get("https://telegram.org/dsa-report",
+                                      allow_redirects=False,
+                                      timeout=aiohttp.ClientTimeout(total=20)) as r:
+                                  html = await r.text()
+                              print("DSA", "status", r.status,
+                                    "location", r.headers.get("Location"),
+                                    "form", "js-report-start-btn" in html,
+                                    "len", len(html), flush=True)
+                          except Exception as e:
+                              print("DSA ERR", type(e).__name__, str(e)[:120],
+                                    flush=True)
+                  finally:
+                      await connector.close()
+
+
+          asyncio.run(main())
+          PY
