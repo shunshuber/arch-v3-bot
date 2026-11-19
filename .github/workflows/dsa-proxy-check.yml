@@ -1,0 +1,66 @@
+name: dsa-proxy-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install playwright python-socks
+      - run: python -m playwright install --with-deps chromium
+      - name: Check paid proxies for DSA form
+        run: |
+          python - <<'PY'
+          import asyncio
+          from urllib.parse import urlparse
+          from playwright.async_api import async_playwright
+
+          RAW = [
+              "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
+              "socks5://modeler_4nG5gF:CFGRm4F41eIW@139.144.99.147:23989",
+          ]
+
+
+          def proxy_dict(raw):
+              u = urlparse(raw)
+              return {"server": f"socks5://{u.hostname}:{u.port}",
+                      "username": u.username, "password": u.password}
+
+
+          async def main():
+              async with async_playwright() as pw:
+                  b = await pw.chromium.launch(args=["--no-sandbox"])
+                  for raw in RAW:
+                      p = None
+                      try:
+                          p = await b.new_page(locale="en-US",
+                                               proxy=proxy_dict(raw))
+                          await p.goto("https://telegram.org/dsa-report",
+                                       wait_until="domcontentloaded", timeout=20000)
+                          await p.wait_for_timeout(2000)
+                          start = await p.locator(".js-report-start-btn").count()
+                          comment = await p.locator(".cd-comment-input").count()
+                          print("PX", urlparse(raw).hostname, "->", p.url,
+                                "start=", start, "comment=", comment, flush=True)
+                      except Exception as e:
+                          print("PX", urlparse(raw).hostname, "ERR",
+                                type(e).__name__, str(e)[:120], flush=True)
+                      finally:
+                          if p is not None:
+                              try:
+                                  await p.close()
+                              except Exception:
+                                  pass
+                  await b.close()
+
+
+          asyncio.run(main())
+          PY
