@@ -11,9 +11,11 @@ Import and call exactly like the old function:
     from free_llm import generate_complaint_text
 """
 import asyncio
+import math
 import os
 import random
 import re
+import time
 from pathlib import Path
 
 import aiohttp
@@ -21,7 +23,19 @@ import aiohttp
 GEMINI_KEY = os.getenv("GEMINI_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 POLLINATIONS_MODEL = os.getenv("POLLINATIONS_MODEL", "openai-fast").strip()
+POLLINATIONS_INTERVAL = float(os.getenv("POLLINATIONS_INTERVAL", "45"))
 DATA_DIR = Path(__file__).parent / "dsa_data"
+
+_poll_lock = asyncio.Lock()
+_last_poll_ts = 0.0
+
+
+def next_free_delay() -> int:
+    """Seconds the next free (keyless) generation must wait. Feed this into
+    the progress animation so a queued user sees a longer sending progress
+    instead of a silent stall."""
+    left = POLLINATIONS_INTERVAL - (time.monotonic() - _last_poll_ts)
+    return max(0, math.ceil(left))
 
 SYSTEM_PROMPT = (
     "You are a DSA complaint text generator for Telegram's official reporting "
@@ -119,13 +133,26 @@ async def _gemini(system: str, user: str) -> str:
 
 
 async def _pollinations(system: str, user: str) -> str:
+    """Serialize keyless calls: the free API allows one request per 45s/IP.
+    A second user simply keeps the 'sending' progress running a bit longer."""
+    global _last_poll_ts
     url = "https://text.pollinations.ai/openai"
     payload = {"model": POLLINATIONS_MODEL,
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}],
                "temperature": 0.7}
-    async with aiohttp.ClientSession() as s:
-        return await _post_json(s, url, payload, {"Content-Type": "application/json"})
+    async with _poll_lock:
+        wait = POLLINATIONS_INTERVAL - (time.monotonic() - _last_poll_ts)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        out = ""
+        try:
+            async with aiohttp.ClientSession() as s:
+                out = await _post_json(
+                    s, url, payload, {"Content-Type": "application/json"})
+        finally:
+            _last_poll_ts = time.monotonic()
+        return out
 
 
 async def generate_complaint_text(reason: str, sub_reason: str,
