@@ -1,0 +1,53 @@
+name: proxy-web-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install aiohttp aiohttp-socks
+      - name: Direct web via paid proxy
+        run: |
+          python - <<'PY'
+          import asyncio
+          from pathlib import Path
+          import aiohttp
+          from aiohttp_socks import ProxyConnector
+
+          URL = next(l.strip() for l in Path("paid_proxies.txt").read_text(
+              encoding="utf-8").splitlines()
+              if l.strip() and not l.startswith("#"))
+
+
+          async def main():
+              connector = ProxyConnector.from_url(URL)
+              try:
+                  async with aiohttp.ClientSession(connector=connector) as s:
+                      for site in ("https://ipinfo.io/json",
+                                   "https://telegram.org/dsa-report"):
+                          try:
+                              async with s.get(site, timeout=aiohttp.ClientTimeout(
+                                      total=20), allow_redirects=False) as r:
+                                  body = (await r.text())[:200]
+                                  print("SITE", site, "status", r.status,
+                                        "location", r.headers.get("Location"),
+                                        "body", body.replace("\n", " "), flush=True)
+                          except Exception as e:
+                              print("SITE", site, "ERR", type(e).__name__,
+                                    str(e)[:120], flush=True)
+              finally:
+                  await connector.close()
+
+
+          asyncio.run(main())
+          PY
