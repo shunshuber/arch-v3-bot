@@ -5465,6 +5465,18 @@ def _watch_add(uid: int, raw: str) -> tuple[dict | None, str]:
     return item, "ok"
 
 
+def _watch_remove_one(uid: int, raw: str) -> int:
+    d = load_watch()
+    keep = [it for it in d["items"]
+            if not (it.get("uid") == uid
+                    and str(it.get("raw") or "") == str(raw or ""))]
+    removed = len(d["items"]) - len(keep)
+    if removed:
+        d["items"] = keep
+        save_watch(d, force=True)
+    return removed
+
+
 def _watch_remove_all(uid: int) -> int:
     d = load_watch()
     keep = [it for it in d["items"] if it["uid"] != uid]
@@ -6900,8 +6912,27 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                "details": [{"name": "worker", "proxy": "-",
                             "ok": False, "err": f"{type(e).__name__}: {e}"}]}
     res.setdefault("details", [])
-    ok = res["ok"]
-    total = res["total"]
+    ok = int(res.get("ok") or res.get("sent") or 0)
+    total = int(res.get("total") or 1)
+    if ok <= 0:
+        errs = [str(d.get("err") or "") for d in res["details"]
+                if not d.get("ok") and d.get("err")]
+        why = html_mod.escape(
+            (errs[0] if errs else "все сессии отказали, причина не указана")[:400])
+        try:
+            _watch_remove_one(cb.from_user.id, tgt_raw)
+        except Exception:
+            pass
+        await safe_edit(cb.message, _cx(
+            bq(f"<b>{NAME}</b>  —  ❌ Не отправлено")
+            + "\n\n⚠️ <b>Причина:</b> <code>" + why + "</code>"
+            + f"\n\U0001f3af {report_target_html(tgt_raw, t.get('msg_id'), tgt_raw)}"
+            + "\n\nНи одна сессия не прошла — попробуй другой метод "
+              "или повтори позже."),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_main(cb.from_user.id))
+        await state.clear()
+        return
     # ── write log txt ──
     LOGS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
