@@ -27,9 +27,9 @@ jobs:
           from pathlib import Path
 
           CANDIDATES = [
+              "https://telegram.org/report-dsa",
+              "https://telegram.org/tos/eu-dsa",
               "https://telegram.org/dsa-report",
-              "https://telegram.org/dsa",
-              "https://telegram.org/legal/dsa",
           ]
           lines = [l.strip() for l in Path("paid_proxies.txt").read_text(
               encoding="utf-8").splitlines()
@@ -56,9 +56,8 @@ jobs:
                           print("proxy failed:", px["server"].split("@")[-1],
                                 type(e).__name__, flush=True)
                   if p is None:
-                      print("no working proxy", flush=True)
-                      await b.close()
-                      return
+                      print("no working proxy — direct", flush=True)
+                      p = await b.new_page(locale="en-US")
                   links = await p.eval_on_selector_all(
                       "a[href]",
                       "els => els.map(e => e.href).filter(h => /dsa|report/i.test(h))")
