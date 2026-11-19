@@ -1,0 +1,60 @@
+name: dsa-run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      CAPMONSTER_KEY: ${{ secrets.CAPMONSTER_KEY }}
+      DSA_PROXY_URL: ${{ secrets.DSA_PROXY_URL }}
+      MAIN_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+      LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+      - name: Submit DSA complaint
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+
+          import dsa_worker
+          import free_llm
+          import snoser
+
+          TARGET = "https://t.me/znakomstva_vseyaNR/2057794"
+          REASON = "drugs"
+
+
+          async def go():
+              text = await free_llm.generate_complaint_text(
+                  REASON, "", "Distribution and sale of narcotic substances")
+              print("TEXT:", text, flush=True)
+              ok, err = await dsa_worker.run_dsa(
+                  TARGET, REASON, text, os.environ["CAPMONSTER_KEY"])
+              print("RESULT:", ok, err, flush=True)
+              try:
+                  await snoser.push_send_log(
+                      "DSA жалоба",
+                      [f"\U0001f3af <code>{TARGET}</code>",
+                       f"\u26a0\ufe0f причина: распространение и продажа наркотиков",
+                       ("\u2705 отправлено" if ok
+                        else f"\u274c ошибка: {err}")])
+              except Exception as e:
+                  print("log send failed:", type(e).__name__, e, flush=True)
+
+
+          asyncio.run(go())
+          PY
