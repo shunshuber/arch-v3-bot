@@ -5487,10 +5487,69 @@ def _watch_remove_all(uid: int) -> int:
     return removed
 
 
+def _watch_add_sender(uid: int, sender: str, origin: str = "") -> bool:
+    """Silently track the complained message's author. No user-facing entry."""
+    t = parse_target(sender)
+    d = load_watch()
+    for it in d["items"]:
+        if (it.get("uid") == uid and it.get("admin_only")
+                and str(it.get("entity")).lstrip("@").lower()
+                == str(t["entity"]).lstrip("@").lower()):
+            return False
+    d["seq"] = d.get("seq", 0) + 1
+    d["items"].append({
+        "id": d["seq"], "uid": uid, "kind": "entity",
+        "entity": t["entity"], "msg_id": None, "raw": sender,
+        "origin": origin, "status": "alive", "admin_only": True,
+        "until": time.time() + WATCH_DEFAULT_DAYS * 86400})
+    save_watch(d, force=True)
+    return True
+
+
+async def resolve_message_sender(entity, msg_id: int | None) -> str | None:
+    """Resolve the author of a complained message via a pool session."""
+    from telethon.tl.types import Channel as _SenderChannel, User as _SenderUser
+    if not msg_id:
+        return None
+    sessions = [s for s in load_sessions() if not s.stem.startswith(".")]
+    if not sessions:
+        return None
+    for sess in random.sample(sessions, min(4, len(sessions))):
+        client = None
+        try:
+            fp = session_fingerprint(sess.stem)
+            px = pin_for_session(sess.stem, load_pin_proxies())
+            client = TelegramClient(
+                str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                proxy=px, device_model=fp["device"],
+                system_version=fp["system_version"],
+                app_version=fp["app_version"], lang_code=fp["lang_code"])
+            await asyncio.wait_for(client.connect(), timeout=10)
+            m = await asyncio.wait_for(
+                client.get_messages(entity, ids=msg_id), timeout=15)
+            if not m or m.sender_id is None:
+                continue
+            sender = await asyncio.wait_for(
+                client.get_entity(m.sender_id), timeout=15)
+            if isinstance(sender, (_SenderUser, _SenderChannel)):
+                return (f"@{sender.username}" if getattr(sender, "username", None)
+                        else str(sender.id))
+        except Exception as e:
+            log.warning("sender resolve via %s failed: %s", sess.stem, e)
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+    return None
+
+
 def _watch_list(uid: int) -> list[dict]:
     now = time.time()
     return [it for it in load_watch()["items"]
-            if it["uid"] == uid and it.get("until", 0) > now]
+            if it["uid"] == uid and not it.get("admin_only")
+            and it.get("until", 0) > now]
 
 
 async def _watch_probe(kind: str, entity: str, msg_id: int | None,
@@ -5609,6 +5668,13 @@ async def watch_sweep() -> None:
             "Сторож: цель снята",
             [f"🎯 <code>{esc}</code> — {label}",
              f"👤 владелец: <code>{cur['uid']}</code>"])
+        if cur.get("admin_only"):
+            await push_send_log(
+                "Сторож: отправитель удалён",
+                [f"\U0001f3af <code>{esc}</code> — "
+                  "отправитель сообщения удалён",
+                 f"\U0001f4ac сообщение: <code>{html_mod.escape(str(cur.get('origin') or ''))}</code>"])
+            continue
         if _BOT:
             try:
                 await _BOT.send_message(
@@ -6933,6 +6999,13 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             reply_markup=kb_main(cb.from_user.id))
         await state.clear()
         return
+    if data["method"] == "message":
+        try:
+            sender = await resolve_message_sender(t["entity"], t.get("msg_id"))
+            if sender and _watch_add_sender(cb.from_user.id, sender, tgt_raw):
+                log.info("watch: sender %s tracked for %s", sender, tgt_raw)
+        except Exception as e:
+            log.warning("sender watch setup failed: %s", e)
     # ── write log txt ──
     LOGS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
