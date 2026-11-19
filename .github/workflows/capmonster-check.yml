@@ -1,0 +1,35 @@
+name: capmonster-check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      KEY: ${{ secrets.CAPMONSTER_KEY }}
+    steps:
+      - name: Check CapMonster key
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          key = os.environ.get("KEY", "")
+          print("key length:", len(key), "prefix:", key[:4], flush=True)
+          req = urllib.request.Request(
+              "https://api.capmonster.cloud/getBalance",
+              data=json.dumps({"clientKey": key}).encode(),
+              headers={"Content-Type": "application/json"})
+          try:
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  data = json.load(r)
+              print("balance:", json.dumps(data, ensure_ascii=False), flush=True)
+          except Exception as e:
+              print("error:", type(e).__name__, e, flush=True)
+          PY
