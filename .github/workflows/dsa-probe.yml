@@ -34,15 +34,31 @@ jobs:
           lines = [l.strip() for l in Path("paid_proxies.txt").read_text(
               encoding="utf-8").splitlines()
               if l.strip() and not l.startswith("#")]
-          proxy = {"server": lines[0]} if lines else None
-          print("proxy configured:", bool(proxy), flush=True)
+          proxies = [{"server": line} for line in lines]
+          print("proxies:", len(proxies), flush=True)
 
 
           async def main():
               async with async_playwright() as pw:
                   b = await pw.chromium.launch(args=["--no-sandbox"])
-                  p = await b.new_page(locale="en-US", proxy=proxy)
-                  await p.goto("https://telegram.org/", wait_until="domcontentloaded")
+                  p = None
+                  for px in proxies:
+                      try:
+                          cand = await b.new_page(locale="en-US", proxy=px)
+                          await cand.goto("https://telegram.org/",
+                                          wait_until="domcontentloaded",
+                                          timeout=15000)
+                          p = cand
+                          print("working proxy:", px["server"].split("@")[-1],
+                                flush=True)
+                          break
+                      except Exception as e:
+                          print("proxy failed:", px["server"].split("@")[-1],
+                                type(e).__name__, flush=True)
+                  if p is None:
+                      print("no working proxy", flush=True)
+                      await b.close()
+                      return
                   links = await p.eval_on_selector_all(
                       "a[href]",
                       "els => els.map(e => e.href).filter(h => /dsa|report/i.test(h))")
