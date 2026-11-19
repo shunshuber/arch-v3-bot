@@ -726,6 +726,8 @@ METHODS = {
                   "hint": "Цель — аккаунт: @username или t.me/ссылка."},
     "manual":    {"e": "\U0001f6e0", "l": "Ручной",
                   "hint": "Ручное удаление через @eraser_support, предоплата 300 ⭐."},
+    "dsa":       {"e": "\U0001f1e6\U0001f1fa", "l": "DSA (Европа)",
+                  "hint": "Жалоба через официальную форму telegram.org/dsa-report."},
 }
 
 # ручной метод: предоплата звёздами, ценник в USD/RUB
@@ -3418,6 +3420,7 @@ def kb_methods() -> InlineKeyboardMarkup:
         "account":  "Аккаунт",
         "telegraph": "Telegraph",
         "manual":   "Ручной",
+        "dsa":      "DSA",
     }
     short_icons = {
         "web":      "5258423306255604960",
@@ -3434,7 +3437,8 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
         [InlineKeyboardButton(text=short["account"], callback_data="method:account"),
          InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
-        [InlineKeyboardButton(text=short["manual"], callback_data="method:manual")],
+        [InlineKeyboardButton(text=short["manual"], callback_data="method:manual"),
+         InlineKeyboardButton(text=short["dsa"], callback_data="method:dsa")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -6659,6 +6663,19 @@ async def got_target(msg: Message, state: FSMContext):
         await msg.answer(_cx("❌ Нужна ссылка на статью telegra.ph."),
                          parse_mode=ParseMode.HTML)
         return
+    if _m == "dsa":
+        await state.update_data(target=target)
+        d = await state.get_data()
+        from free_llm import generate_complaint_text
+        txt = await generate_complaint_text(
+            REASONS.get(d.get("reason") or "other", REASONS["other"])["l"],
+            "", target.get("raw", ""))
+        await state.update_data(comment=txt)
+        await msg.answer(_cx(summary_text(await state.get_data())),
+                         parse_mode=ParseMode.HTML,
+                         reply_markup=kb_confirm())
+        await state.set_state(Report.confirm)
+        return
     await state.update_data(target=target, comment="")
     # text step: user picks their own complaint text or the auto template pool
     data = await state.get_data()
@@ -6958,6 +6975,22 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                               cb.from_user.id if cb.from_user else 0))
     elif data["method"] == "telegraph":
         report_task = asyncio.create_task(fire_telegraph_snos(tgt_raw, c))
+    elif data["method"] == "dsa":
+        cap = os.getenv("CAPMONSTER_KEY", "").strip()
+        if not cap:
+            report_task = asyncio.sleep(0, result={
+                "ok": 0, "total": 1,
+                "details": [{"name": "dsa", "proxy": "web", "ok": False,
+                             "err": "CAPMONSTER_KEY не задан в секретах"}]})
+        else:
+            async def _dsa():
+                from dsa_worker import run_dsa
+                ok, err = await run_dsa(tgt_raw, data.get("reason") or "other",
+                                        c, cap)
+                return {"ok": int(ok), "total": 1,
+                        "details": [{"name": "dsa", "proxy": "web",
+                                     "ok": bool(ok), "err": err}]}
+            report_task = asyncio.create_task(_dsa())
     elif data["method"] == "account":
         report_task = asyncio.create_task(fire_profile_reports(t["entity"], c))
     else:
