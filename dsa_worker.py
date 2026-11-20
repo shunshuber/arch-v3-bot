@@ -149,6 +149,22 @@ async def _fill(page, value):
     await btn.click()
 
 
+async def _dump_elements(page, limit: int = 1800) -> str:
+    try:
+        items = await page.eval_on_selector_all(
+            "input, button, label, [role='radio'], [class*='radio'], "
+            "[class*='option'], [class*='choice']",
+            """els => els.slice(0,80).map(e => ({
+                tag: e.tagName, id: e.id || '',
+                cls: (e.className||'').toString().slice(0,70),
+                type: e.type || '', val: e.value || '',
+                text: (e.textContent||'').trim().slice(0,50)
+            }))""")
+        return str(items)[:limit]
+    except Exception as e:
+        return f"dump error {type(e).__name__}"
+
+
 async def _dump_pages(context, limit: int = 1200) -> str:
     out = []
     for p in context.pages:
@@ -306,14 +322,18 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             for choice in ("Germany", "Proceed without documentation",
                            "My own behalf"):
                 if not await _click(page, choice):
-                    return False, f"radio not found: {choice}"
+                    return False, (f"radio not found: {choice}; "
+                               "els=" + await _dump_elements(page)
+                               + "; pages=" + await _dump_pages(context))
                 await asyncio.sleep(0.6)
             for value in (fullname, _pick(ADDRESSES), _pick(EMAILS), _pick(PHONES)):
                 await _fill(page, value)
                 await asyncio.sleep(0.6)
             for choice in ("I don't have a court order", "Confirm"):
                 if not await _click(page, choice):
-                    return False, f"radio not found: {choice}"
+                    return False, (f"radio not found: {choice}; "
+                               "els=" + await _dump_elements(page)
+                               + "; pages=" + await _dump_pages(context))
                 await asyncio.sleep(0.6)
             await _fill(page, fullname)
             await asyncio.sleep(2)
