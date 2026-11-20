@@ -725,13 +725,11 @@ METHODS = {
     "account":   {"e": "\U0001f464", "l": "Аккаунт",
                   "hint": "Цель — аккаунт: @username или t.me/ссылка."},
     "manual":    {"e": "\U0001f6e0", "l": "Ручной",
-                  "hint": "Ручное удаление через @eraser_support, предоплата 300 ⭐."},
-    "dsa":       {"e": "\U0001f1e6\U0001f1fa", "l": "DSA (Европа)",
-                  "hint": "Жалоба через официальную форму telegram.org/dsa-report."},
+                  "hint": "Ручное удаление через @eraser_support, предоплата 240 ⭐."},
 }
 
 # ручной метод: предоплата звёздами, ценник в USD/RUB
-MANUAL_STARS = 300
+MANUAL_STARS = 240
 STAR_USD = float(os.getenv("STAR_USD", "0.013"))
 
 
@@ -3420,7 +3418,6 @@ def kb_methods() -> InlineKeyboardMarkup:
         "account":  "Аккаунт",
         "telegraph": "Telegraph",
         "manual":   "Ручной",
-        "dsa":      "DSA",
     }
     short_icons = {
         "web":      "5258423306255604960",
@@ -3437,8 +3434,7 @@ def kb_methods() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
         [InlineKeyboardButton(text=short["account"], callback_data="method:account"),
          InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
-        [InlineKeyboardButton(text=short["manual"], callback_data="method:manual"),
-         InlineKeyboardButton(text=short["dsa"], callback_data="method:dsa")],
+        [InlineKeyboardButton(text=short["manual"], callback_data="method:manual")],
         [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -6663,19 +6659,6 @@ async def got_target(msg: Message, state: FSMContext):
         await msg.answer(_cx("❌ Нужна ссылка на статью telegra.ph."),
                          parse_mode=ParseMode.HTML)
         return
-    if _m == "dsa":
-        await state.update_data(target=target)
-        d = await state.get_data()
-        from free_llm import generate_complaint_text
-        txt = await generate_complaint_text(
-            REASONS.get(d.get("reason") or "other", REASONS["other"])["l"],
-            "", target.get("raw", ""))
-        await state.update_data(comment=txt)
-        await msg.answer(_cx(summary_text(await state.get_data())),
-                         parse_mode=ParseMode.HTML,
-                         reply_markup=kb_confirm())
-        await state.set_state(Report.confirm)
-        return
     await state.update_data(target=target, comment="")
     # text step: user picks their own complaint text or the auto template pool
     data = await state.get_data()
@@ -6975,22 +6958,6 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                               cb.from_user.id if cb.from_user else 0))
     elif data["method"] == "telegraph":
         report_task = asyncio.create_task(fire_telegraph_snos(tgt_raw, c))
-    elif data["method"] == "dsa":
-        cap = os.getenv("CAPMONSTER_KEY", "").strip()
-        if not cap:
-            report_task = asyncio.sleep(0, result={
-                "ok": 0, "total": 1,
-                "details": [{"name": "dsa", "proxy": "web", "ok": False,
-                             "err": "CAPMONSTER_KEY не задан в секретах"}]})
-        else:
-            async def _dsa():
-                from dsa_worker import run_dsa
-                ok, err = await run_dsa(tgt_raw, data.get("reason") or "other",
-                                        c, cap)
-                return {"ok": int(ok), "total": 1,
-                        "details": [{"name": "dsa", "proxy": "web",
-                                     "ok": bool(ok), "err": err}]}
-            report_task = asyncio.create_task(_dsa())
     elif data["method"] == "account":
         report_task = asyncio.create_task(fire_profile_reports(t["entity"], c))
     else:
@@ -7177,10 +7144,10 @@ XROCKET_API = "https://pay.api.xrocket.exchange/api/v1"
 XROCKET_CURRENCY = "USDT"
 
 SUB_PLANS = {
-    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.75},
-    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 3.0},
-    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 9.0},
-    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 18.0},
+    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.6},
+    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.4},
+    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 7.2},
+    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 14.4},
 }
 
 # ── Cloudtips (RU cards / SBP) ───────────────────────────
@@ -7573,7 +7540,7 @@ CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
                    or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
-STARS_PRICES = {"d1": 75, "d7": 225, "d30": 600, "d90": 1200}
+STARS_PRICES = {"d1": 60, "d7": 180, "d30": 480, "d90": 960}
 
 # старые инвойсы «Навсегда» (fore) уже оплачены у части людей в ссылках —
 # они гасятся как 90 дней, чтобы деньги не пропали

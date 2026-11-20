@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
-      BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       MAIN_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       ARCH_BOT_TOKEN: ${{ secrets.ARCH_BOT_TOKEN }}
       ADMIN_ID: ${{ secrets.ADMIN_ID }}
@@ -29,8 +29,6 @@ jobs:
       SUB_CHANNEL_LINK: ${{ secrets.SUB_CHANNEL_LINK }}
       SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
       GROQ_KEY: ${{ secrets.GROQ_KEY }}
-      CAPMONSTER_KEY: ${{ secrets.CAPMONSTER_KEY }}
-      DSA_PROXY_URL: ${{ secrets.DSA_PROXY_URL }}
       CREDS_MULTI: ${{ secrets.CREDENTIALS_LIST }}
       CLOUDTIPS_REFRESH: ${{ secrets.CLOUDTIPS_REFRESH }}
       LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
