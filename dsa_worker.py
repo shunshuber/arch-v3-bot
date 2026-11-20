@@ -443,13 +443,8 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             for value in (fullname, _pick(ADDRESSES), _pick(EMAILS), _pick(PHONES)):
                 await _fill(page, value)
                 await asyncio.sleep(0.6)
-            for choice in ("Confirm",):
-                if not await _click(page, choice):
-                    return False, (f"radio not found: {choice}; "
-                               "visible=" + await _visible_labels(page)
-                               + "; els=" + await _dump_elements(page)
-                               + "; pages=" + await _dump_pages(context))
-                await asyncio.sleep(0.6)
+            # Current form has no separate Confirm radio — the last name
+            # field with its submit button finalizes the report.
             await _fill(page, fullname)
             await asyncio.sleep(2)
             return True, ""
