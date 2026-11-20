@@ -197,9 +197,15 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             btn = await page.query_selector(".js-report-start-btn")
             if not btn:
                 return False, "start button missing; " + await _dump_pages(context)
+            state = await btn.evaluate(
+                "el => ({disabled: el.disabled, cls: el.className, "
+                "text: (el.textContent||'').trim().slice(0,40)})")
+            print("DSA start button:", state, flush=True)
             try:
-                async with page.expect_popup(timeout=6000) as pi:
-                    await btn.click()
+                async with page.expect_popup(timeout=8000) as pi:
+                    # JS click bypasses Playwright actionability checks — the
+                    # widget can leave the button covered/disabled visually.
+                    await btn.evaluate("el => el.click()")
                 pop = await pi.value
                 await pop.wait_for_load_state("domcontentloaded", timeout=10000)
                 for sel in ("a[href*='unauth=1']", ".login_footer_text a",
@@ -209,14 +215,18 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
                         el = await pop.wait_for_selector(sel, timeout=2500,
                                                          state="visible")
                         if el:
-                            await el.click()
+                            await el.evaluate("e => e.click()")
                             await asyncio.sleep(2)
                             break
                     except Exception:
                         continue
-            except Exception:
+            except Exception as e:
                 # no popup — the form can open in the same tab
-                await btn.click()
+                print("DSA popup skipped:", type(e).__name__, flush=True)
+                try:
+                    await btn.evaluate("el => el.click()")
+                except Exception:
+                    pass
                 await asyncio.sleep(2)
 
             found = False
