@@ -213,18 +213,21 @@ async def _fill(page, value):
     if not await btn.count():
         btn = page.locator("button:has-text('Submit'), button:has-text('Next')").first
     try:
-        await btn.click(timeout=12000)
+        await btn.click(timeout=8000)
     except Exception as e:
         try:
-            buttons = await page.eval_on_selector_all(
-                "button",
-                "els => els.slice(0,30).map(e => ({cls:(e.className||'').slice(0,60),"
-                "text:(e.textContent||'').trim().slice(0,40)}))")
+            await btn.evaluate("e => e.click()")
         except Exception:
-            buttons = []
-        raise RuntimeError(
-            f"submit click failed after '{str(value)[:30]}': "
-            f"{type(e).__name__}; buttons={buttons}") from e
+            try:
+                buttons = await page.eval_on_selector_all(
+                    "button",
+                    "els => els.slice(0,30).map(e => ({cls:(e.className||'').slice(0,60),"
+                    "text:(e.textContent||'').trim().slice(0,40)}))")
+            except Exception:
+                buttons = []
+            raise RuntimeError(
+                f"submit click failed after '{str(value)[:30]}': "
+                f"{type(e).__name__}; buttons={buttons}") from e
 
 
 async def _dump_elements(page, limit: int = 5000) -> str:
