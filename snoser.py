@@ -8953,6 +8953,25 @@ async def stale_cb(cb: CallbackQuery, state: FSMContext):
     if d0.startswith("confirm:"):
         await fb_confirm(cb, state)
         return
+    if d0.startswith("reason:"):
+        await state.set_state(Report.reason)
+        await got_reason(cb, state)
+        return
+    if d0 == "skip_comment":
+        await state.set_state(Report.comment)
+        await skip_comment(cb, state)
+        return
+    if d0 in ("cmt:custom", "cmt:auto", "cmt:menu", "cmt:back"):
+        await state.set_state(Report.comment)
+        if d0 == "cmt:custom":
+            await cmt_custom(cb, state)
+        elif d0 == "cmt:auto":
+            await cmt_auto(cb, state)
+        elif d0 == "cmt:menu":
+            await cmt_menu(cb, state)
+        else:
+            await cmt_back(cb, state)
+        return
     # a press on a screen whose flow state is gone: pull the persisted
     # state back live, re-render its screen — dead screens stop dead-ending
     try:
