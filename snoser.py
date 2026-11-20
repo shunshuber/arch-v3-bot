@@ -8937,7 +8937,19 @@ async def _fsm_render_state(cb: CallbackQuery, e: dict) -> None:
 
 
 @router.callback_query()
-async def stale_cb(cb: CallbackQuery):
+async def stale_cb(cb: CallbackQuery, state: FSMContext):
+    # Known flow buttons are routed by data even with a stale/missing state —
+    # they must never fall through into the "expired session" dead end.
+    d0 = cb.data or ""
+    if d0.startswith("tier:"):
+        await fb_tier(cb, state)
+        return
+    if d0.startswith("method:"):
+        await fb_method(cb, state)
+        return
+    if d0.startswith("confirm:"):
+        await fb_confirm(cb, state)
+        return
     # a press on a screen whose flow state is gone: pull the persisted
     # state back live, re-render its screen — dead screens stop dead-ending
     try:
