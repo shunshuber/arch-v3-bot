@@ -217,21 +217,26 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
                     document.querySelectorAll(
                       'input[name="cf-turnstile-response"], input[id*="cf-chl-widget"]'
                     ).forEach(el => el.value = token);
-                    if (window.onTurnstileSuccess) window.onTurnstileSuccess(token);
-                    if (window.turnstileCallback) window.turnstileCallback(token);
                 }
             """, token)
             btn = await page.query_selector(".js-report-start-btn")
             if not btn:
                 return False, "start button missing; " + await _dump_pages(context)
-            # onTurnstileSuccess POSTs /dsa-report/captcha and enables the
-            # button only after the server accepts the token. Wait for that.
+            # onTurnstileSuccess POSTs /dsa-report/captcha. Its own retry uses
+            # setTimeout(onTurnstileSuccess, 200) with NO token, which makes
+            # the server answer "Please reload the page". Re-call it ourselves
+            # with the same token until the button is enabled.
             ready = False
-            for _ in range(40):
-                if not await btn.is_disabled():
-                    ready = True
+            for _ in range(20):
+                await page.evaluate("t => window.onTurnstileSuccess(t)", token)
+                for _ in range(5):
+                    if not await btn.is_disabled():
+                        ready = True
+                        break
+                    await asyncio.sleep(0.4)
+                if ready:
                     break
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
             if not ready:
                 alert = await page.evaluate("() => window.__dsaAlert || ''")
                 return False, ("captcha not accepted; alert="
