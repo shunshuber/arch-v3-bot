@@ -209,6 +209,7 @@ def hero_caption(user_id: int = 0) -> str:
 
 # ── states ──────────────────────────────────────────────
 class Report(StatesGroup):
+    tier = State()
     method = State()
     reason = State()
     target = State()
@@ -727,6 +728,18 @@ METHODS = {
     "manual":    {"e": "\U0001f6e0", "l": "Ручной",
                   "hint": "Ручное удаление через @eraser_support, предоплата 240 ⭐."},
 }
+
+PREMIUM_METHODS = {"web", "mail", "bank", "telegraph"}
+
+
+def has_premium(subs: dict, user_id: int) -> bool:
+    if user_is_admin(user_id):
+        return True
+    rec = subs.get(str(user_id), {})
+    if not rec.get("premium"):
+        return False
+    return bool(rec.get("forever") or float(rec.get("until") or 0) > time.time())
+
 
 # ручной метод: предоплата звёздами, ценник в USD/RUB
 MANUAL_STARS = 240
@@ -3420,38 +3433,50 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def kb_methods() -> InlineKeyboardMarkup:
-    short = {
-        "web":      "Web",
-        "bank":     "Банк",
-        "mail":     "Mail",
-        "bot":      "Bot",
-        "channel":  "Канал",
-        "message":  "Сообщение",
-        "account":  "Аккаунт",
-        "telegraph": "Telegraph",
-        "manual":   "Ручной",
+def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
+    order = ["web", "mail", "bank", "bot", "channel", "message",
+             "account", "telegraph", "manual"]
+    icons = {
+        "web": "5258423306255604960", "mail": "5260268501515377807",
+        "bank": "5258204546391351475", "bot": "5258093637450866522",
+        "channel": "5260325873688518261", "message": "5427181942934088912",
+        "telegraph": "5370546867786523009",
     }
-    short_icons = {
-        "web":      "5258423306255604960",
-        "bank":     "5258204546391351475",
-        "mail":     "5260268501515377807",
-        "bot":      "5258093637450866522",
-    }
-    rows = [
-        [InlineKeyboardButton(text=short["web"], icon_custom_emoji_id=short_icons["web"], callback_data="method:web"),
-         InlineKeyboardButton(text=short["mail"], icon_custom_emoji_id=short_icons["mail"], callback_data="method:mail")],
-        [InlineKeyboardButton(text=short["bank"], icon_custom_emoji_id=short_icons["bank"], callback_data="method:bank"),
-         InlineKeyboardButton(text=short["bot"], icon_custom_emoji_id=short_icons["bot"], callback_data="method:bot")],
-        [InlineKeyboardButton(text=short["channel"], icon_custom_emoji_id="5260325873688518261", callback_data="method:channel"),
-         InlineKeyboardButton(text=short["message"], icon_custom_emoji_id="5427181942934088912", callback_data="method:message")],
-        [InlineKeyboardButton(text=short["account"], callback_data="method:account"),
-         InlineKeyboardButton(text=short["telegraph"], icon_custom_emoji_id="5370546867786523009", callback_data="method:telegraph")],
-        [InlineKeyboardButton(text=short["manual"], callback_data="method:manual")],
-        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
-    ]
+    keys = [k for k in order if (k in PREMIUM_METHODS) == (tier == "premium")]
+    rows, row = [], []
+    for k in keys:
+        btn = InlineKeyboardButton(
+            text=METHODS[k]["l"], callback_data=f"method:{k}")
+        if k in icons:
+            btn = InlineKeyboardButton(
+                text=METHODS[k]["l"], icon_custom_emoji_id=icons[k],
+                callback_data=f"method:{k}")
+        row.append(btn)
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(
+        text="\u041d\u0430\u0437\u0430\u0434",
+        icon_custom_emoji_id="5258132936401624790",
+        callback_data="back:tiers")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+def kb_tiers(premium: bool = False) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(
+        text="\U0001f3c5 \u041e\u0431\u044b\u0447\u043d\u044b\u0435",
+        callback_data="tier:normal")]]
+    if premium:
+        rows.append([InlineKeyboardButton(
+            text="\u2b50 \u041f\u0440\u0435\u043c\u0438\u0443\u043c",
+            callback_data="tier:premium")])
+    rows.append([InlineKeyboardButton(
+        text="\u041d\u0430\u0437\u0430\u0434",
+        icon_custom_emoji_id="5258132936401624790",
+        callback_data="back:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_reasons() -> InlineKeyboardMarkup:
@@ -3723,12 +3748,43 @@ async def menu_launch(cb: CallbackQuery, state: FSMContext):
         return
     await refs_check_and_grant(cb)
     await state.clear()
+    prem = has_premium(load_subs(), cb.from_user.id)
     await cb.message.edit_caption(
-        caption=_cx(bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>"),
+        caption=_cx(bq(f"<b>{NAME}</b>")
+                    + "\n\n\U0001f3af <b>\u041a\u0430\u043a\u0443\u044e \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044e \u043c\u0435\u0442\u043e\u0434\u043e\u0432 \u043e\u0442\u043a\u0440\u044b\u0442\u044c?</b>"),
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_methods(),
+        reply_markup=kb_tiers(prem),
+    )
+    await state.set_state(Report.tier)
+
+
+@router.callback_query(Report.tier, F.data.startswith("tier:"))
+async def got_tier(cb: CallbackQuery, state: FSMContext):
+    tier = cb.data.split(":", 1)[1]
+    if tier == "premium" and not has_premium(load_subs(), cb.from_user.id):
+        await cb.answer("\u2b50 \u041d\u0443\u0436\u043d\u0430 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u041f\u0440\u0435\u043c\u0438\u0443\u043c", show_alert=True)
+        return
+    await state.update_data(tier=tier)
+    await cb.message.edit_caption(
+        caption=_cx(bq(f"<b>{NAME}</b>")
+                    + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_methods(tier),
     )
     await state.set_state(Report.method)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "back:tiers")
+async def back_tiers(cb: CallbackQuery, state: FSMContext):
+    prem = has_premium(load_subs(), cb.from_user.id)
+    await state.set_state(Report.tier)
+    await cb.message.edit_caption(
+        caption=_cx(bq(f"<b>{NAME}</b>")
+                    + "\n\n\U0001f3af <b>\u041a\u0430\u043a\u0443\u044e \u043a\u0430\u0442\u0435\u0433\u043e\u0440\u0438\u044e \u043c\u0435\u0442\u043e\u0434\u043e\u0432 \u043e\u0442\u043a\u0440\u044b\u0442\u044c?</b>"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb_tiers(prem))
+    await cb.answer()
 
 
 @router.callback_query(Report.method, F.data.startswith("method:"))
@@ -3736,6 +3792,13 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
     key = cb.data.split(":", 1)[1]
     if key not in METHODS:
         await cb.answer("\u274c", show_alert=True)
+        return
+    d0 = await state.get_data()
+    if key in PREMIUM_METHODS and d0.get("tier") != "premium":
+        await cb.answer("\u2b50 \u0422\u043e\u043b\u044c\u043a\u043e \u043f\u0440\u0435\u043c\u0438\u0443\u043c", show_alert=True)
+        return
+    if key in PREMIUM_METHODS and not has_premium(load_subs(), cb.from_user.id):
+        await cb.answer("\u2b50 \u041d\u0443\u0436\u043d\u0430 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u041f\u0440\u0435\u043c\u0438\u0443\u043c", show_alert=True)
         return
     _extra = {"method": key}
     if key == "account":
@@ -3817,11 +3880,12 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "back:methods")
 async def back_methods(cb: CallbackQuery, state: FSMContext):
+    tier = (await state.get_data()).get("tier") or "normal"
     await state.set_state(Report.method)
     await cb.message.edit_caption(
         caption=_cx(bq(f"<b>{NAME}</b>") + "\n\n\U0001f3af <b>\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u0435\u0442\u043e\u0434:</b>"),
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_methods(),
+        reply_markup=kb_methods(tier),
     )
     await cb.answer()
 
@@ -7161,6 +7225,7 @@ SUB_PLANS = {
     "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.4},
     "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 7.2},
     "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 14.4},
+    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c (30 \u0434\u043d\u0435\u0439)", "days": 30, "price": 3.0},
 }
 
 # ── Cloudtips (RU cards / SBP) ───────────────────────────
@@ -7566,7 +7631,7 @@ CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
                    or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
-STARS_PRICES = {"d1": 60, "d7": 180, "d30": 480, "d90": 960}
+STARS_PRICES = {"d1": 60, "d7": 180, "d30": 480, "d90": 960, "prem": 200}
 
 # старые инвойсы «Навсегда» (fore) уже оплачены у части людей в ссылках —
 # они гасятся как 90 дней, чтобы деньги не пропали
@@ -8039,6 +8104,13 @@ def sub_quality(subs: dict, user_id: int) -> tuple[str, str]:
     if user_is_admin(user_id):
         return "admin", "\u0431\u0435\u0437 \u043b\u0438\u043c\u0438\u0442\u043e\u0432"
     rec = subs.get(str(user_id), {})
+    if rec.get("premium") and (rec.get("forever")
+                               or float(rec.get("until") or 0) > time.time()):
+        until = rec.get("until") or 0
+        label = ("\u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430"
+                 if rec.get("forever") else
+                 datetime.fromtimestamp(until).strftime("%d.%m.%Y %H:%M"))
+        return "premium", label
     if rec.get("forever"):
         return "forever", "\u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430"
     until = rec.get("until", 0)
@@ -8054,7 +8126,7 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
     """Call inside menu handlers; returns True to continue flow."""
     subs = load_subs()
     s, until = sub_quality(subs, cb.from_user.id)
-    if s in ("admin", "forever", "active"):
+    if s in ("admin", "forever", "active", "premium"):
         return True
     caption = (
         bq(f"<b>{NAME}</b>  —  Оплата")
@@ -8084,6 +8156,8 @@ def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
         log.warning("activate_plan: unknown plan %s — ignored", plan_key)
         return subs.setdefault(str(user_id), {})
     rec = subs.setdefault(str(user_id), {})
+    if plan_key == "prem":
+        rec["premium"] = True
     if pl["days"] is None:
         rec["forever"] = True
     else:
@@ -8616,7 +8690,7 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
     else:
         subs = load_subs()
         s, until = sub_quality(subs, cb.from_user.id)
-        if s in ("admin", "forever", "active"):
+        if s in ("admin", "forever", "active", "premium"):
             await cb.answer(f"\u2705 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u043e\u043a: {until}", show_alert=True)
         else:
             await cb.answer("\u23f3 \u043e\u043f\u043b\u0430\u0442\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430", show_alert=True)
