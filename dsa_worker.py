@@ -165,17 +165,29 @@ async def _click(page, text):
 
 
 async def _fill(page, value):
-    sel = ".cd-comment-input"
-    try:
-        await page.wait_for_selector(sel, timeout=15000)
-    except Exception:
-        for alt in ("textarea", "input[type=text]", "input[placeholder]"):
-            if await page.locator(alt).count():
-                sel = alt
+    target = page.locator(".cd-comment-input").first
+    if not await target.count():
+        for alt in ("textarea", "input[type=text]", "input:not([type=hidden])"):
+            cands = page.locator(alt)
+            for i in range(min(await cands.count(), 20)):
+                cand = cands.nth(i)
+                try:
+                    if await cand.is_visible(timeout=500):
+                        target = cand
+                        break
+                except Exception:
+                    continue
+            if await target.count() and await target.is_visible():
                 break
-    print("DSA fill:", str(value)[:40], "via", sel, flush=True)
+    dump = await page.eval_on_selector_all(
+        "input, textarea",
+        "els => els.slice(0,25).map(e => ({tag:e.tagName,cls:(e.className||'').slice(0,40),"
+        "type:e.type||'',ph:e.placeholder||'',vis:!!(e.offsetWidth||e.offsetHeight)}))")
+    print("DSA fill:", str(value)[:40], "inputs=", dump, flush=True)
+    if not await target.count():
+        raise RuntimeError(f"no input for '{str(value)[:30]}': inputs={dump}")
     await asyncio.sleep(0.3)
-    await page.locator(sel).first.click()
+    await target.click(timeout=10000)
     for ch in str(value):
         await page.keyboard.type(ch, delay=random.randint(15, 45))
     await asyncio.sleep(0.2)
