@@ -443,7 +443,7 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             for value in (fullname, _pick(ADDRESSES), _pick(EMAILS), _pick(PHONES)):
                 await _fill(page, value)
                 await asyncio.sleep(0.6)
-            for choice in ("I don't have a court order", "Confirm"):
+            for choice in ("Confirm",):
                 if not await _click(page, choice):
                     return False, (f"radio not found: {choice}; "
                                "visible=" + await _visible_labels(page)
