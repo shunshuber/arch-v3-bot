@@ -8454,11 +8454,8 @@ async def sub_ct_paid(cb: CallbackQuery, state: FSMContext):
                     show_alert=True)
 
 
-@router.message(Command("stats"))
-async def cmd_stats(msg: Message):
-    """Admin: revenue by method, payers, conversion, active subs."""
-    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
-        return
+def telemetry_text() -> str:
+    """Shared metrics text for /stats and the Telemetry button."""
     recs = load_pay_stats()
     now = time.time()
 
@@ -8488,7 +8485,7 @@ async def cmd_stats(msg: Message):
     users = load_users()
     payers = len({r.get("uid") for r in recs})
     conv = (payers / len(users) * 100) if users else 0
-    text = (bq(f"\U0001f4ca <b>{NAME}</b> \u2014 \u043c\u0435\u0442\u0440\u0438\u043a\u0438")
+    return (bq(f"\U0001f4ca <b>{NAME}</b> \u2014 \u043c\u0435\u0442\u0440\u0438\u043a\u0438")
             + "\n\n<b>24\u0447</b>: " + _fmt(d24)
             + f" (\u043f\u043b\u0430\u0442\u0435\u0436\u0435\u0439 {n24})"
             + "\n<b>7\u0434</b>: " + _fmt(d7)
@@ -8498,7 +8495,32 @@ async def cmd_stats(msg: Message):
             + f"\n\n\U0001f464 \u042e\u0437\u0435\u0440\u043e\u0432: <b>{len(users)}</b>"
             + f" | \u041f\u043b\u0430\u0442\u0438\u043b\u0438: <b>{payers}</b> ({conv:.1f}%)"
             + f" | \u0410\u043a\u0442\u0438\u0432\u043d\u044b\u0445 \u043f\u043e\u0434\u043f\u0438\u0441\u043e\u043a: <b>{active}</b>")
-    await msg.answer(_cx(text), parse_mode=ParseMode.HTML)
+
+
+@router.message(Command("stats"))
+async def cmd_stats(msg: Message):
+    """Admin: revenue by method, payers, conversion, active subs."""
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    await msg.answer(_cx(telemetry_text()), parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data == "menu:telemetry")
+async def menu_telemetry(cb: CallbackQuery):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await cb.answer()
+    try:
+        await cb.message.edit_caption(
+            caption=_cx(telemetry_text()), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="\u041d\u0430\u0437\u0430\u0434",
+                    icon_custom_emoji_id="5258132936401624790",
+                    callback_data="back:home")]]))
+    except Exception as e:
+        log.warning("telemetry render failed: %s", e)
 
 
 @router.callback_query(F.data.startswith("sub:ctok:"))
