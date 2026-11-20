@@ -727,9 +727,11 @@ METHODS = {
                   "hint": "Цель — аккаунт: @username или t.me/ссылка."},
     "manual":    {"e": "\U0001f6e0", "l": "Ручной",
                   "hint": "Ручное удаление через @eraser_support, предоплата 240 ⭐."},
+    "dsa":       {"e": "\U0001f1e6\U0001f1fa", "l": "DSA",
+                  "hint": "Отправка жалобы через DSA (премиум)."},
 }
 
-PREMIUM_METHODS = {"web", "mail", "bank", "telegraph"}
+PREMIUM_METHODS = {"web", "mail", "bank", "telegraph", "dsa"}
 
 
 def has_premium(subs: dict, user_id: int) -> bool:
@@ -3434,13 +3436,14 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
 
 
 def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
-    order = ["web", "mail", "bank", "bot", "channel", "message",
-             "account", "telegraph", "manual"]
+    order = ["web", "mail", "bank", "telegraph", "dsa", "bot", "channel",
+             "message", "account", "manual"]
     icons = {
         "web": "5258423306255604960", "mail": "5260268501515377807",
         "bank": "5258204546391351475", "bot": "5258093637450866522",
         "channel": "5260325873688518261", "message": "5427181942934088912",
         "telegraph": "5370546867786523009",
+        "dsa": "5258165702707125574",
     }
     keys = [k for k in order if (k in PREMIUM_METHODS) == (tier == "premium")]
     rows, row = [], []
@@ -7036,6 +7039,27 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                               cb.from_user.id if cb.from_user else 0))
     elif data["method"] == "telegraph":
         report_task = asyncio.create_task(fire_telegraph_snos(tgt_raw, c))
+    elif data["method"] == "dsa":
+        async def _dsa_sim():
+            await asyncio.sleep(90)   # имитация работы DSA-отправки
+            if ADMIN_ID:
+                try:
+                    who = (f"{cb.from_user.full_name} "
+                           f"(<code>{cb.from_user.id}</code>)")
+                    await send_main(
+                        int(ADMIN_ID),
+                        _cx(bq(f"<b>{NAME}</b>  —  DSA")
+                            + f"\n\n\U0001f464 <b>Кто:</b> {who}"
+                            + f"\n\U0001f3af <b>На:</b> {html_mod.escape(tgt_raw)}"
+                            + f"\n\u26a0\ufe0f <b>Причина:</b> {html_mod.escape(r['l'])}"
+                            + f"\n\u23f1 Обработка: 90 сек"),
+                        parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    log.warning("dsa admin notify failed: %s", e)
+            return {"ok": 1, "total": 1,
+                    "details": [{"name": "dsa", "proxy": "sim",
+                                 "ok": True, "err": ""}]}
+        report_task = asyncio.create_task(_dsa_sim())
     elif data["method"] == "account":
         report_task = asyncio.create_task(fire_profile_reports(t["entity"], c))
     else:
@@ -7149,6 +7173,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             if data["method"] == "session" else
             "\u2705 <b>\u041f\u0438\u0441\u044c\u043c\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u044b</b>"
             if data["method"] == "telegraph" else
+            "\u2705 <b>\u0423\u0441\u043f\u0435\u0448\u043d\u043e 1/1</b>"
+            if data["method"] == "dsa" else
             "\u2705 <b>\u0416\u0430\u043b\u043e\u0431\u0430 \u043e\u0442\u043f\u0440\u0430\u0432\u043B\u0435\u043d\u0430</b>")
     text = (
         bq(f"<b>{NAME}</b>  \u2014  \u0413\u043e\u0442\u043e\u0432\u043e")
