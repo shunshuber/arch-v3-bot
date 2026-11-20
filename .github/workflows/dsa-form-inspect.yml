@@ -1,0 +1,72 @@
+name: dsa-form-inspect
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      RAW: ${{ secrets.DSA_PROXY_URL }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install playwright
+      - run: python -m playwright install --with-deps chromium
+      - name: Inspect DSA form DOM
+        run: |
+          python - <<'PY'
+          import asyncio
+          import os
+          from urllib.parse import urlparse
+          from playwright.async_api import async_playwright
+
+          u = urlparse(os.environ["RAW"])
+          px = {"server": f"{u.scheme}://{u.hostname}:{u.port}",
+                "username": u.username, "password": u.password}
+
+
+          async def dump(p, tag):
+              print("====", tag, p.url, (await p.title())[:80], flush=True)
+              items = await p.eval_on_selector_all(
+                  "input, textarea, button, [contenteditable], [class*='input'], [class*='comment']",
+                  """els => els.slice(0,60).map(e => ({
+                      tag: e.tagName,
+                      id: e.id || '',
+                      cls: (e.className||'').toString().slice(0,80),
+                      ph: e.placeholder || '',
+                      type: e.type || '',
+                      text: (e.textContent||'').trim().slice(0,60),
+                      disabled: !!e.disabled
+                  }))""")
+              for it in items:
+                  print("EL", it, flush=True)
+              body = (await p.locator("body").inner_text())[:1200]
+              print("BODY", body.replace("\n", " | "), flush=True)
+
+
+          async def main():
+              async with async_playwright() as pw:
+                  b = await pw.chromium.launch(args=["--no-sandbox"])
+                  c = await b.new_context(locale="en-US", proxy=px)
+                  p = await c.new_page()
+                  await p.goto("https://telegram.org/dsa-report",
+                               wait_until="domcontentloaded", timeout=25000)
+                  await p.wait_for_timeout(1500)
+                  await dump(p, "BEFORE")
+                  btn = await p.query_selector(".js-report-start-btn")
+                  if btn:
+                      await btn.evaluate("el => el.click()")
+                      await p.wait_for_timeout(4000)
+                  for page in c.pages:
+                      await dump(page, "AFTER")
+                  await b.close()
+
+
+          asyncio.run(main())
+          PY
