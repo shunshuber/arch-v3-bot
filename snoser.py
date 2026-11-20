@@ -3470,7 +3470,8 @@ def kb_tiers(premium: bool = False) -> InlineKeyboardMarkup:
         callback_data="tier:normal")]]
     if premium:
         rows.append([InlineKeyboardButton(
-            text="\u2b50 \u041f\u0440\u0435\u043c\u0438\u0443\u043c",
+            text="\u041f\u0440\u0435\u043c\u0438\u0443\u043c",
+            icon_custom_emoji_id="5258165702707125574",
             callback_data="tier:premium")])
     rows.append([InlineKeyboardButton(
         text="\u041d\u0430\u0437\u0430\u0434",
@@ -7225,7 +7226,7 @@ SUB_PLANS = {
     "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.4},
     "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 7.2},
     "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 14.4},
-    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c (30 \u0434\u043d\u0435\u0439)", "days": 30, "price": 3.0},
+    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 3.0},
 }
 
 # ── Cloudtips (RU cards / SBP) ───────────────────────────
