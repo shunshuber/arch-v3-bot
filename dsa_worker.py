@@ -147,6 +147,11 @@ async def _click(page, text):
         n = await labels.count()
         for i in range(min(n, 80)):
             el = labels.nth(i)
+            try:
+                if not await el.is_visible(timeout=300):
+                    continue
+            except Exception:
+                continue
             raw = await el.inner_text()
             shown = "".join(c for c in raw.lower() if c.isalpha())
             if target and _subseq(target, shown):
@@ -188,6 +193,7 @@ async def _dump_elements(page, limit: int = 5000) -> str:
                 tag: e.tagName, id: e.id || '',
                 cls: (e.className||'').toString().slice(0,70),
                 type: e.type || '', val: e.value || '',
+                vis: !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length),
                 text: (e.textContent||'').trim().slice(0,50)
             }))""")
         return str(items)[:limit]
