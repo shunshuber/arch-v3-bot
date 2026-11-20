@@ -189,14 +189,21 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
                     ).forEach(el => el.value = token);
                     if (window.onTurnstileSuccess) window.onTurnstileSuccess(token);
                     if (window.turnstileCallback) window.turnstileCallback(token);
-                    const b = document.querySelector('.js-report-start-btn');
-                    if (b) { b.removeAttribute('disabled'); b.classList.remove('disabled'); }
                 }
             """, token)
-            await asyncio.sleep(1)
             btn = await page.query_selector(".js-report-start-btn")
             if not btn:
                 return False, "start button missing; " + await _dump_pages(context)
+            # onTurnstileSuccess POSTs /dsa-report/captcha and enables the
+            # button only after the server accepts the token. Wait for that.
+            ready = False
+            for _ in range(40):
+                if not await btn.is_disabled():
+                    ready = True
+                    break
+                await asyncio.sleep(1)
+            if not ready:
+                return False, "captcha not accepted; " + await _dump_pages(context)
             state = await btn.evaluate(
                 "el => ({disabled: el.disabled, cls: el.className, "
                 "text: (el.textContent||'').trim().slice(0,40)})")
