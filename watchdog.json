@@ -1,0 +1,17 @@
+{
+ "seq": 1,
+ "items": [
+  {
+   "id": 1,
+   "uid": 8661362112,
+   "kind": "entity",
+   "entity": "9232476751",
+   "msg_id": null,
+   "raw": "9232476751",
+   "origin": "https://t.me/znakomstva_vseyaNR/2058185",
+   "status": "alive",
+   "admin_only": true,
+   "until": 1795414955.618103
+  }
+ ]
+}
