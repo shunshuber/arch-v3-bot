@@ -63,9 +63,14 @@ def _browser_proxy():
     return px, cap
 
 
-async def _solve_turnstile(page_url: str, key: str, cap_proxy=None):
+async def _solve_turnstile(page_url: str, key: str, cap_proxy=None,
+                           action=None, cdata=None):
     task = {"type": "TurnstileTask", "websiteURL": page_url,
             "websiteKey": TURNSTILE_SITEKEY}
+    if action:
+        task["action"] = action
+    if cdata:
+        task["cdata"] = cdata
     if cap_proxy:
         task.update(cap_proxy)
     else:
@@ -179,7 +184,12 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
         try:
             await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
-            token, err = await _solve_turnstile(TARGET_URL, cap_key, cap_proxy)
+            widget = await page.query_selector("[data-sitekey]")
+            action = await widget.get_attribute("data-action") if widget else None
+            cdata = await widget.get_attribute("data-cdata") if widget else None
+            print("DSA turnstile action/cdata:", action, cdata, flush=True)
+            token, err = await _solve_turnstile(
+                TARGET_URL, cap_key, cap_proxy, action, cdata)
             if not token:
                 return False, err or "no captcha token"
             await page.evaluate("""
