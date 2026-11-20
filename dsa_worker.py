@@ -173,6 +173,7 @@ async def _fill(page, value):
             if await page.locator(alt).count():
                 sel = alt
                 break
+    print("DSA fill:", str(value)[:40], "via", sel, flush=True)
     await asyncio.sleep(0.3)
     await page.locator(sel).first.click()
     for ch in str(value):
@@ -181,7 +182,19 @@ async def _fill(page, value):
     btn = page.locator(".cd-submit-comment-btn").first
     if not await btn.count():
         btn = page.locator("button:has-text('Submit'), button:has-text('Next')").first
-    await btn.click()
+    try:
+        await btn.click(timeout=12000)
+    except Exception as e:
+        try:
+            buttons = await page.eval_on_selector_all(
+                "button",
+                "els => els.slice(0,30).map(e => ({cls:(e.className||'').slice(0,60),"
+                "text:(e.textContent||'').trim().slice(0,40)}))")
+        except Exception:
+            buttons = []
+        raise RuntimeError(
+            f"submit click failed after '{str(value)[:30]}': "
+            f"{type(e).__name__}; buttons={buttons}") from e
 
 
 async def _dump_elements(page, limit: int = 5000) -> str:
