@@ -804,6 +804,19 @@ def load_sessions() -> list[Path]:
 _SESSION_LOCKS: dict[str, asyncio.Lock] = {}
 
 
+async def _connect_safe(client, timeout: float = 12) -> None:
+    """Telethon sessions can be briefly locked by another process/runner."""
+    last = None
+    for attempt in range(3):
+        try:
+            await asyncio.wait_for(client.connect(), timeout=timeout)
+            return
+        except Exception as e:
+            last = e
+            await asyncio.sleep(1.0 + attempt)
+    raise last
+
+
 def _session_lock(session_path: Path) -> asyncio.Lock:
     return _SESSION_LOCKS.setdefault(session_path.stem, asyncio.Lock())
 
@@ -1596,7 +1609,7 @@ async def _snos_victim_info(username: str, sessions: list,
                     app_version=fp["app_version"],
                     lang_code=fp["lang_code"])
                 try:
-                    await asyncio.wait_for(client.connect(), timeout=12)
+                    await _connect_safe(client)
                     if not await client.is_user_authorized():
                         continue
                     entity = await client.get_entity(username)
@@ -1635,7 +1648,7 @@ async def _snos_sendcode_flood(phone: str, sessions: list,
                     app_version=fp["app_version"],
                     lang_code=fp["lang_code"])
                 try:
-                    await asyncio.wait_for(client.connect(), timeout=12)
+                    await _connect_safe(client)
                     if not await client.is_user_authorized():
                         return name, "invalid"
                     await client(SendCodeRequest(
@@ -2194,7 +2207,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                                         system_version=fp["system_version"],
                                         app_version=fp["app_version"],
                                         lang_code=fp["lang_code"])
-                await asyncio.wait_for(client.connect(), timeout=12)
+                await _connect_safe(client)
                 if not await client.is_user_authorized():
                     await client.disconnect()
                     _session_punish(name, "not authorized", "dead")
@@ -2357,7 +2370,7 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
                                         system_version=fp["system_version"],
                                         app_version=fp["app_version"],
                                         lang_code=fp["lang_code"])
-                await asyncio.wait_for(client.connect(), timeout=12)
+                await _connect_safe(client)
                 if not await client.is_user_authorized():
                     await client.disconnect()
                     _session_punish(name, "not authorized", "dead")
@@ -7182,6 +7195,7 @@ CT_OIDC = "https://identity.cloudtips.ru/connect/token"
 CT_API = "https://api.cloudtips.ru/api"
 CT_SESSION_FILE = Path(__file__).parent / "ct_session.json"
 _ct_tok = {"access": "", "exp": 0.0}
+_ct_refresh_broken = False   # invalid_grant = no point retrying every 45s
 _last_balance: float | None = None
 
 
@@ -7199,6 +7213,9 @@ def save_ct_session(d: dict) -> None:
 
 async def ct_refresh_access() -> str | None:
     """Receiver token via OIDC refresh grant — no captcha involved."""
+    global _ct_refresh_broken
+    if _ct_refresh_broken:
+        return None
     sess = load_ct_session()
     rt = sess.get("refresh") or os.getenv("CLOUDTIPS_REFRESH", "").strip()
     if not rt:
@@ -7220,8 +7237,13 @@ async def ct_refresh_access() -> str | None:
                 _ct_tok.update(access=j["access_token"],
                                exp=time.time() + 2400)
                 return j["access_token"]
-            log.error("cloudtips refresh failed: %s %s", r.status,
-                      str(j)[:200])
+            if str(j.get("error") or "") == "invalid_grant":
+                _ct_refresh_broken = True
+                log.warning("cloudtips refresh token invalid — disabled "
+                            "until CLOUDTIPS_REFRESH is replaced")
+            else:
+                log.error("cloudtips refresh failed: %s %s", r.status,
+                          str(j)[:200])
     return None
 
 
@@ -7293,6 +7315,7 @@ _SBP_HDRS = {
                    "Chrome/124.0.0.0 Mobile Safari/537.36"),
 }
 _SBP_DEAD = {"fail", "failed", "expired", "canceled", "cancelled"}
+_sbp_err_logged = 0   # don't spam logs on every failed status poll
 
 
 async def ct_sbp_create(amount: float):
@@ -7346,7 +7369,10 @@ async def ct_sbp_status(sid: str) -> str:
                     return "success"
                 return "wait"
     except Exception as e:
-        log.error("ct sbp status: %s", e)
+        global _sbp_err_logged
+        if _sbp_err_logged < 3:
+            _sbp_err_logged += 1
+            log.warning("ct sbp status: %s %s", type(e).__name__, str(e)[:120])
     return "wait"
 
 
@@ -7717,22 +7743,33 @@ def commit_file_to_repo(rel_path: str, msg: str, cooldown: float = 0) -> None:
                     cwd=base, timeout=60, check=False, capture_output=True)
                 if r.returncode != 0:
                     return   # nothing to commit — file unchanged
-                # rebase+push retry loop: the Content-API (db_index.json)
-                # lands commits between our rebase and push — one rebase
-                # loses that race, 4 spaced attempts ride out a burst
-                for attempt in range(4):
-                    subprocess.run(
+                # Concurrent Contents-API writers keep moving main. Rebase,
+                # recover from a failed rebase, then push to an explicit ref.
+                for attempt in range(8):
+                    pull = subprocess.run(
                         ["git", "pull", "--rebase", "origin", "main"],
                         cwd=base, timeout=90, check=False,
                         capture_output=True)
-                    p = subprocess.run(["git", "push"], cwd=base,
-                                       timeout=60, check=False,
+                    if pull.returncode != 0:
+                        subprocess.run(["git", "rebase", "--abort"], cwd=base,
+                                       timeout=30, check=False,
                                        capture_output=True)
+                        subprocess.run(["git", "add", "--", rel_path], cwd=base,
+                                       timeout=30, check=False,
+                                       capture_output=True)
+                        subprocess.run(
+                            ["git", "-c", "user.name=arch-bot",
+                             "-c", "user.email=arch@users.noreply.github.com",
+                             "commit", "-m", msg], cwd=base, timeout=60,
+                            check=False, capture_output=True)
+                    p = subprocess.run(
+                        ["git", "push", "origin", "HEAD:main"], cwd=base,
+                        timeout=60, check=False, capture_output=True)
                     if p.returncode == 0:
                         log.info("committed %s to repo", rel_path)
                         return
                     time.sleep(1.5 * (attempt + 1))
-                log.warning("commit %s: push rejected after rebase x4",
+                log.warning("commit %s: push rejected after rebase x8",
                             rel_path)
             except Exception as e:
                 log.warning("commit %s failed: %s", rel_path, e)
@@ -9422,7 +9459,7 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
                 device_model=fp["device"], system_version=fp["system_version"],
                 app_version=fp["app_version"], lang_code=fp["lang_code"])
             try:
-                await asyncio.wait_for(client.connect(), timeout=12)
+                await _connect_safe(client)
                 if not await client.is_user_authorized():
                     raise RuntimeError("scout not authorized")
                 other, misc = await _profile_options(client, target)
@@ -9451,7 +9488,7 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
                     system_version=fp["system_version"],
                     app_version=fp["app_version"], lang_code=fp["lang_code"])
                 try:
-                    await asyncio.wait_for(client.connect(), timeout=12)
+                    await _connect_safe(client)
                     if not await client.is_user_authorized():
                         return name, px, False, "not authorized"
                     entity = await client.get_entity(target)
@@ -9583,10 +9620,11 @@ async def main():
                         ).get("entries")
                 except Exception:
                     _need = True
+                _txt = ""
                 if _need:
                     _fid = (store._INDEX.get("fsm") or {}).get("file_id")
                     if _fid:
-                        _txt = await store._tg_read("fsm", _fid)
+                        _txt = await store._tg_read("fsm", _fid) or ""
                 if _txt:
                             FSM_FILE.write_text(_txt, encoding="utf-8")
                             commit_file_to_repo("fsm_state.json",
