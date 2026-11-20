@@ -177,7 +177,9 @@ async def _fill(page, value):
                     break
             except Exception:
                 pass
-        for alt in ("textarea", "input[type=text]", "input:not([type=hidden])"):
+        for alt in (".cd-comment-input", "textarea",
+                    "[contenteditable='true']", "[class*='comment']",
+                    "input[type=text]", "input:not([type=hidden])"):
             cands = page.locator(alt)
             for i in range(min(await cands.count(), 20)):
                 cand = cands.nth(i)
@@ -199,7 +201,11 @@ async def _fill(page, value):
     if not await target.count():
         raise RuntimeError(f"no input for '{str(value)[:30]}': inputs={dump}")
     await asyncio.sleep(0.3)
-    await target.click(timeout=10000)
+    try:
+        await target.click(timeout=6000)
+    except Exception:
+        # overlay / interceptor — click through JS, like the start button
+        await target.evaluate("e => e.click()")
     for ch in str(value):
         await page.keyboard.type(ch, delay=random.randint(15, 45))
     await asyncio.sleep(0.2)
