@@ -150,6 +150,8 @@ async def _click(page, text):
             raw = await el.inner_text()
             shown = "".join(c for c in raw.lower() if c.isalpha())
             if target and _subseq(target, shown):
+                print("DSA radio matched:", repr(text), "->",
+                      repr(raw[:60]), flush=True)
                 await el.evaluate("e => e.click()")
                 return True
     except Exception:
@@ -177,7 +179,7 @@ async def _fill(page, value):
     await btn.click()
 
 
-async def _dump_elements(page, limit: int = 1800) -> str:
+async def _dump_elements(page, limit: int = 5000) -> str:
     try:
         items = await page.eval_on_selector_all(
             "input, button, label, [role='radio'], [class*='radio'], "
