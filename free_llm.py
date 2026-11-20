@@ -176,23 +176,32 @@ async def generate_complaint_text(reason: str, sub_reason: str,
 
 
 VARIANTS_PROMPT = (
-    "You write Telegram DSA complaints. Output EXACTLY 8 numbered lines, "
-    "1 to 8, one complaint per line. Each must be under 200 characters, "
-    "in English, unique in wording, direct, reference the specific content "
-    "of the reported message, never include @usernames or links. "
-    "No intro, no explanation — only the 8 lines."
+    "Ты пишешь жалобы для модерации Telegram в стиле примера ниже. "
+    "Сгенерируй РОВНО 8 пронумерованных строк (1-8), по одной жалобе на строку. "
+    "Каждая жалоба — развёрнутый абзац 250-450 символов на русском языке: "
+    "конкретно описывай нарушение из Message text/Description, объясняй, "
+    "какой вред оно наносит,ссылайся на нарушение правил и проси модерацию "
+    "проверить и принять меры вплоть до блокировки. Не используй шаблонные "
+    "обороты, каждая жалоба должна звучать по-разному. Без @username и ссылок. "
+    "Только 8 строк, без пояснений.\n\n"
+    "ПРИМЕР СТИЛЯ:\n"
+    "Бот предоставляет данные людей без их согласия. Через него можно получить "
+    "конфиденциальную информацию включая номера телефонов и другие частные "
+    "сведения. Такие действия нарушают право на приватность и могут использоваться "
+    "для доксинга и преследования. Прошу проверить этого бота и принять меры "
+    "включая его блокировку!"
 )
 
 
 _VARIANT_ANGLES = (
-    "The reported message states",
-    "This content advertises",
-    "A detailed review of the post shows",
-    "Users are being directed to",
-    "The publication contains explicit details about",
-    "Evidence in the reported message indicates",
-    "This post facilitates",
-    "Please assess the material describing",
+    "В указанном сообщении прямо содержится",
+    "Материал намеренно предлагает",
+    "Публикация содержит признаки",
+    "Из текста следует, что",
+    "Такое поведение создаёт риск",
+    "Анализ сообщения показывает",
+    "Пользователи подталкиваются к",
+    "Прошу обратить внимание на то, что",
 )
 
 
@@ -202,14 +211,19 @@ def _parse_variants(raw: str, reason: str, sub_reason: str,
     for line in (raw or "").splitlines():
         line = re.sub(r"^\s*\d+[\.\)]\s*", "", line).strip()
         line = _clean(line)
-        if len(line) >= 25 and line not in out:
-            out.append(line[:200])
-    snippet = (message_text or reason).strip()[:70]
+        if len(line) >= 60 and line not in out:
+            out.append(line[:450])
+    snippet = (message_text or reason).strip()[:160]
     i = 0
     while len(out) < count:
         angle = _VARIANT_ANGLES[i % len(_VARIANT_ANGLES)]
-        text = (f"{angle}: {snippet}. Reported reason: {reason}. "
-                f"Please review and take action.")[:200]
+        text = (
+            f"{angle}: {snippet}. Категория нарушения: {reason}. "
+            "Подобные действия нарушают правила Telegram и могут нанести "
+            "вред другим пользователям, включая незаконное распространение "
+            "сведений и вовлечение в опасные схемы. Прошу модерацию тщательно "
+            "проверить данный материал, принять меры вплоть до блокировки "
+            "аккаунта и предотвратить дальнейшее распространение.")[:450]
         if text not in out:
             out.append(text)
         i += 1
@@ -220,13 +234,15 @@ async def generate_complaint_variants(reason: str, sub_reason: str,
                                       message_text: str = "",
                                       count: int = 8) -> list[str]:
     """Premium: 8 unique AI texts tailored to reason + reported message."""
-    user = f"Report reason: {reason}\nSub-reason: {sub_reason or 'none'}"
+    user = f"Description: {reason}"
+    if sub_reason:
+        user += f"\nDetails: {sub_reason}"
     if message_text:
-        user += f"\nReported message content: {message_text[:600]}"
-    user += f"\nProduce {count} unique variants."
+        user += f"\nMessage text: {message_text[:600]}"
+    user += f"\nСгенерируй {count} жалоб."
     for call in (_gemini, _pollinations):
         try:
-            raw = await call(VARIANTS_PROMPT, user, max_tokens=1400)
+            raw = await call(VARIANTS_PROMPT, user, max_tokens=3000)
             variants = _parse_variants(raw, reason, sub_reason,
                                        message_text, count)
             if variants:
