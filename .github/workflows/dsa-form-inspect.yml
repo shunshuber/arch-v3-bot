@@ -58,6 +58,14 @@ jobs:
                   await p.goto("https://telegram.org/dsa-report",
                                wait_until="domcontentloaded", timeout=25000)
                   await p.wait_for_timeout(1500)
+                  widget = await p.eval_on_selector_all(
+                      "[data-sitekey], .cf-turnstile",
+                      "els => els.map(e => e.outerHTML.slice(0,500))")
+                  print("WIDGET", widget, flush=True)
+                  js = await p.evaluate(
+                      "() => ({turnstile: typeof window.turnstile, "
+                      "cbs: Object.keys(window).filter(k => /turnstile|callback/i.test(k)).slice(0,20)})")
+                  print("JS", js, flush=True)
                   await dump(p, "BEFORE")
                   btn = await p.query_selector(".js-report-start-btn")
                   if btn:
