@@ -312,7 +312,17 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
 
         page.on("response", lambda r: asyncio.ensure_future(_grab_captcha(r)))
         try:
-            await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
+            for attempt in range(3):
+                try:
+                    await page.goto(TARGET_URL, wait_until="domcontentloaded",
+                                    timeout=30000)
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        raise
+                    print("DSA goto retry", attempt + 1, type(e).__name__,
+                          flush=True)
+                    await asyncio.sleep(3)
             await asyncio.sleep(2)
             widget = await page.query_selector("[data-sitekey]")
             action = await widget.get_attribute("data-action") if widget else None
