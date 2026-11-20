@@ -181,6 +181,18 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
         await context.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
         page = await context.new_page()
+        cap_responses = []
+
+        async def _grab_captcha(resp):
+            if "/captcha" not in resp.url:
+                return
+            try:
+                body = (await resp.text())[:300]
+            except Exception:
+                body = ""
+            cap_responses.append((resp.status, body))
+
+        page.on("response", lambda r: asyncio.ensure_future(_grab_captcha(r)))
         try:
             await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=30000)
             await asyncio.sleep(2)
@@ -192,6 +204,14 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
                 TARGET_URL, cap_key, cap_proxy, action, cdata)
             if not token:
                 return False, err or "no captcha token"
+            await page.evaluate("""
+                () => {
+                    window.__dsaAlert = '';
+                    if (typeof window.showAlert === 'function') {
+                        window.showAlert = m => { window.__dsaAlert = String(m); };
+                    }
+                }
+            """)
             await page.evaluate("""
                 (token) => {
                     document.querySelectorAll(
@@ -213,7 +233,11 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
                     break
                 await asyncio.sleep(1)
             if not ready:
-                return False, "captcha not accepted; " + await _dump_pages(context)
+                alert = await page.evaluate("() => window.__dsaAlert || ''")
+                return False, ("captcha not accepted; alert="
+                               + str(alert)[:200] + " responses="
+                               + str(cap_responses)[:400]
+                               + "; " + await _dump_pages(context))
             state = await btn.evaluate(
                 "el => ({disabled: el.disabled, cls: el.className, "
                 "text: (el.textContent||'').trim().slice(0,40)})")
