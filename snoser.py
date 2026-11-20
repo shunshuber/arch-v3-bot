@@ -953,15 +953,33 @@ async def send_main(chat_id, text: str, parse_mode=None,
             payload["reply_markup"] = reply_markup.model_dump(exclude_none=True)
         except Exception:
             pass
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(
-                f"https://api.telegram.org/bot{MAIN_TOKEN}/sendMessage",
-                json=payload, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                return r.status == 200
-    except Exception as e:
-        log.debug("main bot send failed: %s", e)
-        return False
+    for attempt in range(4):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    f"https://api.telegram.org/bot{MAIN_TOKEN}/sendMessage",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    if r.status == 200:
+                        return True
+                    wait = 0
+                    if r.status == 429:
+                        try:
+                            wait = int(r.headers.get("Retry-After") or 2)
+                        except Exception:
+                            wait = 2
+                    elif r.status >= 500:
+                        wait = 2 * (attempt + 1)
+                    else:
+                        body = (await r.text())[:160]
+                        log.warning("main bot send %s: %s", r.status, body)
+                        return False
+            if wait:
+                await asyncio.sleep(min(wait, 30))
+        except Exception as e:
+            log.debug("main bot send failed: %s", e)
+            await asyncio.sleep(1 + attempt)
+    return False
 
 
 async def push_send_log(title: str, lines: list[str]) -> None:
@@ -987,12 +1005,24 @@ async def push_send_log(title: str, lines: list[str]) -> None:
     if cur:
         chunks.append(cur)
     for i, ch in enumerate(chunks):
+        ok = False
         try:
-            await send_main(chat, _cx(ch), parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True)
+            ok = await send_main(chat, _cx(ch), parse_mode=ParseMode.HTML,
+                                 disable_web_page_preview=True)
         except Exception as e:
             log.debug("push_send_log chunk %d/%d failed: %s",
                       i + 1, len(chunks), e)
+        if not ok and _BOT is not None:
+            try:
+                await _BOT.send_message(
+                    chat, _cx(ch), parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True)
+                ok = True
+            except Exception as e:
+                log.debug("push_send_log fallback failed: %s", e)
+        if not ok:
+            log.warning("push_send_log chunk %d/%d NOT DELIVERED to %s",
+                        i + 1, len(chunks), chat)
         if len(chunks) > 1:
             await asyncio.sleep(0.4)
 
