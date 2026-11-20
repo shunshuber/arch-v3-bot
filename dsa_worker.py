@@ -385,8 +385,9 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             await asyncio.sleep(0.8)
             await _fill(page, target)
             await asyncio.sleep(0.8)
-            for choice in ("Germany", "I don't have links to relevant laws",
-                           "My own behalf"):
+            # "My own behalf" step was removed on the current form —
+            # only country and documentation radio remain here.
+            for choice in ("Germany", "I don't have links to relevant laws"):
                 if not await _click(page, choice):
                     return False, (f"radio not found: {choice}; "
                                "visible=" + await _visible_labels(page)
