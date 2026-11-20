@@ -32,6 +32,16 @@ REASON_SITE = {
     "other": "Other",
 }
 
+# default subcategory when the form splits a reason into radio subgroups
+SUB_FOR_REASON = {
+    "drugs": "Drugs",
+    "porn": "Child abuse",
+    "personal": "Private images",
+    "spam": "Phishing",
+    "fraud": "Fraudulent sales",
+    "fake": "Impersonation",
+}
+
 NAMES = ["James", "Michael", "Robert", "Maria", "Anna", "David", "Sophie", "Daniel"]
 SURNAMES = ["Smith", "Brown", "Wilson", "Miller", "Taylor", "Anderson", "Thomas"]
 ADDRESSES = ["12 King Street, Berlin", "8 Market Road, Munich", "45 Park Avenue, Hamburg"]
@@ -333,10 +343,24 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             if not found:
                 return False, "DSA form not found; " + await _dump_pages(context)
 
-            for value in (target, reason, complaint or "Please review this content.",
-                          target):
-                await _fill(page, value)
-                await asyncio.sleep(0.8)
+            # step 1: target link
+            await _fill(page, target)
+            await asyncio.sleep(0.8)
+            # step 2: reason radio (and its subcategory, if any)
+            if not await _click(page, reason):
+                return False, ("reason radio not found: " + reason + "; "
+                               + await _dump_elements(page))
+            await asyncio.sleep(0.8)
+            sub = SUB_FOR_REASON.get(str(reason_key or "").lower())
+            if sub and not await _click(page, sub):
+                return False, ("sub radio not found: " + sub + "; "
+                               + await _dump_elements(page))
+            await asyncio.sleep(0.8)
+            # step 3: complaint text, then the link once more
+            await _fill(page, complaint or "Please review this content.")
+            await asyncio.sleep(0.8)
+            await _fill(page, target)
+            await asyncio.sleep(0.8)
             for choice in ("Germany", "Proceed without documentation",
                            "My own behalf"):
                 if not await _click(page, choice):
