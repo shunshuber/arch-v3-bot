@@ -743,6 +743,10 @@ def has_premium(subs: dict, user_id: int) -> bool:
     return bool(rec.get("forever") or float(rec.get("until") or 0) > time.time())
 
 
+_VARIANTS_CACHE: dict[str, list[str]] = {}
+_BODY_CACHE: dict[str, str] = {}
+
+
 # ручной метод: предоплата звёздами, ценник в USD/RUB
 MANUAL_STARS = 240
 STAR_USD = float(os.getenv("STAR_USD", "0.013"))
@@ -6816,12 +6820,21 @@ async def got_target(msg: Message, state: FSMContext):
             "\u0442\u0435\u043a\u0441\u0442\u043e\u0432 \u043f\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044e\u2026")
         try:
             from free_llm import generate_complaint_variants
-            body = await fetch_message_body(target["entity"],
-                                            target.get("msg_id"))
             d = await state.get_data()
-            variants = await generate_complaint_variants(
-                REASONS.get(d.get("reason") or "other", REASONS["other"])["l"],
-                "", body)
+            rk = d.get("reason") or "other"
+            key = f"{target.get('raw')}|{rk}"
+            variants = _VARIANTS_CACHE.get(key)
+            if not variants:
+                body = _BODY_CACHE.get(key)
+                if body is None:
+                    body = await fetch_message_body(target["entity"],
+                                                    target.get("msg_id"))
+                    _BODY_CACHE[key] = body
+                variants = await asyncio.wait_for(
+                    generate_complaint_variants(
+                        REASONS.get(rk, REASONS["other"])["l"], "", body),
+                    timeout=50)
+                _VARIANTS_CACHE[key] = variants
             await state.update_data(target=target, variants=variants,
                                     comment=variants[0])
             await msg.answer(_cx(summary_text(await state.get_data())),
@@ -9768,6 +9781,29 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
         "Другое → Прочее → текст"]
         + real_rows)
     return results
+
+
+# Stateless fallbacks: if an inline button arrives with a stale/missing FSM
+# state, route it by callback_data instead of silently ignoring the press.
+@router.callback_query(F.data.startswith("tier:"))
+async def fb_tier(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(Report.tier)
+    await got_tier(cb, state)
+
+
+@router.callback_query(F.data.startswith("method:"))
+async def fb_method(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(Report.method)
+    await got_method(cb, state)
+
+
+@router.callback_query(F.data.startswith("confirm:"))
+async def fb_confirm(cb: CallbackQuery, state: FSMContext):
+    if not (await state.get_data()).get("target"):
+        await cb.answer("Нажми «Запуск» заново", show_alert=True)
+        return
+    await state.set_state(Report.confirm)
+    await got_confirm(cb, state)
 
 
 async def main():
