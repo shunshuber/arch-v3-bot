@@ -201,7 +201,7 @@ async def _dump_elements(page, limit: int = 5000) -> str:
         return f"dump error {type(e).__name__}"
 
 
-async def _visible_labels(page, limit: int = 2500) -> str:
+async def _visible_labels(page, limit: int = 6000) -> str:
     try:
         labels = page.locator(".radio-label, label.radio-item, [role='radio']")
         out = []
