@@ -7,6 +7,7 @@ Complaint text comes from free_llm (no paid Groq key needed).
 import asyncio
 import os
 import random
+import time
 from urllib.parse import urlparse
 
 import aiohttp
@@ -165,8 +166,17 @@ async def _click(page, text):
 
 
 async def _fill(page, value):
-    target = page.locator(".cd-comment-input").first
-    if not await target.count():
+    target = None
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and target is None:
+        loc = page.locator(".cd-comment-input").first
+        if await loc.count():
+            try:
+                if await loc.is_visible(timeout=500):
+                    target = loc
+                    break
+            except Exception:
+                pass
         for alt in ("textarea", "input[type=text]", "input:not([type=hidden])"):
             cands = page.locator(alt)
             for i in range(min(await cands.count(), 20)):
@@ -177,8 +187,10 @@ async def _fill(page, value):
                         break
                 except Exception:
                     continue
-            if await target.count() and await target.is_visible():
+            if target is not None:
                 break
+        if target is None:
+            await page.wait_for_timeout(500)
     dump = await page.eval_on_selector_all(
         "input, textarea",
         "els => els.slice(0,25).map(e => ({tag:e.tagName,cls:(e.className||'').slice(0,40),"
