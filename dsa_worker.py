@@ -201,6 +201,22 @@ async def _dump_elements(page, limit: int = 5000) -> str:
         return f"dump error {type(e).__name__}"
 
 
+async def _visible_labels(page, limit: int = 2500) -> str:
+    try:
+        labels = page.locator(".radio-label, label.radio-item, [role='radio']")
+        out = []
+        for i in range(min(await labels.count(), 100)):
+            el = labels.nth(i)
+            try:
+                if await el.is_visible(timeout=300):
+                    out.append((await el.inner_text()).strip())
+            except Exception:
+                continue
+        return str(out)[:limit]
+    except Exception as e:
+        return f"labels dump error {type(e).__name__}"
+
+
 async def _dump_pages(context, limit: int = 1200) -> str:
     out = []
     for p in context.pages:
@@ -373,7 +389,8 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
                            "My own behalf"):
                 if not await _click(page, choice):
                     return False, (f"radio not found: {choice}; "
-                               "els=" + await _dump_elements(page)
+                               "visible=" + await _visible_labels(page)
+                               + "; els=" + await _dump_elements(page)
                                + "; pages=" + await _dump_pages(context))
                 await asyncio.sleep(0.6)
             for value in (fullname, _pick(ADDRESSES), _pick(EMAILS), _pick(PHONES)):
@@ -382,7 +399,8 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             for choice in ("I don't have a court order", "Confirm"):
                 if not await _click(page, choice):
                     return False, (f"radio not found: {choice}; "
-                               "els=" + await _dump_elements(page)
+                               "visible=" + await _visible_labels(page)
+                               + "; els=" + await _dump_elements(page)
                                + "; pages=" + await _dump_pages(context))
                 await asyncio.sleep(0.6)
             await _fill(page, fullname)
