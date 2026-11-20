@@ -385,7 +385,7 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             await asyncio.sleep(0.8)
             await _fill(page, target)
             await asyncio.sleep(0.8)
-            for choice in ("Germany", "Proceed without documentation",
+            for choice in ("Germany", "I don't have links to relevant laws",
                            "My own behalf"):
                 if not await _click(page, choice):
                     return False, (f"radio not found: {choice}; "
