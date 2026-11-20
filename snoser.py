@@ -6829,7 +6829,10 @@ async def got_target(msg: Message, state: FSMContext):
                 if body is None:
                     body = await fetch_message_body(target["entity"],
                                                     target.get("msg_id"))
+                    if not body:
+                        body = str(target.get("raw") or "")
                     _BODY_CACHE[key] = body
+                log.info("premium body for %s: %s", key, body[:120])
                 variants = await asyncio.wait_for(
                     generate_complaint_variants(
                         REASONS.get(rk, REASONS["other"])["l"], "", body),

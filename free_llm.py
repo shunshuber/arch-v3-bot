@@ -184,18 +184,36 @@ VARIANTS_PROMPT = (
 )
 
 
-def _parse_variants(raw: str, reason: str, sub_reason: str) -> list[str]:
+_VARIANT_ANGLES = (
+    "The reported message states",
+    "This content advertises",
+    "A detailed review of the post shows",
+    "Users are being directed to",
+    "The publication contains explicit details about",
+    "Evidence in the reported message indicates",
+    "This post facilitates",
+    "Please assess the material describing",
+)
+
+
+def _parse_variants(raw: str, reason: str, sub_reason: str,
+                    message_text: str = "", count: int = 8) -> list[str]:
     out = []
     for line in (raw or "").splitlines():
         line = re.sub(r"^\s*\d+[\.\)]\s*", "", line).strip()
         line = _clean(line)
         if len(line) >= 25 and line not in out:
             out.append(line[:200])
-    while len(out) < 8:
-        base = _local_fallback(reason, sub_reason)
-        extra = f" {len(out) + 1}. Please review this specific violation."
-        out.append((base[:190] + extra)[:200])
-    return out[:8]
+    snippet = (message_text or reason).strip()[:70]
+    i = 0
+    while len(out) < count:
+        angle = _VARIANT_ANGLES[i % len(_VARIANT_ANGLES)]
+        text = (f"{angle}: {snippet}. Reported reason: {reason}. "
+                f"Please review and take action.")[:200]
+        if text not in out:
+            out.append(text)
+        i += 1
+    return out[:count]
 
 
 async def generate_complaint_variants(reason: str, sub_reason: str,
@@ -209,9 +227,10 @@ async def generate_complaint_variants(reason: str, sub_reason: str,
     for call in (_gemini, _pollinations):
         try:
             raw = await call(VARIANTS_PROMPT, user, max_tokens=1400)
-            variants = _parse_variants(raw, reason, sub_reason)
+            variants = _parse_variants(raw, reason, sub_reason,
+                                       message_text, count)
             if variants:
                 return variants[:count]
         except Exception:
             continue
-    return _parse_variants("", reason, sub_reason)[:count]
+    return _parse_variants("", reason, sub_reason, message_text, count)[:count]
