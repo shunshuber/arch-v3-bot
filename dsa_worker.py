@@ -13,6 +13,9 @@ import aiohttp
 
 TARGET_URL = "https://telegram.org/dsa-report"
 TURNSTILE_SITEKEY = "0x4AAAAAABCHiDxTcTJ4azUp"
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/131.0.0.0 Safari/537.36")
 
 # Arch V3 reason -> radio label on the DSA form
 REASON_SITE = {
@@ -65,12 +68,15 @@ def _browser_proxy():
 
 async def _solve_turnstile(page_url: str, key: str, cap_proxy=None,
                            action=None, cdata=None):
+    # CapMonster TurnstileTask field names are pageAction and data (NOT
+    # action/cdata) — docs.capmonster.cloud/docs/captchas/turnstile-task
     task = {"type": "TurnstileTask", "websiteURL": page_url,
-            "websiteKey": TURNSTILE_SITEKEY}
+            "websiteKey": TURNSTILE_SITEKEY,
+            "userAgent": BROWSER_UA}
     if action:
-        task["action"] = action
+        task["pageAction"] = action
     if cdata:
-        task["cdata"] = cdata
+        task["data"] = cdata
     if cap_proxy:
         task.update(cap_proxy)
     else:
@@ -175,9 +181,7 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             viewport={"width": 1920, "height": 1080},
             locale="en-US",
             proxy=px,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/131.0.0.0 Safari/537.36")
+            user_agent=BROWSER_UA)
         await context.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
         page = await context.new_page()
@@ -201,7 +205,7 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             cdata = await widget.get_attribute("data-cdata") if widget else None
             print("DSA turnstile action/cdata:", action, cdata, flush=True)
             token, err = await _solve_turnstile(
-                TARGET_URL, cap_key, None, action, cdata)
+                TARGET_URL, cap_key, cap_proxy, action, cdata)
             if not token:
                 return False, err or "no captcha token"
             await page.evaluate("""
