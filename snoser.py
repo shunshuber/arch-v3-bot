@@ -5692,7 +5692,9 @@ async def fetch_message_body(entity, msg_id: int | None) -> str:
     """Text/caption of the complained message — feeds the AI complaint texts."""
     if not msg_id:
         return ""
-    sessions = [s for s in load_sessions() if not s.stem.startswith(".")]
+    led = _ledger_load()
+    sessions = [s for s in load_sessions()
+                if not s.stem.startswith(".") and session_usable(s.stem, led)[0]]
     for sess in random.sample(sessions, min(3, len(sessions))):
         client = None
         try:
@@ -6820,7 +6822,8 @@ async def got_target(msg: Message, state: FSMContext):
             variants = await generate_complaint_variants(
                 REASONS.get(d.get("reason") or "other", REASONS["other"])["l"],
                 "", body)
-            await state.update_data(variants=variants, comment=variants[0])
+            await state.update_data(target=target, variants=variants,
+                                    comment=variants[0])
             await msg.answer(_cx(summary_text(await state.get_data())),
                              parse_mode=ParseMode.HTML,
                              reply_markup=kb_confirm())
