@@ -118,21 +118,21 @@ async def _post_json(session: aiohttp.ClientSession, url: str,
         return ""
 
 
-async def _gemini(system: str, user: str) -> str:
+async def _gemini(system: str, user: str, max_tokens: int = 120) -> str:
     if not GEMINI_KEY:
         return ""
     url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     payload = {"model": GEMINI_MODEL,
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}],
-               "temperature": 0.7, "max_tokens": 120}
+               "temperature": 0.7, "max_tokens": max_tokens}
     headers = {"Authorization": f"Bearer {GEMINI_KEY}",
                "Content-Type": "application/json"}
     async with aiohttp.ClientSession() as s:
         return await _post_json(s, url, payload, headers)
 
 
-async def _pollinations(system: str, user: str) -> str:
+async def _pollinations(system: str, user: str, max_tokens: int | None = None) -> str:
     """Serialize keyless calls: the free API allows one request per 45s/IP.
     A second user simply keeps the 'sending' progress running a bit longer."""
     global _last_poll_ts
@@ -141,6 +141,8 @@ async def _pollinations(system: str, user: str) -> str:
                "messages": [{"role": "system", "content": system},
                             {"role": "user", "content": user}],
                "temperature": 0.7}
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     async with _poll_lock:
         wait = POLLINATIONS_INTERVAL - (time.monotonic() - _last_poll_ts)
         if wait > 0:
@@ -171,3 +173,45 @@ async def generate_complaint_text(reason: str, sub_reason: str,
         except Exception:
             continue
     return _local_fallback(reason, sub_reason)
+
+
+VARIANTS_PROMPT = (
+    "You write Telegram DSA complaints. Output EXACTLY 8 numbered lines, "
+    "1 to 8, one complaint per line. Each must be under 200 characters, "
+    "in English, unique in wording, direct, reference the specific content "
+    "of the reported message, never include @usernames or links. "
+    "No intro, no explanation — only the 8 lines."
+)
+
+
+def _parse_variants(raw: str, reason: str, sub_reason: str) -> list[str]:
+    out = []
+    for line in (raw or "").splitlines():
+        line = re.sub(r"^\s*\d+[\.\)]\s*", "", line).strip()
+        line = _clean(line)
+        if len(line) >= 25 and line not in out:
+            out.append(line[:200])
+    while len(out) < 8:
+        base = _local_fallback(reason, sub_reason)
+        extra = f" {len(out) + 1}. Please review this specific violation."
+        out.append((base[:190] + extra)[:200])
+    return out[:8]
+
+
+async def generate_complaint_variants(reason: str, sub_reason: str,
+                                      message_text: str = "",
+                                      count: int = 8) -> list[str]:
+    """Premium: 8 unique AI texts tailored to reason + reported message."""
+    user = f"Report reason: {reason}\nSub-reason: {sub_reason or 'none'}"
+    if message_text:
+        user += f"\nReported message content: {message_text[:600]}"
+    user += f"\nProduce {count} unique variants."
+    for call in (_gemini, _pollinations):
+        try:
+            raw = await call(VARIANTS_PROMPT, user, max_tokens=1400)
+            variants = _parse_variants(raw, reason, sub_reason)
+            if variants:
+                return variants[:count]
+        except Exception:
+            continue
+    return _parse_variants("", reason, sub_reason)[:count]

@@ -2215,7 +2215,7 @@ def _classify_report_error(e: Exception) -> str | None:
 
 
 async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None,
-                      method: str = "") -> dict:
+                      method: str = "", variants: list[str] | None = None) -> dict:
     """BR-style: ONE report per session with a random text, rationed per
     session per rolling day (anti-sweep). Same fingerprint + sticky IP."""
     ledger = _ledger_load()
@@ -2241,7 +2241,8 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
         name = sess.stem
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        text = comment or pick_comment(reason_key, method)
+        text = (variants[idx % len(variants)] if variants
+                else (comment or pick_comment(reason_key, method)))
         async with _session_lock(sess):
             client = None
             try:
@@ -2371,7 +2372,8 @@ async def _ch_three_step(client, entity, reason_key: str, text: str,
 
 
 async def fire_channel_reports(target_entity: str, reason_key: str, comment: str,
-                               msg_id: int | None) -> dict:
+                                msg_id: int | None,
+                                variants: list[str] | None = None) -> dict:
     # BR channel-method: every usable session fires ONE report on the
     # channel (or on a single post when msg_id is present). Text per
     # session: custom comment, else Brown pool (category + general) cut
@@ -2395,11 +2397,13 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
         log.info("channel page completed")
         return fake_results()
 
-    async def session_worker(sess: Path) -> tuple[str, str, int, str]:
+    async def session_worker(sess: Path, idx: int) -> tuple[str, str, int, str]:
         name = sess.stem
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        if comment:
+        if variants:
+            text = variants[idx % len(variants)]
+        elif comment:
             text = comment
         else:
             text = report_texts.get_random_text(reason_key)[:200]
@@ -2466,7 +2470,8 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
     outs = []
     for i in range(0, len(sessions), CH_BATCH_SIZE):
         batch = sessions[i:i + CH_BATCH_SIZE]
-        outs += await asyncio.gather(*[session_worker(s) for s in batch])
+        outs += await asyncio.gather(
+            *[session_worker(s, i) for i, s in enumerate(batch)])
         if i + CH_BATCH_SIZE < len(sessions):
             await asyncio.sleep(random.uniform(3, 5))
 
@@ -5683,6 +5688,37 @@ async def resolve_message_sender(entity, msg_id: int | None) -> str | None:
     return None
 
 
+async def fetch_message_body(entity, msg_id: int | None) -> str:
+    """Text/caption of the complained message — feeds the AI complaint texts."""
+    if not msg_id:
+        return ""
+    sessions = [s for s in load_sessions() if not s.stem.startswith(".")]
+    for sess in random.sample(sessions, min(3, len(sessions))):
+        client = None
+        try:
+            fp = session_fingerprint(sess.stem)
+            px = pin_for_session(sess.stem, load_pin_proxies())
+            client = TelegramClient(
+                str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                proxy=px, device_model=fp["device"],
+                system_version=fp["system_version"],
+                app_version=fp["app_version"], lang_code=fp["lang_code"])
+            await asyncio.wait_for(client.connect(), timeout=10)
+            m = await asyncio.wait_for(
+                client.get_messages(entity, ids=msg_id), timeout=15)
+            if m:
+                return (m.text or m.caption or "")[:600]
+        except Exception as e:
+            log.warning("message body via %s failed: %s", sess.stem, e)
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+    return ""
+
+
 def _watch_list(uid: int) -> list[dict]:
     now = time.time()
     return [it for it in load_watch()["items"]
@@ -6770,6 +6806,20 @@ async def got_target(msg: Message, state: FSMContext):
         await msg.answer(_cx("❌ Нужна ссылка на статью telegra.ph."),
                          parse_mode=ParseMode.HTML)
         return
+    if (has_premium(load_subs(), msg.from_user.id)
+            and _m not in ("code", "mail")):
+        from free_llm import generate_complaint_variants
+        body = await fetch_message_body(target["entity"], target.get("msg_id"))
+        d = await state.get_data()
+        variants = await generate_complaint_variants(
+            REASONS.get(d.get("reason") or "other", REASONS["other"])["l"],
+            "", body)
+        await state.update_data(variants=variants, comment=variants[0])
+        await msg.answer(_cx(summary_text(await state.get_data())),
+                         parse_mode=ParseMode.HTML,
+                         reply_markup=kb_confirm())
+        await state.set_state(Report.confirm)
+        return
     await state.update_data(target=target, comment="")
     # text step: user picks their own complaint text or the auto template pool
     data = await state.get_data()
@@ -6970,6 +7020,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
     m = METHODS[data["method"]]
     c = data.get("comment", "")   # empty = per-session unique templates downstream
+    variants = data.get("variants")
     ts = datetime.now().strftime("%H:%M:%S")
 
     if cb.from_user:
@@ -7055,14 +7106,16 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     elif data["method"] == "channel":
         report_task = asyncio.create_task(
-            fire_channel_reports(t["entity"], data["reason"], c, t.get("msg_id")))
+            fire_channel_reports(t["entity"], data["reason"], c,
+                                 t.get("msg_id"), variants))
     elif data["method"] == "message":
         if not t.get("msg_id"):
             await cb.message.answer("Нужна ссылка на сообщение")
             await state.clear()
             return
         report_task = asyncio.create_task(
-            fire_channel_reports(t["entity"], data["reason"], c, t["msg_id"]))
+            fire_channel_reports(t["entity"], data["reason"], c,
+                                 t["msg_id"], variants))
     elif data["method"] == "session":
         report_task = asyncio.create_task(
             fire_session_snos(t["entity"], t.get("phone", ""),
@@ -7094,7 +7147,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         report_task = asyncio.create_task(fire_profile_reports(t["entity"], c))
     else:
         report_task = asyncio.create_task(
-            fire_reports(t["entity"], data["reason"], c, t.get("msg_id"), data["method"]))
+            fire_reports(t["entity"], data["reason"], c,
+                         t.get("msg_id"), data["method"], variants))
 
     # ── loading animation while workers run ──
     is_code = data["method"] == "code"
