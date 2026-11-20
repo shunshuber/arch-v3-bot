@@ -66,6 +66,10 @@ jobs:
                       "() => ({turnstile: typeof window.turnstile, "
                       "cbs: Object.keys(window).filter(k => /turnstile|callback/i.test(k)).slice(0,20)})")
                   print("JS", js, flush=True)
+                  fn = await p.evaluate(
+                      "() => ({cb: String(window.onTurnstileSuccess||'').slice(0,1200), "
+                      "methods: window.turnstile ? Object.keys(window.turnstile) : []})")
+                  print("FN", fn, flush=True)
                   await dump(p, "BEFORE")
                   btn = await p.query_selector(".js-report-start-btn")
                   if btn:
