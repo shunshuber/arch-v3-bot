@@ -201,7 +201,7 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             cdata = await widget.get_attribute("data-cdata") if widget else None
             print("DSA turnstile action/cdata:", action, cdata, flush=True)
             token, err = await _solve_turnstile(
-                TARGET_URL, cap_key, cap_proxy, action, cdata)
+                TARGET_URL, cap_key, None, action, cdata)
             if not token:
                 return False, err or "no captcha token"
             await page.evaluate("""
@@ -227,7 +227,7 @@ async def run_dsa(target: str, reason_key: str, complaint: str,
             # the server answer "Please reload the page". Re-call it ourselves
             # with the same token until the button is enabled.
             ready = False
-            for _ in range(20):
+            for _ in range(6):
                 await page.evaluate("t => window.onTurnstileSuccess(t)", token)
                 for _ in range(5):
                     if not await btn.is_disabled():
