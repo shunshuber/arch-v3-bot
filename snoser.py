@@ -748,7 +748,7 @@ _BODY_CACHE: dict[str, str] = {}
 
 
 # ручной метод: предоплата звёздами, ценник в USD/RUB
-MANUAL_STARS = 240
+MANUAL_STARS = 216
 STAR_USD = float(os.getenv("STAR_USD", "0.013"))
 
 
@@ -7368,11 +7368,11 @@ XROCKET_API = "https://pay.api.xrocket.exchange/api/v1"
 XROCKET_CURRENCY = "USDT"
 
 SUB_PLANS = {
-    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.6},
-    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.4},
-    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 7.2},
-    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 14.4},
-    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 3.0},
+    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.54},
+    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.16},
+    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 6.48},
+    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 12.96},
+    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 2.7},
 }
 
 # ── Cloudtips (RU cards / SBP) ───────────────────────────
@@ -7778,7 +7778,7 @@ CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
                    or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
-STARS_PRICES = {"d1": 60, "d7": 180, "d30": 480, "d90": 960, "prem": 200}
+STARS_PRICES = {"d1": 54, "d7": 162, "d30": 432, "d90": 864, "prem": 180}
 
 # старые инвойсы «Навсегда» (fore) уже оплачены у части людей в ссылках —
 # они гасятся как 90 дней, чтобы деньги не пропали
