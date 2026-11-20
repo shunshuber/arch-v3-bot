@@ -111,21 +111,39 @@ def _xpath(text):
     return "//*[text()=concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")]"
 
 
+def _subseq(needle: str, hay: str) -> bool:
+    it = iter(hay)
+    return all(ch in it for ch in needle)
+
+
 async def _click(page, text):
     xp = _xpath(text)
-    try:
-        await page.wait_for_selector(xp, timeout=15000)
-    except Exception:
-        return False
     for sel in (f"span.radio-label >> text={text}",
                 f"label.radio-item >> text={text}", xp):
         try:
             el = page.locator(sel).first
-            if await el.is_visible(timeout=2000):
+            if await el.count() and await el.is_visible(timeout=2000):
                 await el.click(force=True)
                 return True
         except Exception:
             continue
+    # Telegram injects random letters into visible labels, so textContent is
+    # e.g. "GeXrmYany" instead of "Germany". Match as a subsequence instead.
+    target = "".join(c for c in text.lower() if c.isalpha())
+    if len(target) < 4:
+        return False
+    try:
+        labels = page.locator(".radio-label, label.radio-item, [role='radio']")
+        n = await labels.count()
+        for i in range(min(n, 80)):
+            el = labels.nth(i)
+            raw = await el.inner_text()
+            shown = "".join(c for c in raw.lower() if c.isalpha())
+            if target and _subseq(target, shown):
+                await el.evaluate("e => e.click()")
+                return True
+    except Exception:
+        pass
     return False
 
 
