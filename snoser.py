@@ -5446,7 +5446,7 @@ class WatchFSM(StatesGroup):
 WATCH_FILE = Path(__file__).parent / "watchdog.json"
 WATCH_INTERVAL = 150        # один проход каждые 2.5 мин (окно рана ~5 мин)
 WATCH_START_DELAY = 45
-WATCH_MAX_PER_USER = 5
+WATCH_MAX_PER_USER = 200
 WATCH_DEFAULT_DAYS = 3
 WATCH_SESS_CAP = 5          # параллельные пробы
 
@@ -6941,8 +6941,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         except Exception:
             pass
 
-    # auto-watch only bots: сообщения, аккаунты, каналы и ссылки не сторожим
-    if data["method"] == "bot":
+    # auto-watch every complained entity — no manual target selection needed
+    if data["method"] not in ("code", "mail", "telegraph", "session"):
         try:
             _watch_add(cb.from_user.id, tgt_raw)
         except Exception as _wa_err:
