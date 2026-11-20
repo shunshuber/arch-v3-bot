@@ -6808,18 +6808,35 @@ async def got_target(msg: Message, state: FSMContext):
         return
     if (has_premium(load_subs(), msg.from_user.id)
             and _m not in ("code", "mail")):
-        from free_llm import generate_complaint_variants
-        body = await fetch_message_body(target["entity"], target.get("msg_id"))
-        d = await state.get_data()
-        variants = await generate_complaint_variants(
-            REASONS.get(d.get("reason") or "other", REASONS["other"])["l"],
-            "", body)
-        await state.update_data(variants=variants, comment=variants[0])
-        await msg.answer(_cx(summary_text(await state.get_data())),
-                         parse_mode=ParseMode.HTML,
-                         reply_markup=kb_confirm())
-        await state.set_state(Report.confirm)
-        return
+        progress = await msg.answer(
+            "\U0001f916 \u0413\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e "
+            "8 \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445 "
+            "\u0442\u0435\u043a\u0441\u0442\u043e\u0432 \u043f\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044e\u2026")
+        try:
+            from free_llm import generate_complaint_variants
+            body = await fetch_message_body(target["entity"],
+                                            target.get("msg_id"))
+            d = await state.get_data()
+            variants = await generate_complaint_variants(
+                REASONS.get(d.get("reason") or "other", REASONS["other"])["l"],
+                "", body)
+            await state.update_data(variants=variants, comment=variants[0])
+            await msg.answer(_cx(summary_text(await state.get_data())),
+                             parse_mode=ParseMode.HTML,
+                             reply_markup=kb_confirm())
+            await state.set_state(Report.confirm)
+            return
+        except Exception as e:
+            log.warning("premium variants failed: %s", e)
+            await msg.answer(
+                f"\u26a0\ufe0f \u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f "
+                f"\u043d\u0435 \u0443\u0434\u0430\u043b\u0430\u0441\u044c: "
+                f"{type(e).__name__}. \u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u044e "
+                f"\u0441 \u0448\u0430\u0431\u043b\u043e\u043d\u0430\u043c\u0438.")
+            try:
+                await progress.delete()
+            except Exception:
+                pass
     await state.update_data(target=target, comment="")
     # text step: user picks their own complaint text or the auto template pool
     data = await state.get_data()
