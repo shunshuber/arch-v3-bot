@@ -8415,6 +8415,7 @@ def save_subs(subs: dict) -> None:
 
 # ── one trial report per user (non-premium methods only) ──
 FREE_GIFT_FILE = Path(__file__).parent / "free_gift.json"
+FREE_REVOKE_FILE = Path(__file__).parent / "free_revoke.json"
 _FREE_LOCK = asyncio.Lock()
 USERS_IN_FLIGHT: set[int] = set()
 
@@ -8527,6 +8528,40 @@ async def free_report_gift() -> None:
         log.info("free report: notified %d users", sent)
     except Exception as e:
         log.warning("free report gift failed: %s", e)
+
+
+async def free_report_revoke() -> None:
+    """One-time: revoke the trial report from users who already launched one."""
+    try:
+        try:
+            state = json.loads(FREE_REVOKE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+        if state.get("done"):
+            return
+        used = set(_cooldown_local().keys())
+        subs = load_subs()
+        revoked = 0
+        for uid_s in used:
+            rec = subs.get(str(uid_s))
+            if isinstance(rec, dict) and int(rec.get("free_reports") or 0) > 0:
+                rec["free_reports"] = 0
+                revoked += 1
+        if revoked:
+            save_subs(subs)
+        state["done"] = True
+        state["revoked"] = revoked
+        txt = json.dumps(state, ensure_ascii=False, indent=1)
+        try:
+            FREE_REVOKE_FILE.write_text(txt, encoding="utf-8")
+            commit_file_to_repo("free_revoke.json", "free report revoke",
+                                cooldown=0)
+        except Exception as e:
+            log.warning("free revoke file write failed: %s", e)
+        store.push_async("free_revoke", txt, force=True)
+        log.info("free report: revoked %d users", revoked)
+    except Exception as e:
+        log.warning("free report revoke failed: %s", e)
 
 
 def user_is_admin(user_id: int) -> bool:
@@ -10548,10 +10583,14 @@ async def main():
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
             await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE,
-                                   "free_gift": FREE_GIFT_FILE})
+                                   "free_gift": FREE_GIFT_FILE,
+                                   "free_revoke": FREE_REVOKE_FILE})
             if not globals().get("_free_gift_started"):
                 globals()["_free_gift_started"] = True
                 asyncio.create_task(free_report_gift())
+            if not globals().get("_free_revoke_started"):
+                globals()["_free_revoke_started"] = True
+                asyncio.create_task(free_report_revoke())
             if not globals().get("_ct_poller_started"):
                 globals()["_ct_poller_started"] = True
                 asyncio.create_task(ct_poller_loop(bot))
