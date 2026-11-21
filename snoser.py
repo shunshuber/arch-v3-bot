@@ -530,11 +530,55 @@ METHOD_TEXT_OVERRIDES = {
 }
 
 
+# ── Bot method: Brown V2 fixed reasons and payloads ──
+BOT_REASONS = {
+    "personal": {
+        "e": "🔐",
+        "l": "Персональные данные",
+        "cls": "personal",
+        "text": (
+            "Данный бот распространяет персональные данные пользователей, "
+            "включая ИНН, СНИЛС, паспортные данные, адреса проживания и номера "
+            "телефонов. Прошу провести проверку и незамедлительно заблокировать "
+            "этого бота."
+        ),
+    },
+    "drugs": {
+        "e": "💊",
+        "l": "Наркотики",
+        "cls": "drugs",
+        "text": (
+            "Drug use promotion - mephedrone. Bot openly writes about injecting "
+            "mephedrone. Violates Telegram rules against illegal drugs. "
+            "Delete the bot."
+        ),
+    },
+    "other": {
+        "e": "📝",
+        "l": "Прочее",
+        "cls": "personal",
+        "text": (
+            "Данный бот распространяет персональные данные пользователей, "
+            "включая ИНН, СНИЛС, паспортные данные, адреса проживания и номера "
+            "телефонов. Прошу провести проверку и незамедлительно заблокировать "
+            "этого бота."
+        ),
+    },
+}
+
+
+def bot_reason_text(reason_key: str) -> str:
+    """Fixed Brown payload for the bot method (unknown reason -> personal)."""
+    return BOT_REASONS.get(reason_key, BOT_REASONS["personal"])["text"]
+
+
 def pick_comment(reason_key: str, method: str = "") -> str:
     """Strong auto-template for the category; falls back to 'other' pool.
     The leading entity noun is swapped to match the real target type
     (bot/channel/account) so a probiv-bot complaint never reads as a
     complaint about a channel or a person."""
+    if method == "bot":
+        return bot_reason_text(reason_key)
     _fixed = METHOD_TEXT_OVERRIDES.get((method, reason_key))
     if _fixed:
         return _fixed
@@ -2219,10 +2263,103 @@ def _classify_report_error(e: Exception) -> str | None:
     return None
 
 
+async def fire_bot_reports(target_entity: str, reason_key: str,
+                           msg_id: int | None, text: str = "") -> dict:
+    """Brown V2 bot-method: the whole pool fires, batches of 8 with a 2s
+    pause, one report per session, fixed reason payload, sticky proxies.
+    No per-session quota or rest timer: the method is meant to hit hard."""
+    rk = reason_key if reason_key in BOT_REASONS else "personal"
+    reason_cls = REASON_MAP[BOT_REASONS[rk]["cls"]]
+    payload = (text or "").strip() or BOT_REASONS[rk]["text"]
+    dead = set(_status_load().get("dead") or [])
+    sessions = [s for s in load_sessions()
+                if s.stem not in REPORT_EXCLUDE_POOL and s.stem not in dead]
+    proxies = load_pin_proxies()
+    results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
+    if not sessions or not API_ID or not API_HASH:
+        log.info("bot blast skipped: no live sessions or api creds")
+        return results
+
+    async def worker(sess: Path) -> tuple[str, str, bool, str]:
+        name = sess.stem
+        proxy = pin_for_session(name, proxies)
+        px_name = proxy[1] if proxy else "direct"
+        async with _session_lock(sess):
+            client = None
+            try:
+                fp = session_fingerprint(name)
+                client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
+                                        fp["api_hash"], proxy=proxy,
+                                        device_model=fp["device"],
+                                        system_version=fp["system_version"],
+                                        app_version=fp["app_version"],
+                                        lang_code=fp["lang_code"])
+                await _connect_safe(client)
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    return name, px_name, False, "not authorized"
+                entity = await client.get_entity(target_entity)
+                try:
+                    await client(ReportPeerRequest(
+                        peer=entity,
+                        reason=reason_cls(),
+                        message=payload,
+                    ))
+                    ok, err = True, ""
+                except Exception as e:
+                    ok, err = await _report_three_step(
+                        client, entity, rk, payload)
+                    if not ok:
+                        err = f"{type(e).__name__}: {e}"
+                        if _classify_report_error(e) == "flood":
+                            _session_punish(name, str(e), "flood")
+                await client.disconnect()
+                return name, px_name, ok, err
+            except Exception as e:
+                try:
+                    if client:
+                        await client.disconnect()
+                except Exception:
+                    pass
+                if _classify_report_error(e) == "flood":
+                    _session_punish(name, str(e), "flood")
+                return name, px_name, False, f"{type(e).__name__}: {e}"
+
+    outs: list[tuple[str, str, bool, str]] = []
+    batch_size = 8
+    for i in range(0, len(sessions), batch_size):
+        batch = sessions[i:i + batch_size]
+        part = await asyncio.gather(*[worker(s) for s in batch],
+                                    return_exceptions=True)
+        for r in part:
+            outs.append(("?", "-", False, f"{type(r).__name__}: {r}")
+                        if isinstance(r, Exception) else r)
+        if i + batch_size < len(sessions):
+            await asyncio.sleep(2)
+
+    lines = []
+    for name, px_name, ok, err in outs:
+        results["ok" if ok else "fail"] += 1
+        results["details"].append({"name": name, "proxy": px_name,
+                                   "ok": ok, "err": err})
+        lines.append(f"{'✅' if ok else '❌'} <code>{name}</code>"
+                     f" | {html_mod.escape(px_name)}"
+                     + (f" | {html_mod.escape(err)}" if err else ""))
+    await push_send_log(
+        "Report (бот-метод)",
+        [f"🎯 {report_target_html(target_entity, msg_id)}"
+         + f"\n⚠️ {REASONS.get(rk, {}).get('l', rk)}",
+         f"💬 {html_mod.escape(payload[:200])}"] + lines)
+    return results
+
+
 async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id: int | None,
                       method: str = "", variants: list[str] | None = None) -> dict:
     """BR-style: ONE report per session with a random text, rationed per
     session per rolling day (anti-sweep). Same fingerprint + sticky IP."""
+    if method == "bot":
+        return await fire_bot_reports(target_entity, reason_key, msg_id,
+                                      comment)
     ledger = _ledger_load()
     pool, skipped = [], []
     for s in load_sessions():
@@ -3520,9 +3657,13 @@ def kb_tiers(premium: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def kb_reasons() -> InlineKeyboardMarkup:
+def kb_reasons(method: str = "") -> InlineKeyboardMarkup:
     rows = []
-    items = list(REASONS.items())
+    if method == "bot":
+        items = [(k, {"l": v["e"] + " " + v["l"]})
+                 for k, v in BOT_REASONS.items()]
+    else:
+        items = list(REASONS.items())
     for i in range(0, len(items), 2):
         row = []
         for k, v in items[i:i + 2]:
@@ -3913,7 +4054,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
             + "\u26a0\ufe0f \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043f\u0440\u0438\u0447\u0438\u043d\u0443 \u0436\u0430\u043b\u043e\u0431\u044b:"
         )),
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_reasons(),
+        reply_markup=kb_reasons(key),
     )
     await state.set_state(Report.reason)
     await cb.answer()
@@ -6810,6 +6951,16 @@ async def got_target(msg: Message, state: FSMContext):
         await msg.answer(_cx("❌ Нужна ссылка на статью telegra.ph."),
                          parse_mode=ParseMode.HTML)
         return
+    if _m == "bot":
+        rk = (await state.get_data()).get("reason") or "personal"
+        text = bot_reason_text(rk)
+        await state.update_data(target=target, comment=text,
+                                variants=[text])
+        data = await state.get_data()
+        await msg.answer(_cx(summary_text(data)), parse_mode=ParseMode.HTML,
+                         reply_markup=kb_confirm())
+        await state.set_state(Report.confirm)
+        return
     if (has_premium(load_subs(), msg.from_user.id)
             and _m not in ("code", "mail")):
         await state.update_data(target=target)
@@ -6998,7 +7149,7 @@ async def back_reasons(cb: CallbackQuery, state: FSMContext):
             + "\u26a0\ufe0f \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043f\u0440\u0438\u0447\u0438\u043d\u0443 \u0436\u0430\u043b\u043e\u0431\u044b:"
         )),
         parse_mode=ParseMode.HTML,
-        reply_markup=kb_reasons(),
+        reply_markup=kb_reasons(data.get("method") or ""),
     )
     await state.set_state(Report.reason)
     await cb.answer()
@@ -7063,7 +7214,7 @@ async def cmt_back(cb: CallbackQuery, state: FSMContext):
         bq(f"<b>{NAME}</b>")
         + f"\n\n{m['e']} <b>{m['l']}</b>"
         + "\n\n⚠️ Выберите причину жалобы:"),
-        parse_mode=ParseMode.HTML, reply_markup=kb_reasons())
+        parse_mode=ParseMode.HTML, reply_markup=kb_reasons(data.get("method") or ""))
     await state.set_state(Report.reason)
     await cb.answer()
 
@@ -8960,7 +9111,7 @@ async def _fsm_render_state(cb: CallbackQuery, e: dict) -> None:
             await cb.message.answer(_cx(bq(f"<b>{NAME}</b>  —  Причина")
                                         + "\n\nВыбери причину:"),
                                     parse_mode=ParseMode.HTML,
-                                    reply_markup=kb_reasons())
+                                    reply_markup=kb_reasons(data.get("method") or ""))
         elif st == "Report:target":
             _hint = ("Пришли ссылку на сообщение."
                      if data.get("method") == "message" else
