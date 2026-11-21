@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "stems to transplant now, comma separated (bypasses 25h age gate)"
+        required: false
+        default: ""
 
 concurrency:
   group: lolz-transplant
@@ -23,6 +28,7 @@ jobs:
       ARCH_BOT_TOKEN: ${{ secrets.ARCH_BOT_TOKEN }}
       ADMIN_ID: ${{ secrets.ADMIN_ID }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FORCE_STEMS: ${{ inputs.force }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,7 +41,7 @@ jobs:
       - name: Transplant lolz sessions (long uninterrupted run)
         run: |
           python - <<'PY'
-          import asyncio, snoser
+          import asyncio, os, snoser
 
           async def fake_push(title, lines):
               print(f"[LOG {title}]", flush=True)
@@ -43,8 +49,18 @@ jobs:
                   print("   ", line, flush=True)
           snoser.push_send_log = fake_push
 
+          force = [s.strip() for s in (os.environ.get("FORCE_STEMS") or "").split(",")
+                   if s.strip()]
+          if force:
+              snoser.TRANSPLANT_MIN_AGE_SEC = 0
+              print("[TRANSPLANT] FORCE", force, flush=True)
+
           async def go():
-              sess = snoser._transplant_due_list()
+              if force:
+                  sess = [p for p in snoser._transplant_list()
+                          if p.stem in set(force)]
+              else:
+                  sess = snoser._transplant_due_list()
               print("[TRANSPLANT] due:", [p.name for p in sess], flush=True)
               print("[TRANSPLANT] queue:", snoser._queue_load(), flush=True)
               for s in sess:
@@ -55,7 +71,11 @@ jobs:
                   except Exception as e:
                       print(f"[TRANSPLANT] EXCEPTION {s.stem}: {type(e).__name__}: {e}", flush=True)
                       ok = False
-                  await snoser._transplant_mark(s, ok is True)
+                  if ok is True or not force:
+                      await snoser._transplant_mark(s, ok is True)
+                  elif ok is False and force:
+                      print(f"[TRANSPLANT] {s.stem}: failed on forced try, "
+                            f"25h schedule kept", flush=True)
                   print(f"[TRANSPLANT] queue:", await asyncio.to_thread(snoser._queue_load), flush=True)
               moved = await snoser.add_ready_to_pool()
               print("[POOL] added:", moved, flush=True)
