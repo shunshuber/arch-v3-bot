@@ -2647,6 +2647,147 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
     return results
 
 
+# ── botnet message-method: Brown V2 nine random categories ──
+BOTNET_REASON_BYTES = [b"2", b"3", b"4", b"5", b"6",
+                       b"7", b"8", b"9", b"a"]
+
+
+async def fire_message_reports(target_entity: str, comment: str,
+                               msg_id: int | None,
+                               variants: list[str] | None = None) -> dict:
+    """Brown V2 botnet port for one post: the whole pool fires in batches
+    of 8 with a 3-5s pause, every session takes a random category byte and
+    a random general text, 3-step category tree with a byte fallback.
+    The author of the post is resolved once and checked against the
+    whitelist before anything is sent."""
+    from telethon.tl.functions.messages import ReportRequest
+
+    if not msg_id:
+        return {"ok": 0, "fail": 1, "total": 0,
+                "details": [{"name": "target", "proxy": "-", "ok": False,
+                             "err": "нет ID сообщения"}]}
+
+    author = await resolve_message_sender(target_entity, msg_id)
+    if not author:
+        return {"ok": 0, "fail": 1, "total": 0,
+                "details": [{"name": "target", "proxy": "-", "ok": False,
+                             "err": "не удалось определить автора сообщения"}]}
+    hit = is_target_whitelisted(author)
+    if hit:
+        await push_send_log(
+            "Протект-лист (сообщение)",
+            [f"🎯 {report_target_html(target_entity, msg_id)}",
+             f"👤 автор <code>{html_mod.escape(author)}</code> "
+             f"— паттерн <code>{html_mod.escape(str(hit))}</code>"])
+        return {"ok": 0, "fail": 1, "total": 0,
+                "details": [{"name": "target", "proxy": "-", "ok": False,
+                             "err": "автор сообщения в протект-листе"}]}
+
+    dead = set(_status_load().get("dead") or [])
+    sessions = [s for s in load_sessions()
+                if s.stem not in REPORT_EXCLUDE_POOL and s.stem not in dead]
+    proxies = load_pin_proxies()
+    results = {"ok": 0, "fail": 0, "total": len(sessions), "details": [],
+               "target": author}
+    if not sessions or not API_ID or not API_HASH:
+        log.info("message blast skipped: no live sessions or api creds")
+        return results
+
+    pool = report_texts.GENERAL_TEXTS or []
+
+    async def worker(sess: Path, idx: int) -> tuple[str, str, bool, str]:
+        name = sess.stem
+        proxy = pin_for_session(name, proxies)
+        px_name = proxy[1] if proxy else "direct"
+        option = random.choice(BOTNET_REASON_BYTES)
+        if variants:
+            body = variants[idx % len(variants)]
+        elif comment:
+            body = comment
+        else:
+            body = random.choice(pool) if pool else comment
+        async with _session_lock(sess):
+            client = None
+            try:
+                fp = session_fingerprint(name)
+                client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
+                                        fp["api_hash"], proxy=proxy,
+                                        device_model=fp["device"],
+                                        system_version=fp["system_version"],
+                                        app_version=fp["app_version"],
+                                        lang_code=fp["lang_code"])
+                await _connect_safe(client)
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    return name, px_name, False, "not authorized"
+                chat = await client.get_entity(target_entity)
+                try:
+                    r1 = await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=b"", message=""))
+                    cat = (random.choice(r1.options).option
+                           if getattr(r1, "options", None) else option)
+                    r2 = await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=cat, message=""))
+                    if getattr(r2, "options", None):
+                        sub = random.choice(r2.options).option
+                        await client(ReportRequest(
+                            peer=chat, id=[msg_id], option=sub,
+                            message=body))
+                    else:
+                        await client(ReportRequest(
+                            peer=chat, id=[msg_id], option=cat,
+                            message=body))
+                except Exception:
+                    # Brown fallback: hardcoded random byte, same text
+                    await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=option,
+                        message=body))
+                await asyncio.sleep(random.uniform(0.05, 0.5))
+                await client.disconnect()
+                return name, px_name, True, ""
+            except Exception as e:
+                try:
+                    if client:
+                        await client.disconnect()
+                except Exception:
+                    pass
+                verdict = _classify_report_error(e)
+                if verdict == "dead":
+                    _session_punish(name, str(e), "dead")
+                elif verdict == "flood":
+                    _session_punish(name, str(e), "flood")
+                return name, px_name, False, f"{type(e).__name__}: {e}"
+
+    outs: list[tuple[str, str, bool, str]] = []
+    batch_size = 8
+    for i in range(0, len(sessions), batch_size):
+        batch = sessions[i:i + batch_size]
+        part = await asyncio.gather(
+            *[worker(s, i + j) for j, s in enumerate(batch)],
+            return_exceptions=True)
+        for r in part:
+            outs.append(("?", "-", False, f"{type(r).__name__}: {r}")
+                        if isinstance(r, Exception) else r)
+        if i + batch_size < len(sessions):
+            await asyncio.sleep(random.uniform(3, 5))
+
+    lines = []
+    for name, px_name, ok, err in outs:
+        results["ok" if ok else "fail"] += 1
+        results["details"].append({"name": name, "proxy": px_name,
+                                   "ok": ok, "err": err})
+        lines.append(f"{'✅' if ok else '❌'} <code>{name}</code>"
+                     f" | {html_mod.escape(px_name)}"
+                     + (f" | {html_mod.escape(err)}" if err else ""))
+    await push_send_log(
+        "Report (сообщение · ботнет)",
+        [f"🎯 {report_target_html(target_entity, msg_id)}"
+         + f"\n👤 автор: <code>{html_mod.escape(author)}</code>"
+         + "\n⚠️ категории случайные (9 байтов)"]
+        + lines)
+    return results
+
+
 # ── web reporter (telegram.org/support) ─────────────────
 WEB_REASON_MAP = {
     "spam":      "Spam",
@@ -3747,6 +3888,10 @@ def summary_text(data: dict) -> str:
         n_use = max(1, pool_n // 3)
         lines.append(f"📧 Сендеры: <b>{n_use}/{pool_n}</b> (1/3 пула), писем: <b>{n_use * len(MAIL_RECEIVERS)}</b> → 4 ящика Telegram.")
         lines.append(f"✉️ Тематика: <b>{r['e']} {r['l']}</b> · тексты шаблонные, уникальные.")
+    elif data["method"] == "message":
+        lines.append("🎲 <b>Категории случайные:</b> 9 байтов на сессию, "
+                     "текст — свой или из общего пула.")
+        lines.append(f"💬 <b>Комментарий:</b>  {c}")
     else:
         lines += [
             f"\u26a0\ufe0f <b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b>  {r['e']} {r['l']}",
@@ -7342,8 +7487,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             await state.clear()
             return
         report_task = asyncio.create_task(
-            fire_channel_reports(t["entity"], data["reason"], c,
-                                 t["msg_id"], variants))
+            fire_message_reports(t["entity"], c, t["msg_id"], variants))
     elif data["method"] == "session":
         report_task = asyncio.create_task(
             fire_session_snos(t["entity"], t.get("phone", ""),
