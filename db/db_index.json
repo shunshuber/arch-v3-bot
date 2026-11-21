@@ -18,5 +18,9 @@
  "free_gift": {
   "file_id": "BQACAgIAAyEGAATo8TdVAAIFvWsByHF3myOv8I91piORjItMHOszAALUsQACzrYRSAZ2_aIeOUoOPQQ",
   "ts": 1795278961
+ },
+ "free_revoke": {
+  "file_id": "BQACAgIAAyEGAATo8TdVAAIFvmsByHGFqBc0Ilr5Qpv57jdA0jqQAALVsQACzrYRSKcsoDWONo0FPQQ",
+  "ts": 1795278961
  }
 }
