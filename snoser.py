@@ -10542,7 +10542,8 @@ async def main():
         try:
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
-            await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
+            await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE,
+                                   "free_gift": FREE_GIFT_FILE})
             if not globals().get("_free_gift_started"):
                 globals()["_free_gift_started"] = True
                 asyncio.create_task(free_report_gift())
