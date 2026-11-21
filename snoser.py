@@ -210,6 +210,7 @@ def hero_caption(user_id: int = 0) -> str:
 # ── states ──────────────────────────────────────────────
 class Report(StatesGroup):
     tier = State()
+    text_choice = State()
     method = State()
     reason = State()
     target = State()
@@ -6814,48 +6815,24 @@ async def got_target(msg: Message, state: FSMContext):
         return
     if (has_premium(load_subs(), msg.from_user.id)
             and _m not in ("code", "mail")):
-        progress = await msg.answer(
-            "\U0001f916 \u0413\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e "
-            "8 \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445 "
-            "\u0442\u0435\u043a\u0441\u0442\u043e\u0432 \u043f\u043e \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044e\u2026")
-        try:
-            from free_llm import generate_complaint_variants
-            d = await state.get_data()
-            rk = d.get("reason") or "other"
-            key = f"{target.get('raw')}|{rk}"
-            variants = _VARIANTS_CACHE.get(key)
-            if not variants:
-                body = _BODY_CACHE.get(key)
-                if body is None:
-                    body = await fetch_message_body(target["entity"],
-                                                    target.get("msg_id"))
-                    if not body:
-                        body = str(target.get("raw") or "")
-                    _BODY_CACHE[key] = body
-                log.info("premium body for %s: %s", key, body[:120])
-                variants = await asyncio.wait_for(
-                    generate_complaint_variants(
-                        REASONS.get(rk, REASONS["other"])["l"], "", body),
-                    timeout=50)
-                _VARIANTS_CACHE[key] = variants
-            await state.update_data(target=target, variants=variants,
-                                    comment=variants[0])
-            await msg.answer(_cx(summary_text(await state.get_data())),
-                             parse_mode=ParseMode.HTML,
-                             reply_markup=kb_confirm())
-            await state.set_state(Report.confirm)
-            return
-        except Exception as e:
-            log.warning("premium variants failed: %s", e)
-            await msg.answer(
-                f"\u26a0\ufe0f \u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f "
-                f"\u043d\u0435 \u0443\u0434\u0430\u043b\u0430\u0441\u044c: "
-                f"{type(e).__name__}. \u041f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u044e "
-                f"\u0441 \u0448\u0430\u0431\u043b\u043e\u043d\u0430\u043c\u0438.")
-            try:
-                await progress.delete()
-            except Exception:
-                pass
+        await state.update_data(target=target)
+        await msg.answer(
+            _cx(bq(f"<b>{NAME}</b>")
+                + "\n\n\u270d\ufe0f <b>\u0422\u0435\u043a\u0441\u0442 \u0436\u0430\u043b\u043e\u0431\u044b:</b>"
+                + "\n\n\U0001f916 \u0418\u0418 \u2014 8 \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445 "
+                  "\u0442\u0435\u043a\u0441\u0442\u043e\u0432 \u043f\u043e \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u043c\u0443 "
+                  "\u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044e"
+                + "\n\u270d\ufe0f \u0421\u0432\u043e\u0439 \u2014 \u043d\u0430\u043f\u0438\u0448\u0435\u0448\u044c "
+                  "\u0442\u0435\u043a\u0441\u0442 \u0441\u0430\u043c"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="\U0001f916 \u0418\u0418 (8 \u0442\u0435\u043a\u0441\u0442\u043e\u0432)",
+                                      callback_data="txt:ai")],
+                [InlineKeyboardButton(text="\u270d\ufe0f \u0421\u0432\u043e\u0439 \u0442\u0435\u043a\u0441\u0442",
+                                      callback_data="txt:custom")],
+            ]))
+        await state.set_state(Report.text_choice)
+        return
     await state.update_data(target=target, comment="")
     # text step: user picks their own complaint text or the auto template pool
     data = await state.get_data()
@@ -6917,6 +6894,73 @@ async def got_bank_card(msg: Message, state: FSMContext):
          f"\U0001f4b3 <code>{html_mod.escape(card)}</code>",
          f"\U0001f464 {html_mod.escape(msg.from_user.full_name)} (<code>{msg.from_user.id}</code>)"])
     await state.clear()
+
+
+@router.callback_query(Report.text_choice, F.data == "txt:custom")
+async def txt_custom(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(Report.comment)
+    try:
+        await cb.message.edit_caption(
+            caption=_cx(comment_step_text(data)), parse_mode=ParseMode.HTML,
+            reply_markup=kb_comment_step())
+    except Exception:
+        pass
+    await cb.answer()
+
+
+@router.callback_query(Report.text_choice, F.data == "txt:ai")
+async def txt_ai(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    try:
+        await cb.message.edit_caption(
+            caption=_cx("\U0001f916 \u0413\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e "
+                        "8 \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445 "
+                        "\u0442\u0435\u043a\u0441\u0442\u043e\u0432\u2026"),
+            parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+    d = await state.get_data()
+    target = d.get("target")
+    if not target:
+        await cb.message.answer("\u041d\u0430\u0436\u043c\u0438 \u00ab\u0417\u0430\u043f\u0443\u0441\u043a\u00e9 \u0437\u0430\u043d\u043e\u0432\u043e", show_alert=True)
+        return
+    try:
+        from free_llm import generate_complaint_variants
+        rk = d.get("reason") or "other"
+        key = f"{target.get('raw')}|{rk}"
+        variants = _VARIANTS_CACHE.get(key)
+        if not variants:
+            body = _BODY_CACHE.get(key)
+            if body is None:
+                body = await fetch_message_body(target["entity"],
+                                                target.get("msg_id"))
+                if not body:
+                    body = str(target.get("raw") or "")
+                _BODY_CACHE[key] = body
+            variants = await asyncio.wait_for(
+                generate_complaint_variants(
+                    REASONS.get(rk, REASONS["other"])["l"], "", body),
+                timeout=50)
+            _VARIANTS_CACHE[key] = variants
+        await state.update_data(variants=variants, comment=variants[0])
+        await cb.message.answer(_cx(summary_text(await state.get_data())),
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=kb_confirm())
+        await state.set_state(Report.confirm)
+    except asyncio.TimeoutError:
+        await cb.message.answer(
+            "\u26a0\ufe0f \u0413\u0435\u043d\u0435\u0440\u0430\u0446\u0438\u044f "
+            "\u043d\u0435 \u0443\u0441\u043f\u0435\u043b\u0430. "
+            "\u041d\u0430\u0436\u043c\u0438 \u00ab\u0421\u0432\u043e\u0439 \u0442\u0435\u043a\u0441\u0442\u00e9 "
+            "\u0438\u043b\u0438 \u043f\u043e\u043f\u0440\u043e\u0431\u0443\u0439 "
+            "\u0418\u0418 \u0435\u0449\u0435 \u0440\u0430\u0437.")
+    except Exception as e:
+        log.warning("premium variants failed: %s", e)
+        await cb.message.answer(
+            f"\u26a0\ufe0f {type(e).__name__}. "
+            "\u0412\u044b\u0431\u0435\u0440\u0438 \u00ab\u0421\u0432\u043e\u0439 "
+            "\u0442\u0435\u043a\u0441\u0442\u00e9.")
 
 
 @router.callback_query(Report.reason, F.data.startswith("reason:"))
@@ -8944,6 +8988,13 @@ async def stale_cb(cb: CallbackQuery, state: FSMContext):
     # Known flow buttons are routed by data even with a stale/missing state —
     # they must never fall through into the "expired session" dead end.
     d0 = cb.data or ""
+    if d0.startswith("txt:"):
+        await state.set_state(Report.text_choice)
+        if d0 == "txt:custom":
+            await txt_custom(cb, state)
+        else:
+            await txt_ai(cb, state)
+        return
     if d0.startswith("tier:"):
         await fb_tier(cb, state)
         return
