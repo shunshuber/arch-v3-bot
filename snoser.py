@@ -6523,14 +6523,19 @@ async def _transplant_archive_source(sess: Path) -> None:
 
 async def _transplant_drop_source(sess: Path) -> None:
     """Source already spent: remove its .session/.json locally and persist
-    the deletion, so the lolz folder holds only real candidates."""
+    the deletion, so the lolz folder holds only real candidates. The pool
+    copy shares the same auth key and dies with the logout, so it goes too."""
     base = Path(__file__).parent
     src = _transplant_file(sess)
     rels = []
-    for p in (src, TRANSPLANT_FOLDER / f"{sess.stem}.json"):
+    for p in (src, TRANSPLANT_FOLDER / f"{sess.stem}.json",
+              SESSIONS_DIR / f"{sess.stem}.session",
+              SESSIONS_DIR / f"{sess.stem}.json"):
         try:
             rel = str(p.relative_to(base)).replace("\\", "/")
         except ValueError:
+            continue
+        if not p.exists():
             continue
         try:
             p.unlink(missing_ok=True)
@@ -6539,7 +6544,8 @@ async def _transplant_drop_source(sess: Path) -> None:
         rels.append(rel)
     for ext in (".session-journal", "-journal"):
         Path(str(src) + ext).unlink(missing_ok=True)
-    await _persist_paths(rels, f"transplant: {sess.stem} moved out")
+    if rels:
+        await _persist_paths(rels, f"transplant: {sess.stem} moved out")
 
 
 async def _admin_send(text: str, kb=None) -> None:
@@ -6669,7 +6675,7 @@ async def pool_add_ready(cb: CallbackQuery):
 
 TRANSPLANT_QUEUE = Path(__file__).parent / "lolz_queue.json"
 TRANSPLANT_RETRY_SEC = 30 * 60      # 30 минут между попытками
-TRANSPLANT_MIN_AGE_SEC = 25 * 3600  # Telegram не даёт кикать свежие сессии
+TRANSPLANT_MIN_AGE_SEC = 24 * 3600  # Telegram не даёт кикать свежие сессии
 LOLZ_AGE_FILE = Path(__file__).parent / "lolz_age.json"
 
 
