@@ -5790,7 +5790,13 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         return await run_snos_flow(cb, username, phone, progress)
 
     progress = {"step": "\u23f3 \u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430"}
-    task = asyncio.create_task(snos_task())
+    task = track_report("session", snos_task())
+    if task is None:
+        await cb.message.answer(
+            _cx(method_busy_wait_text("session",
+                                      "и нажми «Запуск» снова.")),
+            parse_mode=ParseMode.HTML)
+        return
 
     sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
     started = asyncio.get_event_loop().time()
@@ -7100,9 +7106,46 @@ async def transplant_loop() -> None:
         await asyncio.sleep(TRANSPLANT_INTERVAL)
 
 
+# ── one active report blast per method, across all users ──
+METHOD_BUSY: dict[str, asyncio.Task] = {}
+
+
+def method_busy(method: str) -> bool:
+    task = METHOD_BUSY.get(method)
+    return bool(task is not None and not task.done())
+
+
+def method_busy_wait_text(method: str, hint: str = "и попробуй ещё раз.") -> str:
+    label = METHODS.get(method, {}).get("l", method)
+    return (f"⏳ <b>Метод «{html_mod.escape(str(label))}» занят.</b>\n"
+            f"Предыдущая жалоба ещё отправляется. "
+            f"Подожди, пока она закончится, {hint}")
+
+
+def track_report(method: str, coro) -> asyncio.Task | None:
+    """Claim the method slot atomically; None = ask the user to wait."""
+    if method_busy(method):
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return None
+    task = asyncio.create_task(coro)
+    METHOD_BUSY[method] = task
+
+    def _release(done: asyncio.Task) -> None:
+        if METHOD_BUSY.get(method) is done:
+            METHOD_BUSY.pop(method, None)
+
+    task.add_done_callback(_release)
+    return task
+
+
 async def report_gate_block(uid: int, method: str) -> str | None:
-    """Shared launch gate: wash flag, 20min method CD, 400s session rest.
-    Admin never waits — no cooldown is written for him either."""
+    """Shared launch gate: active blast, wash, 20min CD, 400s rest.
+    Admin skips cooldowns but never jumps a running blast."""
+    if method_busy(method):
+        return method_busy_wait_text(method)
     if user_is_admin(uid):
         return None
     if await wash_active_seconds():
@@ -7127,11 +7170,15 @@ async def got_target(msg: Message, state: FSMContext):
             return
         _block = await report_gate_block(msg.from_user.id, "account")
         if _block:
-            await msg.answer(_block)
+            await msg.answer(_block, parse_mode=ParseMode.HTML)
+            return
+        _acct_task = track_report("account", fire_profile_reports(
+            target["entity"], PROFILE_REPORT_TEXT))
+        if _acct_task is None:
+            await msg.answer(_cx(method_busy_wait_text(
+                "account", "и пришли цель ещё раз.")), parse_mode=ParseMode.HTML)
             return
         await state.clear()
-        asyncio.create_task(fire_profile_reports(
-            target["entity"], PROFILE_REPORT_TEXT))
         await msg.answer(_cx(
             bq(f"<b>{NAME}</b>  —  👤 Аккаунт")
             + f"\n\n🎯 Цель: <code>{html_mod.escape(str(target['raw']))}</code>"
@@ -7484,7 +7531,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     t = data["target"]
     _block = await report_gate_block(cb.from_user.id, data.get("method", ""))
     if _block:
-        await cb.message.answer(_block)
+        await cb.message.answer(_block, parse_mode=ParseMode.HTML)
         return
     r = reason_meta(data.get("reason") or "spam")
     m = METHODS[data["method"]]
@@ -7567,14 +7614,15 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             log.warning("auto-watch add failed: %s", _wa_err)
 
     if data["method"] == "code":
-        report_task = asyncio.create_task(code_flood(t["entity"]))
+        report_task = track_report(data["method"], code_flood(t["entity"]))
     elif data["method"] == "mail":
-        report_task = asyncio.create_task(mail_bulk_send(
+        report_task = track_report(data["method"], mail_bulk_send(
             tgt_raw, data["reason"]))
     elif is_web:
-        report_task = asyncio.create_task(fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
+        report_task = track_report(data["method"],
+            fire_web_reports(tgt_raw, r["l"], c, data["reason"]))
     elif data["method"] == "channel":
-        report_task = asyncio.create_task(
+        report_task = track_report(data["method"],
             fire_channel_reports(t["entity"], data["reason"], c,
                                  t.get("msg_id"), variants))
     elif data["method"] == "message":
@@ -7582,14 +7630,15 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             await cb.message.answer("Нужна ссылка на сообщение")
             await state.clear()
             return
-        report_task = asyncio.create_task(
+        report_task = track_report(data["method"],
             fire_message_reports(t["entity"], c, t["msg_id"], variants))
     elif data["method"] == "session":
-        report_task = asyncio.create_task(
+        report_task = track_report(data["method"],
             fire_session_snos(t["entity"], t.get("phone", ""),
                               cb.from_user.id if cb.from_user else 0))
     elif data["method"] == "telegraph":
-        report_task = asyncio.create_task(fire_telegraph_snos(tgt_raw, c))
+        report_task = track_report(data["method"],
+            fire_telegraph_snos(tgt_raw, c))
     elif data["method"] == "dsa":
         async def _dsa_sim():
             await asyncio.sleep(90)   # имитация работы DSA-отправки
@@ -7610,13 +7659,24 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             return {"ok": 1, "total": 1,
                     "details": [{"name": "dsa", "proxy": "sim",
                                  "ok": True, "err": ""}]}
-        report_task = asyncio.create_task(_dsa_sim())
+        report_task = track_report(data["method"], _dsa_sim())
     elif data["method"] == "account":
-        report_task = asyncio.create_task(fire_profile_reports(t["entity"], c))
+        report_task = track_report(data["method"],
+            fire_profile_reports(t["entity"], c))
     else:
-        report_task = asyncio.create_task(
+        report_task = track_report(data["method"],
             fire_reports(t["entity"], data["reason"], c,
                          t.get("msg_id"), data["method"], variants))
+
+    if report_task is None:
+        await cb.message.answer(
+            _cx(method_busy_wait_text(data["method"])),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Повторить",
+                                      callback_data="confirm:yes")]
+            ]))
+        return
 
     # ── loading animation while workers run ──
     is_code = data["method"] == "code"
