@@ -2230,9 +2230,6 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
             continue
         ok, why = session_usable(s.stem, ledger)
         (pool if ok else skipped).append((s, why))
-    # bot/personal: single session — one report is enough, never a pool wave
-    if method == "bot" and reason_key == "personal":
-        pool = random.sample(pool, 1) if pool else []
     sessions = [s for s, _ in pool]
     proxies = load_pin_proxies()
     reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
