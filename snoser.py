@@ -8475,7 +8475,7 @@ def _write_free_gift(state: dict) -> None:
     try:
         FREE_GIFT_FILE.write_text(txt, encoding="utf-8")
         commit_file_to_repo("free_gift.json", "free report gift", cooldown=0)
-        store.push_async("free_gift", txt)
+        store.push_async("free_gift", txt, force=True)
     except Exception as e:
         log.warning("free gift state write failed: %s", e)
 
@@ -8487,6 +8487,11 @@ async def free_report_gift() -> None:
             state = json.loads(FREE_GIFT_FILE.read_text(encoding="utf-8"))
         except Exception:
             state = {}
+        # legacy state from the throttled push: credited but nobody marked
+        # notified — users were already spammed, close it silently.
+        if state.get("credited") and not state.get("notified"):
+            state["notified"] = sorted(load_users())
+            _write_free_gift(state)
         if not state.get("credited"):
             subs = load_subs()
             users = load_users()
