@@ -6901,9 +6901,9 @@ async def txt_custom(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await state.set_state(Report.comment)
     try:
-        await cb.message.edit_caption(
-            caption=_cx(comment_step_text(data)), parse_mode=ParseMode.HTML,
-            reply_markup=kb_comment_step())
+        await safe_edit(cb.message, _cx(comment_step_text(data)),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=kb_comment_step())
     except Exception:
         pass
     await cb.answer()
@@ -6913,11 +6913,11 @@ async def txt_custom(cb: CallbackQuery, state: FSMContext):
 async def txt_ai(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     try:
-        await cb.message.edit_caption(
-            caption=_cx("\U0001f916 \u0413\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e "
-                        "8 \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445 "
-                        "\u0442\u0435\u043a\u0441\u0442\u043e\u0432\u2026"),
-            parse_mode=ParseMode.HTML)
+        await safe_edit(cb.message,
+                        _cx("\U0001f916 \u0413\u0435\u043d\u0435\u0440\u0438\u0440\u0443\u044e "
+                            "8 \u0443\u043d\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0445 "
+                            "\u0442\u0435\u043a\u0441\u0442\u043e\u0432\u2026"),
+                        parse_mode=ParseMode.HTML)
     except Exception:
         pass
     d = await state.get_data()
