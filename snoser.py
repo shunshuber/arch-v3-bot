@@ -4414,6 +4414,8 @@ async def menu_profile(cb: CallbackQuery):
         + (f" (@{html_mod.escape(username)})" if username != "\u2014" else "")
         + f"\n\U0001f194 <tg-spoiler>{u.id}</tg-spoiler>"
         + f"\n\U0001f511 {sub_line}"
+        + (f"\n\U0001f381 <b>\u0411\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 \u0440\u0435\u043f\u043e\u0440\u0442:</b> {free_balance(u.id)}"
+           if free_balance(u.id) else "")
         + "\n\n\U0001f50c \u0434\u0432\u0438\u0436\u043e\u043a \u0430\u043a\u0442\u0438\u0432\u0435\u043d \u00b7 \u043e\u043d\u043b\u0430\u0439\u043d 24/7"
     )
     await cb.message.edit_caption(
@@ -5790,13 +5792,27 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         return await run_snos_flow(cb, username, phone, progress)
 
     progress = {"step": "\u23f3 \u041f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u043a\u0430"}
+    _uid = cb.from_user.id
+    if not sub_is_active(_uid) and free_balance(_uid) <= 0:
+        await cb.message.answer(_cx(
+            "Пробный репорт уже использован. Для следующих жалоб нужна подписка."),
+            parse_mode=ParseMode.HTML)
+        return
+    _use_free = not sub_is_active(_uid) and free_balance(_uid) > 0
+    if not claim_user_in_flight(_uid):
+        await cb.message.answer(_cx(
+            "У тебя уже идёт другая жалоба. Дождись её окончания "
+            "и нажми «Запуск» снова."), parse_mode=ParseMode.HTML)
+        return
     task = track_report("session", snos_task())
     if task is None:
+        release_user_in_flight(_uid)
         await cb.message.answer(
             _cx(method_busy_wait_text("session",
                                       "и нажми «Запуск» снова.")),
             parse_mode=ParseMode.HTML)
         return
+    attach_report_settlement(task, _uid, _use_free)
 
     sp_frames = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
     started = asyncio.get_event_loop().time()
@@ -7148,6 +7164,10 @@ async def report_gate_block(uid: int, method: str) -> str | None:
         return method_busy_wait_text(method)
     if user_is_admin(uid):
         return None
+    if (method not in PREMIUM_METHODS and not sub_is_active(uid)
+            and free_balance(uid) <= 0):
+        return ("Пробный репорт уже использован. "
+                "Для следующих жалоб нужна подписка.")
     if await wash_active_seconds():
         return "Сессии на данный момент обновляются. Подождите 5 минут."
     _cd = await method_cooldown_left(uid, method)
@@ -7172,12 +7192,21 @@ async def got_target(msg: Message, state: FSMContext):
         if _block:
             await msg.answer(_block, parse_mode=ParseMode.HTML)
             return
+        _uid = msg.from_user.id
+        _use_free = not sub_is_active(_uid) and free_balance(_uid) > 0
+        if not claim_user_in_flight(_uid):
+            await msg.answer(_cx(
+                "У тебя уже идёт другая жалоба. Дождись её окончания "
+                "и пришли цель ещё раз."), parse_mode=ParseMode.HTML)
+            return
         _acct_task = track_report("account", fire_profile_reports(
             target["entity"], PROFILE_REPORT_TEXT))
         if _acct_task is None:
+            release_user_in_flight(_uid)
             await msg.answer(_cx(method_busy_wait_text(
                 "account", "и пришли цель ещё раз.")), parse_mode=ParseMode.HTML)
             return
+        attach_report_settlement(_acct_task, _uid, _use_free)
         await state.clear()
         await msg.answer(_cx(
             bq(f"<b>{NAME}</b>  —  👤 Аккаунт")
@@ -7613,6 +7642,19 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         except Exception as _wa_err:
             log.warning("auto-watch add failed: %s", _wa_err)
 
+    _uid = cb.from_user.id if cb.from_user else 0
+    _use_free = (data["method"] not in PREMIUM_METHODS
+                 and not sub_is_active(_uid) and free_balance(_uid) > 0)
+    if not claim_user_in_flight(_uid):
+        await cb.message.answer(_cx(
+            "У тебя уже идёт другая жалоба. Дождись её окончания "
+            "и нажми «Повторить»."), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Повторить",
+                                      callback_data="confirm:yes")]
+            ]))
+        return
+
     if data["method"] == "code":
         report_task = track_report(data["method"], code_flood(t["entity"]))
     elif data["method"] == "mail":
@@ -7669,6 +7711,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                          t.get("msg_id"), data["method"], variants))
 
     if report_task is None:
+        release_user_in_flight(_uid)
         await cb.message.answer(
             _cx(method_busy_wait_text(data["method"])),
             parse_mode=ParseMode.HTML,
@@ -7677,6 +7720,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
                                       callback_data="confirm:yes")]
             ]))
         return
+    attach_report_settlement(report_task, _uid, _use_free)
 
     # ── loading animation while workers run ──
     is_code = data["method"] == "code"
@@ -8370,6 +8414,116 @@ def save_subs(subs: dict) -> None:
     store.push_async("subs", SUBS_FILE.read_text(encoding="utf-8"))
 
 
+# ── one trial report per user (non-premium methods only) ──
+FREE_GIFT_FILE = Path(__file__).parent / "free_gift.json"
+_FREE_LOCK = asyncio.Lock()
+USERS_IN_FLIGHT: set[int] = set()
+
+
+def free_balance(user_id: int) -> int:
+    rec = load_subs().get(str(user_id)) or {}
+    try:
+        return max(0, int(rec.get("free_reports") or 0))
+    except Exception:
+        return 0
+
+
+def sub_is_active(user_id: int) -> bool:
+    state, _until = sub_quality(load_subs(), user_id)
+    return state in ("admin", "forever", "active", "premium")
+
+
+def claim_user_in_flight(user_id: int) -> bool:
+    if user_id in USERS_IN_FLIGHT:
+        return False
+    USERS_IN_FLIGHT.add(user_id)
+    return True
+
+
+def release_user_in_flight(user_id: int) -> None:
+    USERS_IN_FLIGHT.discard(user_id)
+
+
+async def free_spend(user_id: int) -> bool:
+    """Consume a trial report only after a successful send."""
+    async with _FREE_LOCK:
+        subs = load_subs()
+        rec = subs.setdefault(str(user_id), {})
+        n = free_balance(user_id)
+        if n <= 0:
+            return False
+        rec["free_reports"] = n - 1
+        save_subs(subs)
+        return True
+
+
+def attach_report_settlement(task: asyncio.Task, user_id: int,
+                             use_free: bool) -> None:
+    """Release the user slot and charge the trial report only on success."""
+    def _done(done: asyncio.Task) -> None:
+        release_user_in_flight(user_id)
+        try:
+            res = done.result()
+            if use_free and res and int(res.get("ok") or 0) > 0:
+                asyncio.create_task(free_spend(user_id))
+        except Exception:
+            pass
+    task.add_done_callback(_done)
+
+
+def _write_free_gift(state: dict) -> None:
+    txt = json.dumps(state, ensure_ascii=False, indent=1)
+    try:
+        FREE_GIFT_FILE.write_text(txt, encoding="utf-8")
+        commit_file_to_repo("free_gift.json", "free report gift", cooldown=0)
+        store.push_async("free_gift", txt)
+    except Exception as e:
+        log.warning("free gift state write failed: %s", e)
+
+
+async def free_report_gift() -> None:
+    """One-time: credit every known user and notify them. Resumable on boot."""
+    try:
+        try:
+            state = json.loads(FREE_GIFT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
+        if not state.get("credited"):
+            subs = load_subs()
+            users = load_users()
+            for uid_s in users:
+                rec = subs.setdefault(str(uid_s), {})
+                rec["free_reports"] = max(1, int(rec.get("free_reports") or 0))
+            save_subs(subs)
+            state["credited"] = True
+            state["notified"] = []
+            _write_free_gift(state)
+            log.info("free report: credited %d users", len(users))
+        text = (
+            bq(f"<b>{NAME}</b>  ·  \U0001f381 <b>+1 \u0411\u0435\u0441\u043f\u043b\u0430\u0442\u043d\u044b\u0439 \u0440\u0435\u043f\u043e\u0440\u0442!</b>")
+            + "\n\n\u041e\u0434\u0438\u043d \u043f\u0440\u043e\u0431\u043d\u044b\u0439 \u0440\u0435\u043f\u043e\u0440\u0442 \u043d\u0430 \u043b\u044e\u0431\u043e\u0439 \u043e\u0431\u044b\u0447\u043d\u044b\u0439 \u043c\u0435\u0442\u043e\u0434."
+            + "\n\n\u0415\u0441\u043b\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0430 \u043d\u0435 \u0443\u0434\u0430\u0441\u0442\u0441\u044f \u2014 \u0440\u0435\u043f\u043e\u0440\u0442 \u0432\u0435\u0440\u043d\u0451\u0442\u0441\u044f \u043d\u0430 \u0431\u0430\u043b\u0430\u043d\u0441."
+            + "\n\u0414\u0430\u043b\u044c\u0448\u0435 \u2014 \u043f\u043e \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0435."
+        )
+        notified = set(state.get("notified") or [])
+        sent = 0
+        for uid_s in load_users():
+            if uid_s in notified:
+                continue
+            try:
+                await send_main(int(uid_s), _cx(text), parse_mode=ParseMode.HTML)
+                sent += 1
+            except Exception as e:
+                log.warning("free gift notify %s: %s", uid_s, e)
+            notified.add(uid_s)
+            state["notified"] = sorted(notified)
+            _write_free_gift(state)
+            await asyncio.sleep(0.12)
+        log.info("free report: notified %d users", sent)
+    except Exception as e:
+        log.warning("free report gift failed: %s", e)
+
+
 def user_is_admin(user_id: int) -> bool:
     if bool(ADMIN_ID) and user_id == int(ADMIN_ID):
         return True
@@ -8766,6 +8920,8 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
     subs = load_subs()
     s, until = sub_quality(subs, cb.from_user.id)
     if s in ("admin", "forever", "active", "premium"):
+        return True
+    if free_balance(cb.from_user.id) > 0:
         return True
     caption = (
         bq(f"<b>{NAME}</b>  —  Оплата")
@@ -10387,6 +10543,9 @@ async def main():
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
             await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
+            if not globals().get("_free_gift_started"):
+                globals()["_free_gift_started"] = True
+                asyncio.create_task(free_report_gift())
             if not globals().get("_ct_poller_started"):
                 globals()["_ct_poller_started"] = True
                 asyncio.create_task(ct_poller_loop(bot))
