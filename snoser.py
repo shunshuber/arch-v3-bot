@@ -572,6 +572,103 @@ def bot_reason_text(reason_key: str) -> str:
     return BOT_REASONS.get(reason_key, BOT_REASONS["personal"])["text"]
 
 
+# ── channel-method: Brown V2 six categories, paired texts ──
+CHANNEL_REASONS = {
+    "personal": {"e": "\U0001f510", "l": "Персональные данные",
+                 "cls": "personal"},
+    "spam":     {"e": "\U0001f4e2", "l": "Спам / Мошенничество",
+                 "cls": "spam"},
+    "adult":    {"e": "\U0001f51e", "l": "18+ Контент", "cls": "adult"},
+    "children": {"e": "\U0001f476", "l": "Детский контент",
+                 "cls": "children"},
+    "violence": {"e": "\U0001f4a5", "l": "Насилие / Экстремизм",
+                 "cls": "violence"},
+    "other":    {"e": "\U0001f4dd", "l": "Прочее", "cls": "other"},
+}
+
+CHANNEL_REASON_CLASSES = {
+    "personal": InputReportReasonPersonalDetails,
+    "spam": InputReportReasonSpam,
+    "adult": InputReportReasonPornography,
+    "children": InputReportReasonChildAbuse,
+    "violence": InputReportReasonViolence,
+    "other": InputReportReasonOther,
+}
+
+CHANNEL_FALLBACK_BYTES = {
+    "personal": b"6", "spam": b"9", "adult": b"5",
+    "children": b"2", "violence": b"3", "other": b"a",
+}
+
+CHANNEL_TEXTS = {
+    "personal": [
+        "Канал собирает и распространяет личные данные пользователей: ИНН, адреса, телефоны. Прошу заблокировать.",
+        "This channel collects and distributes personal data: phone numbers, IDs, addresses. Please block.",
+        "Канал публикует конфиденциальные данные пользователей без их согласия. Требую блокировки.",
+        "Channel leaks private user data including phone numbers, home addresses and IDs. Block required.",
+        "Канал незаконно распространяет персональные данные: паспорта, телефоны, адреса. Прошу заблокировать.",
+        "This channel illegally distributes personal data: passports, phones, addresses. Please block.",
+        "Канал публикует личные данные людей без согласия. Нарушает ToS. Прошу разобраться.",
+        "Channel posts personal data of users without consent, violating Telegram ToS. Block it.",
+    ],
+    "spam": [
+        "Канал распространяет массовый спам и мошеннические предложения. Прошу заблокировать.",
+        "This channel distributes mass spam and fraudulent offers. Please block immediately.",
+        "Канал рассылает спам-контент и обманывает пользователей. Требую блокировки.",
+        "Channel is spreading spam and scam content to users. Immediate block required.",
+        "Канал нарушает правила Telegram: массовый спам и мошенничество. Прошу разобраться.",
+        "This channel violates Telegram ToS through mass spam and fraud. Please block.",
+        "Канал используется для распространения спама и фишинга. Прошу заблокировать.",
+        "Channel conducts phishing and spam campaigns against users. Block required.",
+    ],
+    "adult": [
+        "Канал распространяет порнографический контент без верификации возраста. Прошу заблокировать.",
+        "This channel distributes explicit adult content without age verification. Please block.",
+        "Канал публикует контент 18+ без проверки возраста подписчиков. Требую блокировки.",
+        "Channel posts pornographic material without age gates or consent. Immediate block needed.",
+        "Канал рассылает неприемлемый контент для взрослых без ограничений. Прошу принять меры.",
+        "This channel spreads adult content without age verification violating ToS. Please block.",
+        "Канал нарушает ToS Telegram: публикует порнографию без верификации. Прошу заблокировать.",
+        "Channel violates Telegram ToS by distributing adult content without age checks. Block it.",
+    ],
+    "children": [
+        "Канал содержит и распространяет незаконный контент с несовершеннолетними. Требую блокировки.",
+        "This channel distributes illegal content involving minors (CSAM). Block immediately.",
+        "Канал публикует материалы сексуального насилия над детьми. Требую экстренной блокировки.",
+        "Channel contains child sexual abuse material. Urgent block and report to authorities.",
+        "Канал распространяет незаконный контент с участием детей. Это уголовно наказуемо. Заблокируйте.",
+        "This channel spreads illegal CSAM content. Immediate removal and block required.",
+        "Канал содержит детскую порнографию. Требую немедленного удаления и блокировки.",
+        "Channel distributes child abuse material violating international law. Block immediately.",
+    ],
+    "violence": [
+        "Канал публикует контент, пропагандирующий насилие и призывающий к жестокости. Прошу заблокировать.",
+        "This channel promotes violence and incites users to commit violent acts. Please block.",
+        "Канал распространяет материалы, пропагандирующие насилие и экстремизм. Требую блокировки.",
+        "Channel spreads violent content and extremist propaganda. Immediate block required.",
+        "Канал публикует призывы к насилию и жестокие материалы. Прошу принять меры.",
+        "This channel incites violence and distributes harmful extremist content. Please block.",
+        "Канал нарушает ToS Telegram: пропаганда насилия и жестокости. Прошу заблокировать.",
+        "Channel violates Telegram ToS by promoting violence and extremism. Block required.",
+    ],
+    "other": [
+        "Канал систематически нарушает правила Telegram и ведёт мошенническую деятельность. Прошу заблокировать.",
+        "This channel systematically violates Telegram ToS and engages in fraud. Please block.",
+        "Канал нарушает правила платформы и причиняет вред пользователям. Требую блокировки.",
+        "Channel breaks Telegram rules and harms users through repeated violations. Block needed.",
+        "Канал ведёт незаконную деятельность и нарушает ToS Telegram. Прошу разобраться.",
+        "This channel conducts illegal activities and violates Telegram Terms of Service. Block it.",
+        "Канал систематически нарушает правила и используется для обмана. Прошу заблокировать.",
+        "Channel is used for systematic fraud and ToS violations. Immediate action required.",
+    ],
+}
+
+
+def reason_meta(key: str) -> dict:
+    """Label/icon for any reason key: channel categories, then the rest."""
+    return CHANNEL_REASONS.get(key) or REASONS.get(key) or REASONS["other"]
+
+
 def pick_comment(reason_key: str, method: str = "") -> str:
     """Strong auto-template for the category; falls back to 'other' pool.
     The leading entity noun is swapped to match the real target type
@@ -583,7 +680,11 @@ def pick_comment(reason_key: str, method: str = "") -> str:
     if _fixed:
         return _fixed
     if method == "channel":
-        # Brown pool: category + general mix, no entity swap needed
+        # Brown pool: category texts + general mix, cut to 200
+        pool = list(CHANNEL_TEXTS.get(reason_key) or [])
+        pool += list(report_texts.GENERAL_TEXTS)
+        if pool:
+            return random.choice(pool)[:200]
         return report_texts.get_random_text(reason_key)
     pool = COMMENT_TEMPLATES.get(reason_key) or COMMENT_TEMPLATES["other"]
     return _swap_entity(random.choice(pool), method)
@@ -2481,73 +2582,50 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     return results
 
 
-# ── channel-method engine (1 report/session, 3-step probe w/ msg_ids) ──
-CH_BATCH_SIZE = 8
-
-
-async def _ch_three_step(client, entity, reason_key: str, text: str,
-                         msg_ids: list) -> tuple[bool, str]:
-    # BR channel flow: the server hands us the category tree
-    # (category -> subcategory -> text); reason bytes as fallback.
-    from telethon.tl.functions.messages import ReportRequest
-    fallback = {"spam": b"9", "fraud": b"9", "violence": b"3", "porn": b"5",
-                "child": b"2", "copyright": b"a", "drugs": b"a",
-                "personal": b"6", "fake": b"a", "sexwork": b"5", "other": b"a"}
-    try:
-        r1 = await client(ReportRequest(peer=entity, id=msg_ids, option=b"", message=""))
-        if getattr(r1, "options", None):
-            cat = random.choice(r1.options).option
-        else:
-            cat = fallback.get(reason_key, b"a")
-        r2 = await client(ReportRequest(peer=entity, id=msg_ids, option=cat, message=""))
-        if getattr(r2, "options", None):
-            sub = random.choice(r2.options).option
-            await client(ReportRequest(peer=entity, id=msg_ids, option=sub, message=text))
-        else:
-            await client(ReportRequest(peer=entity, id=msg_ids, option=cat, message=text))
-        return True, ""
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+# ── channel-method: Brown V2 engine (2 reports/session) ──
+CHANNEL_BATCH_SIZE = 8
+CHANNEL_ATTEMPTS = 2
 
 
 async def fire_channel_reports(target_entity: str, reason_key: str, comment: str,
-                                msg_id: int | None,
-                                variants: list[str] | None = None) -> dict:
-    # BR channel-method: every usable session fires ONE report on the
-    # channel (or on a single post when msg_id is present). Text per
-    # session: custom comment, else Brown pool (category + general) cut
-    # to 200 chars. 3-step probe first, reason-class fallback second;
-    # batches of 8 with a 3-5s pause; same fingerprint + sticky IP +
-    # ledger rationing as the session engine.
+                               msg_id: int | None,
+                               variants: list[str] | None = None) -> dict:
+    """Brown V2 channel-method: the whole pool, batches of 8 with a 3-5s
+    pause, two attempts per session. Every attempt walks the 3-step
+    category tree; on failure it falls back to ReportPeerRequest (whole
+    channel) or ReportRequest with the post id. Text: own/variant, else a
+    random line from the category pool mixed with GENERAL_TEXTS, 200 chars."""
+    from telethon.errors import FloodWaitError
     from telethon.tl.functions.messages import ReportRequest
-    ledger = _ledger_load()
-    pool, skipped = [], []
-    for s in load_sessions():
-        if s.stem in REPORT_EXCLUDE_POOL:
-            continue
-        ok, why = session_usable(s.stem, ledger)
-        (pool if ok else skipped).append((s, why))
-    sessions = [s for s, _ in pool]
+
+    rk = reason_key if reason_key in CHANNEL_REASONS else "other"
+    reason_main = CHANNEL_REASON_CLASSES[rk]()
+    fallback_reason = CHANNEL_FALLBACK_BYTES[rk]
+    dead = set(_status_load().get("dead") or [])
+    sessions = [s for s in load_sessions()
+                if s.stem not in REPORT_EXCLUDE_POOL and s.stem not in dead]
     proxies = load_pin_proxies()
-    reason_cls = REASON_MAP.get(reason_key, InputReportReasonOther)
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
-
     if not sessions or not API_ID or not API_HASH:
-        log.info("channel page completed")
-        return fake_results()
+        log.info("channel blast skipped: no live sessions or api creds")
+        return results
 
-    async def session_worker(sess: Path, idx: int) -> tuple[str, str, int, str]:
+    pool = list(CHANNEL_TEXTS.get(rk) or []) + list(report_texts.GENERAL_TEXTS)
+    msg_ids = [msg_id] if msg_id else []
+
+    async def worker(sess: Path, idx: int) -> tuple[str, str, int, str]:
         name = sess.stem
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
         if variants:
-            text = variants[idx % len(variants)]
+            body = variants[idx % len(variants)]
         elif comment:
-            text = comment
+            body = comment
         else:
-            text = report_texts.get_random_text(reason_key)[:200]
+            body = random.choice(pool) if pool else ""
+        body = body[:200]
         sent = 0
-        last_err = ""
+        last = "ОТКЛОНЕНО"
         async with _session_lock(sess):
             client = None
             try:
@@ -2561,39 +2639,55 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
                 await _connect_safe(client)
                 if not await client.is_user_authorized():
                     await client.disconnect()
-                    _session_punish(name, "not authorized", "dead")
                     return name, px_name, 0, "not authorized"
-                entity = await client.get_entity(target_entity)
-                msg_ids = [msg_id] if msg_id else []
-                for _attempt in range(1):
+                peer = await client.get_entity(target_entity)
+                for _attempt in range(CHANNEL_ATTEMPTS):
                     try:
-                        ok3, _err3 = await _ch_three_step(
-                            client, entity, reason_key, text, msg_ids)
-                        if not ok3:
-                            # fallback: old reason-class call
+                        try:
+                            r1 = await client(ReportRequest(
+                                peer=peer, id=msg_ids, option=b"", message=""))
+                            cat = (random.choice(r1.options).option
+                                   if getattr(r1, "options", None)
+                                   else fallback_reason)
+                            r2 = await client(ReportRequest(
+                                peer=peer, id=msg_ids, option=cat,
+                                message=""))
+                            if getattr(r2, "options", None):
+                                sub = random.choice(r2.options).option
+                                await client(ReportRequest(
+                                    peer=peer, id=msg_ids, option=sub,
+                                    message=body))
+                            else:
+                                await client(ReportRequest(
+                                    peer=peer, id=msg_ids, option=cat,
+                                    message=body))
+                        except Exception:
                             if msg_ids:
                                 await client(ReportRequest(
-                                    peer=entity, id=msg_ids,
-                                    reason=reason_cls(), message=text))
+                                    peer=peer, id=msg_ids,
+                                    reason=reason_main, message=body))
                             else:
                                 await client(ReportPeerRequest(
-                                    peer=entity, reason=reason_cls(),
-                                    message=text))
+                                    peer=peer, reason=reason_main,
+                                    message=body))
                         sent += 1
-                        _ledger_bump(name)
-                    except Exception as e:
-                        verdict = _classify_report_error(e)
-                        if verdict == "dead":
-                            _session_punish(name, str(e), "dead")
-                        elif verdict == "flood":
-                            _session_punish(name, str(e), "flood")
-                        last_err = f"{type(e).__name__}: {e}"
+                        await asyncio.sleep(random.uniform(0.5, 1.2))
+                    except FloodWaitError as e:
+                        last = f"FLOOD {e.seconds}s"
                         break
-                    await asyncio.sleep(random.uniform(0.5, 1.2))
+                    except Exception as e:
+                        last = f"{type(e).__name__}: {e}"
+                        break
                 await client.disconnect()
-                return name, px_name, sent, ("" if sent else (last_err or "rejected"))
+                return name, px_name, sent, ("" if sent else last)
+            except FloodWaitError as e:
+                try:
+                    if client:
+                        await client.disconnect()
+                except Exception:
+                    pass
+                return name, px_name, sent, f"FLOOD {e.seconds}s"
             except Exception as e:
-                log.error("session %s setup failed: %s", name, e)
                 try:
                     if client:
                         await client.disconnect()
@@ -2606,44 +2700,34 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
                     _session_punish(name, str(e), "flood")
                 return name, px_name, sent, f"{type(e).__name__}: {e}"
 
-    outs = []
-    for i in range(0, len(sessions), CH_BATCH_SIZE):
-        batch = sessions[i:i + CH_BATCH_SIZE]
-        outs += await asyncio.gather(
-            *[session_worker(s, i) for i, s in enumerate(batch)])
-        if i + CH_BATCH_SIZE < len(sessions):
+    outs: list[tuple[str, str, int, str]] = []
+    for i in range(0, len(sessions), CHANNEL_BATCH_SIZE):
+        batch = sessions[i:i + CHANNEL_BATCH_SIZE]
+        part = await asyncio.gather(
+            *[worker(s, i + j) for j, s in enumerate(batch)],
+            return_exceptions=True)
+        for r in part:
+            outs.append(("?", "-", 0, f"{type(r).__name__}: {r}")
+                        if isinstance(r, Exception) else r)
+        if i + CHANNEL_BATCH_SIZE < len(sessions):
             await asyncio.sleep(random.uniform(3, 5))
 
-    real_lines = []
-    for s, why in skipped:
-        real_lines.append(f"\u23ED <code>{s.stem}</code> \u2014 {why}")
+    lines = []
     for name, px_name, sent, err in outs:
         ok = sent > 0
         results["ok" if ok else "fail"] += 1
-        results["details"].append({
-            "name": name, "proxy": px_name, "ok": ok, "err": err,
-        })
-        real_lines.append(
-            f"{'✅' if ok else '❌'} <code>{name}</code>"
-            f" | {html_mod.escape(px_name)} | {sent}/1"
-            + (f" | {html_mod.escape(err)}" if err else ""))
-
-    sample = (comment or report_texts.get_random_text(reason_key))[:200]
+        results["details"].append({"name": name, "proxy": px_name,
+                                   "ok": ok, "err": err})
+        lines.append(f"{'✅' if ok else '❌'} <code>{name}</code>"
+                     f" | {html_mod.escape(px_name)}"
+                     f" | {sent}/{CHANNEL_ATTEMPTS}"
+                     + (f" | {html_mod.escape(err)}" if err else ""))
     await push_send_log(
         "Report (канал-метод)",
         [f"🎯 {report_target_html(target_entity, msg_id)}"
-         + f"\n⚠️ {REASONS.get(reason_key, {}).get('l', reason_key)}",
-         f"💬 {html_mod.escape(sample)}"]
-        + real_lines)
-
-    fake = _fake_session_rows()
-    results["details"] = [
-        {"name": fk["name"], "proxy": fk["proxy"], "ok": True, "err": ""}
-        for fk in fake
-    ]
-    results["ok"] = len(fake)
-    results["total"] = len(fake)
-
+         + f"\n⚠️ {CHANNEL_REASONS[rk]['e']} {CHANNEL_REASONS[rk]['l']}",
+         f"💬 {html_mod.escape((comment or (pool[0] if pool else ''))[:200])}"]
+        + lines)
     return results
 
 
@@ -3803,6 +3887,9 @@ def kb_reasons(method: str = "") -> InlineKeyboardMarkup:
     if method == "bot":
         items = [(k, {"l": v["e"] + " " + v["l"]})
                  for k, v in BOT_REASONS.items()]
+    elif method == "channel":
+        items = [(k, {"l": v["e"] + " " + v["l"]})
+                 for k, v in CHANNEL_REASONS.items()]
     else:
         items = list(REASONS.items())
     for i in range(0, len(items), 2):
@@ -3832,7 +3919,7 @@ def kb_comment_step() -> InlineKeyboardMarkup:
 
 def comment_step_text(data: dict) -> str:
     m = METHODS[data["method"]]
-    r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
+    r = reason_meta(data.get("reason") or "spam")
     t = data["target"]
     return (
         bq(f"<b>{NAME}</b>  —  Текст жалобы")
@@ -3851,7 +3938,7 @@ def kb_confirm() -> InlineKeyboardMarkup:
 
 
 def summary_text(data: dict) -> str:
-    r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
+    r = reason_meta(data.get("reason") or "spam")
     t = data["target"]
     m = METHODS[data["method"]]
     c = data.get("comment", "")
@@ -7096,6 +7183,13 @@ async def got_target(msg: Message, state: FSMContext):
         await msg.answer(_cx("❌ Нужна ссылка на статью telegra.ph."),
                          parse_mode=ParseMode.HTML)
         return
+    if _m == "channel":
+        await state.update_data(target=target, comment="", variants=None)
+        data = await state.get_data()
+        await msg.answer(_cx(summary_text(data)), parse_mode=ParseMode.HTML,
+                         reply_markup=kb_confirm())
+        await state.set_state(Report.confirm)
+        return
     if _m == "bot":
         rk = (await state.get_data()).get("reason") or "personal"
         text = bot_reason_text(rk)
@@ -7259,15 +7353,17 @@ async def txt_ai(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(Report.reason, F.data.startswith("reason:"))
 async def got_reason(cb: CallbackQuery, state: FSMContext):
     key = cb.data.split(":", 1)[1]
-    if (await state.get_data()).get("method") == "account":
+    _d0 = await state.get_data()
+    if _d0.get("method") == "account":
         key = "drugs"
-    if key not in REASONS:
-        await cb.answer("\u274c", show_alert=True)
-        return
+    if not (_d0.get("method") == "channel" and key in CHANNEL_REASONS):
+        if key not in REASONS:
+            await cb.answer("\u274c", show_alert=True)
+            return
     await state.update_data(reason=key)
     data = await state.get_data()
     m = METHODS[data["method"]]
-    r = REASONS[key]
+    r = reason_meta(key)
     await cb.message.edit_caption(
         caption=_cx((
             bq(f"<b>{NAME}</b>")
@@ -7390,7 +7486,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     if _block:
         await cb.message.answer(_block)
         return
-    r = REASONS.get(data.get("reason") or "spam", REASONS["spam"])
+    r = reason_meta(data.get("reason") or "spam")
     m = METHODS[data["method"]]
     c = data.get("comment", "")   # empty = per-session unique templates downstream
     variants = data.get("variants")
