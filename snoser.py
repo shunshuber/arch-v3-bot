@@ -4073,6 +4073,7 @@ METHOD_COOLDOWN_SEC = 20 * 60
 SESSION_REST_SEC = 400
 WASH_ETA_SEC = 300
 COOLDOWN_FILE = Path(__file__).parent / "method_cooldown.json"
+_CD_PUT_TASKS: set = set()
 _wash_cache: tuple[float, int] = (0, 0)
 
 
@@ -4106,15 +4107,9 @@ async def wash_active_seconds() -> int:
 
 
 async def method_cooldown_left(uid: int, method: str) -> int:
+    # local file is written on every set in this single-bot process; a remote
+    # GitHub read here cost seconds on every callback and expired queries.
     d = _cooldown_local()
-    txt = await store._gh_get_text("method_cooldown.json")
-    if txt:
-        try:
-            for k, v in (json.loads(txt) or {}).items():
-                if k not in d or (v.get(method) or 0) > (d[k].get(method) or 0):
-                    d[k] = v
-        except Exception:
-            pass
     ts = (d.get(str(uid)) or {}).get(method) or 0
     return max(0, int(METHOD_COOLDOWN_SEC - (time.time() - float(ts))))
 
@@ -4128,8 +4123,12 @@ async def method_cooldown_set(uid: int, method: str) -> None:
     except Exception:
         pass
     try:
-        await store._gh_put_text(
-            "method_cooldown.json", txt, f"cooldown {uid} {method}")
+        # fire-and-forget: never make a user wait on a GitHub write just to
+        # acknowledge a button press.
+        _t = asyncio.create_task(store._gh_put_text(
+            "method_cooldown.json", txt, f"cooldown {uid} {method}"))
+        _CD_PUT_TASKS.add(_t)
+        _t.add_done_callback(_CD_PUT_TASKS.discard)
     except Exception:
         pass
 
@@ -8516,9 +8515,10 @@ async def free_report_gift() -> None:
             except Exception as e:
                 log.warning("free gift notify %s: %s", uid_s, e)
             notified.add(uid_s)
-            state["notified"] = sorted(notified)
-            _write_free_gift(state)
             await asyncio.sleep(0.12)
+        # one state write for the whole broadcast, not one git push per user
+        state["notified"] = sorted(notified)
+        _write_free_gift(state)
         log.info("free report: notified %d users", sent)
     except Exception as e:
         log.warning("free report gift failed: %s", e)
