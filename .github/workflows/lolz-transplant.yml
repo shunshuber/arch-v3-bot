@@ -57,6 +57,8 @@ jobs:
                       ok = False
                   await snoser._transplant_mark(s, ok is True)
                   print(f"[TRANSPLANT] queue:", await asyncio.to_thread(snoser._queue_load), flush=True)
+              moved = await snoser.add_ready_to_pool()
+              print("[POOL] added:", moved, flush=True)
 
           asyncio.run(go())
           PY
