@@ -7086,6 +7086,9 @@ async def transplant_loop() -> None:
                         log.warning("transplant %s crashed: %s", s.stem, e)
                         res = False
                     await _transplant_mark(s, res is True)
+                moved = await add_ready_to_pool()
+                if moved:
+                    log.info("transplant: pooled %s", ", ".join(moved))
         except asyncio.CancelledError:
             return
         except Exception as e:

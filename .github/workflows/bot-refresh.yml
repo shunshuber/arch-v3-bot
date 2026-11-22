@@ -33,6 +33,7 @@ jobs:
       CLOUDTIPS_REFRESH: ${{ secrets.CLOUDTIPS_REFRESH }}
       LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TRANSPLANT_WORKER: "1"
       WEB_COUNT: "8"
     steps:
       - uses: actions/checkout@v4
