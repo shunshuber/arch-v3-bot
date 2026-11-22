@@ -6951,10 +6951,20 @@ async def _transplant_one(sess: Path) -> bool:
                 log.info("transplant %s: qr accepted (%s)", name,
                          type(res).__name__)
                 try:
-                    await asyncio.wait_for(qr.wait(timeout=TRANSPLANT_CODE_WAIT),
-                                           timeout=TRANSPLANT_CODE_WAIT + 10)
+                    await asyncio.wait_for(qr.wait(timeout=60), timeout=70)
+                except SessionPasswordNeededError:
+                    log.info("transplant %s: qr needs cloud password", name)
+                    try:
+                        await new.sign_in(password=TRANSPLANT_CLOUD_PASS)
+                        log.info("transplant %s: cloud password accepted", name)
+                    except Exception as pe:
+                        log.warning("transplant %s: cloud password failed: "
+                                    "%s: %s", name, type(pe).__name__, pe)
+                except asyncio.TimeoutError:
+                    log.warning("transplant %s: qr wait timed out", name)
                 except Exception as e:
-                    log.warning("transplant %s: qr wait: %s", name, e)
+                    log.warning("transplant %s: qr wait: %s: %s", name,
+                                type(e).__name__, e)
                 if not await new.is_user_authorized():
                     log.warning("transplant %s: qr login left session "
                                 "unauthorized", name)
