@@ -6875,7 +6875,7 @@ async def _transplant_one(sess: Path) -> bool:
     """Полный цикл пересадки одной lolz-сессии. True = успех."""
     from telethon.errors import FloodWaitError, SessionPasswordNeededError
     from telethon.tl.functions.auth import (
-        ResetAuthorizationsRequest, SendCodeRequest, SignInRequest,
+        AcceptLoginTokenRequest, ResetAuthorizationsRequest,
     )
     from telethon.tl.types import CodeSettings
 
@@ -6937,72 +6937,27 @@ async def _transplant_one(sess: Path) -> bool:
                 return False
             await asyncio.sleep(2)
 
-            # 2. запрашиваем код входа на новой сессии
+            # 2. QR-вход: новый ключ подтверждает старая сессия, код не нужен
             new_api_id, new_api_hash = random.choice(_TRANSPLANT_API_PAIRS)
             new_path = TRANSPLANT_OUT / f"{name}_new"
             new = TelegramClient(str(new_path), new_api_id, new_api_hash,
                                  system_version="4.16.30-vxCUSTOM")
             try:
                 await asyncio.wait_for(new.connect(), timeout=15)
-                code_sent_at = time.time()
-                sent = await asyncio.wait_for(new(SendCodeRequest(
-                    phone_number=f"+{phone}",
-                    api_id=new_api_id,
-                    api_hash=new_api_hash,
-                    settings=CodeSettings(),
-                )), timeout=60)
-                phone_code_hash = sent.phone_code_hash
-                log.info("transplant %s: code requested | type=%s next=%s "
-                         "timeout=%s", name,
-                         type(getattr(sent, "type", None)).__name__,
-                         type(getattr(sent, "next_type", None)).__name__,
-                         getattr(sent, "timeout", None))
-            except Exception as e:
-                log.warning("transplant %s: send code failed: %s", name, e)
+                qr = await asyncio.wait_for(new.qr_login(), timeout=30)
+                log.info("transplant %s: qr token exported", name)
+                res = await asyncio.wait_for(
+                    old(AcceptLoginTokenRequest(token=qr.token)), timeout=30)
+                log.info("transplant %s: qr accepted (%s)", name,
+                         type(res).__name__)
                 try:
-                    await new.disconnect()
-                except Exception:
-                    pass
-                await old.disconnect()
-                _transplant_cleanup_partial(new_path)
-                return False
-
-            # 3. читаем код через старую сессию, с прогрессом в лог
-            _code_task = asyncio.create_task(
-                _transplant_read_code(old, TRANSPLANT_CODE_WAIT,
-                                      code_sent_at))
-            _t0 = time.time()
-            while not _code_task.done():
-                await asyncio.sleep(20)
-                if not _code_task.done():
-                    log.info("transplant %s: waiting for code %ss/%ss", name,
-                             int(time.time() - _t0), TRANSPLANT_CODE_WAIT)
-            code = _code_task.result()
-            if not code:
-                log.warning("transplant %s: no code in %ss", name,
-                            TRANSPLANT_CODE_WAIT)
-                try:
-                    await new.disconnect()
-                except Exception:
-                    pass
-                await old.disconnect()
-                _transplant_cleanup_partial(new_path)
-                return False
-
-            # 4. авторизуем новую сессию (облачный пароль, если стоит)
-            log.info("transplant %s: signing in new session", name)
-            try:
-                await new(SignInRequest(
-                    phone_number=f"+{phone}",
-                    phone_code_hash=phone_code_hash,
-                    phone_code=code,
-                ))
-            except SessionPasswordNeededError:
-                try:
-                    await new.sign_in(password=TRANSPLANT_CLOUD_PASS)
+                    await asyncio.wait_for(qr.wait(timeout=TRANSPLANT_CODE_WAIT),
+                                           timeout=TRANSPLANT_CODE_WAIT + 10)
                 except Exception as e:
-                    log.warning("transplant %s: password sign-in failed: %s",
-                                name, e)
+                    log.warning("transplant %s: qr wait: %s", name, e)
+                if not await new.is_user_authorized():
+                    log.warning("transplant %s: qr login left session "
+                                "unauthorized", name)
                     try:
                         await new.disconnect()
                     except Exception:
@@ -7011,7 +6966,7 @@ async def _transplant_one(sess: Path) -> bool:
                     _transplant_cleanup_partial(new_path)
                     return False
             except Exception as e:
-                log.warning("transplant %s: sign in failed: %s", name, e)
+                log.warning("transplant %s: qr login failed: %s", name, e)
                 try:
                     await new.disconnect()
                 except Exception:
