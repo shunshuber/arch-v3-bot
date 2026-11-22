@@ -4808,32 +4808,151 @@ async def cmd_refgive(msg: Message):
         parse_mode=ParseMode.HTML)
 
 
-# ── admin: add session (file | code, with 2FA) ───────────
+# ── admin: add sessions (batch: .session | .zip → transplant → pool) ──
+_ADD_BATCH: dict[int, dict] = {}
+ADD_BATCH_WINDOW = 6           # ждём пачку 6 с после последнего файла
+ADD_MAX_ZIP = 60 * 1024 * 1024
+ADD_MAX_ONE = 5 * 1024 * 1024
+ADD_MAX_FILES = 300
+
+
+def _add_stem(name: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_") or "sess"
+    base, n = stem, 1
+    while (TRANSPLANT_FOLDER / f"{stem}.session").exists():
+        n += 1
+        stem = f"{base}_{n}"
+    return stem
+
+
+async def _add_batch_flush(uid: int) -> None:
+    try:
+        await asyncio.sleep(ADD_BATCH_WINDOW)
+    except asyncio.CancelledError:
+        return
+    b = _ADD_BATCH.pop(uid, None)
+    if not b or not b.get("stems"):
+        return
+    stems = list(dict.fromkeys(b["stems"]))
+    rels = []
+    for stem in stems:
+        for ext in (".session", ".json"):
+            if (TRANSPLANT_FOLDER / f"{stem}{ext}").exists():
+                rels.append(f"lolz/{stem}{ext}")
+    if not rels:
+        await _admin_send("❌ Загрузка не сохранилась — файлы не найдены.")
+        return
+    if not await _persist_paths(rels, f"lolz: admin upload {len(stems)}"):
+        await _admin_send("⚠️ Сессии на диске, но пуш в репу не прошёл — "
+                          "пересадку не запускаю.")
+        return
+    listing = "\n".join(f"• <code>{html_mod.escape(s)}</code>"
+                        for s in stems[:15])
+    if len(stems) > 15:
+        listing += f"\n… и ещё {len(stems) - 15}"
+    await _admin_send(
+        bq(f"<b>{NAME}</b>  ·  📦 Принято {len(stems)}")
+        + f"\n\n{listing}"
+        + "\n\n🧬 Пересадка пошла. Ребёнок встанет в пул сам.")
+    asyncio.create_task(_admin_transplant_batch(stems))
+
+
+async def _admin_transplant_batch(stems: list[str]) -> None:
+    """Immediate transplant for an admin upload; failures fall back to the
+    24h age queue. Nothing here logs the source out."""
+    now = time.time()
+    q = _queue_load()
+    ages = _age_load()
+    age_changed = False
+    due, young = [], []
+    for stem in stems:
+        born = ages.get(stem)
+        if not born:
+            born = int(now)
+            ages[stem] = born
+            age_changed = True
+        e = q.get(stem) or {}
+        e["tries"] = int(e.get("tries") or 0)
+        if born + TRANSPLANT_MIN_AGE_SEC > now:
+            # Telegram refuses ResetAuthorizations on a fresh session —
+            # queue it for the 24h age gate instead of burning a try.
+            e["next_try"] = float(born) + TRANSPLANT_MIN_AGE_SEC
+            q[stem] = e
+            young.append(stem)
+            continue
+        e["next_try"] = now + 900          # hold so the worker doesn't double-run
+        e["last_try"] = int(now)
+        q[stem] = e
+        due.append(stem)
+    _queue_save(q)
+    age_rels = []
+    if age_changed:
+        _age_save(ages)
+        age_rels.append("lolz_age.json")
+    await _persist_paths(["lolz_queue.json"] + age_rels,
+                         "transplant queue: admin batch")
+    ok, fail = [], []
+    for stem in due:
+        sess = TRANSPLANT_FOLDER / f"{stem}.session"
+        if not sess.exists():
+            fail.append(stem)
+            continue
+        try:
+            res = await _transplant_one(sess.with_suffix(""))
+        except Exception as e:
+            log.warning("admin transplant %s crashed: %s", stem, e)
+            res = False
+        try:
+            await _transplant_mark(sess.with_suffix(""), res is True)
+        except Exception as e:
+            log.warning("admin transplant %s: mark failed: %s", stem, e)
+        (ok if res else fail).append(stem)
+    moved = await add_ready_to_pool()
+    lines = [bq(f"<b>{NAME}</b>  ·  🧬 Пересадка закончена")]
+    if moved:
+        lines.append("✅ в пул: " + ", ".join(
+            f"<code>{html_mod.escape(n)}</code>" for n in moved))
+    if ok and not moved:
+        lines.append("✅ пересажено, но в <code>_ready</code> пусто — смотри лог.")
+    if young:
+        lines.append("🕕 свежие — ждут 24 ч (авто): "
+                     + ", ".join(f"<code>{html_mod.escape(s)}</code>"
+                                 for s in young))
+    if fail:
+        lines.append("⏳ ждут очереди (отказ): "
+                     + ", ".join(f"<code>{html_mod.escape(s)}</code>"
+                                 for s in fail))
+        lines.append("<i>Повторная попытка — автоматически.</i>")
+    await _admin_send("\n\n".join(lines))
+    log.info("admin transplant batch: ok=%s fail=%s pooled=%s",
+             ok, fail, moved)
+
+
 @router.callback_query(F.data == "menu:addsess")
 async def menu_addsess(cb: CallbackQuery, state: FSMContext):
     if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
         await cb.answer()
         return
     _login_client(cb.from_user.id)   # kill a stale login-by-code client
-    sessions = load_sessions()
-    alive_line = ""
-    if sessions:
-        alive_line = f"\n🧷 В пуле: <b>{len(sessions)}</b>"
     await state.set_state(AddSession.choose)
-    await cb.message.edit_caption(
-        caption=_cx((
-            bq(f"<b>{NAME}</b>  ·  ➕ Добавить сессию")
-            + alive_line
-        )),
+    pool_n = len(load_sessions())
+    queue_n = len(_transplant_list())
+    await safe_edit(
+        cb.message,
+        _cx(bq(f"<b>{NAME}</b>  ·  ➕ Добавить сессию")
+            + f"\n\n🧷 В пуле: <b>{pool_n}</b> · 🧬 в lolz: <b>{queue_n}</b>"
+            + "\n\nКидай пачку: <code>.session</code> или <code>.zip</code>."
+            + "\nКаждая уйдёт на пересадку, ребёнок сам встанет в пул."),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Загрузить файлом", icon_custom_emoji_id="5258477770735885832",
-                                  callback_data="addsess:file"),
-             InlineKeyboardButton(text="Через код", icon_custom_emoji_id="5258216851472654189",
+            [InlineKeyboardButton(text="📦 Файлы (.session / .zip)",
+                                  callback_data="addsess:file")],
+            [InlineKeyboardButton(text="📱 Через код",
+                                  icon_custom_emoji_id="5258216851472654189",
                                   callback_data="addsess:code")],
-            [InlineKeyboardButton(text="Пересадка (мойка BR)", icon_custom_emoji_id="5258486128742244085",
-                                  callback_data="addsess:trans")],
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5258132936401624790",
+                                  callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -4841,62 +4960,117 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(AddSession.choose, F.data == "addsess:file")
 async def addsess_file(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AddSession.file)
-    await cb.message.edit_caption(
-        caption=_cx((
-            bq(f"<b>{NAME}</b>  ·  📄 Сессия файлом")
-            + "\n\nПришли <b>.session документ</b>.\n"
-            + "Файл сохранится в пул и закоммитится в репу (переживёт рестарты)."
-        )),
+    await safe_edit(
+        cb.message,
+        _cx(bq(f"<b>{NAME}</b>  ·  📦 Сессии файлами")
+            + "\n\nПришли <b>.session</b> или <b>.zip</b> с пачкой."
+            + "\nМожно несколько файлов подряд — соберу в один заход."
+            + "\n\n🔁 .session → lolz → пересадка → пул"
+            + "\n🗜 .zip распакую, возьму все <code>.session</code>."),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5258132936401624790",
+                                  callback_data="back:home")],
         ]))
     await cb.answer()
 
 
 @router.message(AddSession.file, F.document)
 async def addsess_file_recv(msg: Message, state: FSMContext):
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    import zipfile as _zip
     doc = msg.document
-    name = doc.file_name or "pasted.session"
-    if not name.endswith(".session") or not (0 < doc.file_size < 5 * 1024 * 1024):
-        await msg.answer(_cx("❌ Нужен документ <code>.session</code> до 5 МБ."),
+    name = (doc.file_name or "pasted.session").replace("\\", "/")
+    low = name.lower()
+    if not low.endswith((".session", ".zip")):
+        await msg.answer(_cx("❌ Нужен <code>.session</code> или "
+                             "<code>.zip</code>."), parse_mode=ParseMode.HTML)
+        return
+    limit = ADD_MAX_ZIP if low.endswith(".zip") else ADD_MAX_ONE
+    if not (0 < int(doc.file_size or 0) <= limit):
+        await msg.answer(_cx(f"❌ Файл пустой или больше "
+                             f"{limit // (1024 * 1024)} МБ."),
                          parse_mode=ParseMode.HTML)
         return
-    tg_file = await msg.bot.get_file(doc.file_id)
-    base = Path(__file__).parent / "sessions"
-    base.mkdir(exist_ok=True)
-    dest = base / name
-    await msg.bot.download_file(tg_file, dest)
-    # quick liveness probe so the admin knows what landed
-    from telethon import TelegramClient as _TC
-    probe_api_id, probe_api_hash = API_ID, API_HASH
-    ok, why = False, ""
+    root = Path(__file__).parent
+    tmp = root / ".upload"
+    tmp.mkdir(exist_ok=True)
+    src = tmp / f"u{msg.from_user.id}_{int(time.time() * 1000)}" \
+                f"{Path(name).suffix.lower()}"
+    stems: list[str] = []
+    skipped = 0
     try:
-        px = load_pin_proxies()
-        client = _TC(str(dest.with_suffix("")), probe_api_id, probe_api_hash,
-                     proxy=pin_for_session(dest.stem, px))
-        await asyncio.wait_for(client.connect(), timeout=15)
-        ok = bool(await client.is_user_authorized())
-        why = "" if ok else "not authorized"
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        tg_file = await msg.bot.get_file(doc.file_id)
+        await msg.bot.download_file(tg_file.file_path, src)
+        candidates: list[Path] = []
+        if low.endswith(".zip"):
+            with _zip.ZipFile(src) as zf:
+                for info in zf.infolist()[:ADD_MAX_FILES]:
+                    if info.is_dir():
+                        continue
+                    base = Path(info.filename).name
+                    if (not base or base.startswith(".")
+                            or "__MACOSX" in info.filename
+                            or not base.lower().endswith((".session", ".json"))):
+                        continue
+                    if info.file_size > ADD_MAX_ONE:
+                        skipped += 1
+                        continue
+                    out = tmp / base
+                    if out.exists():
+                        out = tmp / f"x{len(candidates)}_{base}"
+                    with zf.open(info) as s2, out.open("wb") as d2:
+                        shutil.copyfileobj(s2, d2)
+                    candidates.append(out)
+        else:
+            candidates.append(src)
+        TRANSPLANT_FOLDER.mkdir(exist_ok=True)
+        for p in candidates:
+            if p.suffix.lower() != ".session":
+                continue
+            stem = _add_stem(p.stem)
+            shutil.move(str(p), str(TRANSPLANT_FOLDER / f"{stem}.session"))
+            side = p.with_suffix(".json")
+            if side.exists():
+                shutil.move(str(side), str(TRANSPLANT_FOLDER / f"{stem}.json"))
+            stems.append(stem)
     except Exception as e:
-        why = type(e).__name__
-    commit_file_to_repo(f"sessions/{name}", f"add session {name} (file)")
-    await state.clear()
-    await msg.answer(_cx(
-        bq(f"<b>{NAME}</b>  ·  ✅ Сессия добавлена")
-        + f"\n\n🧷 <code>{html_mod.escape(name)}</code> → пул"
-        + f"\n🔌 проб: {'✅ живая' if ok else '❌ ' + why}"
-        + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий"),
-        parse_mode=ParseMode.HTML)
+        log.warning("admin upload failed: %s", e)
+        await msg.answer(_cx(f"❌ Не разобрал файл: "
+                             f"<code>{html_mod.escape(type(e).__name__)}</code>"),
+                         parse_mode=ParseMode.HTML)
+        return
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if not stems:
+        await msg.answer(_cx(
+            "❌ В файле не нашлось ни одной <code>.session</code>"
+            + (f"\n⚠️ пропущено крупных: {skipped}" if skipped else "")),
+            parse_mode=ParseMode.HTML)
+        return
+    b = _ADD_BATCH.setdefault(msg.from_user.id, {"stems": [], "task": None})
+    first = not b["stems"]
+    b["stems"].extend(stems)
+    old = b.get("task")
+    if old and not old.done():
+        old.cancel()
+    b["task"] = asyncio.create_task(_add_batch_flush(msg.from_user.id))
+    if first:
+        await msg.answer(_cx(
+            f"📦 <b>+{len(stems)}</b> → lolz"
+            + (f" · пропущено {skipped}" if skipped else "")
+            + "\n<i>Принимаю пачку. Через 6 секунд после последнего файла "
+              "пойдёт пересадка.</i>"),
+            parse_mode=ParseMode.HTML)
 
 
 @router.message(AddSession.file)
 async def addsess_file_wrongtype(msg: Message, state: FSMContext):
-    await msg.answer(_cx("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0444\u0430\u0439\u043B."), parse_mode=ParseMode.HTML)
+    await msg.answer(_cx("❌ Это не документ <code>.session</code> / "
+                         "<code>.zip</code>. Жду файл."),
+                     parse_mode=ParseMode.HTML)
 
 
 # ── admin: add session via login code ────────────────────
