@@ -5927,13 +5927,16 @@ class WatchFSM(StatesGroup):
 
 
 WATCH_FILE = Path(__file__).parent / "watchdog.json"
-WATCH_INTERVAL = 150        # один проход каждые 2.5 мин (окно рана ~5 мин)
-WATCH_START_DELAY = 45
+WATCH_INTERVAL = 60         # чек раз в минуту
+WATCH_START_DELAY = 20
 WATCH_MAX_PER_USER = 200
 WATCH_DEFAULT_DAYS = 3
 WATCH_SESS_CAP = 5          # параллельные пробы
+WATCH_ALIVE_PING = 3600     # «цель жива» не чаще раза в час на цель
+WATCH_BAD_SESSION_TTL = 300 # сессия, давшая сбой, отдыхает 5 минут
 
 _watch_sem = asyncio.Semaphore(WATCH_SESS_CAP)
+_watch_bad: dict[str, float] = {}
 
 
 def load_watch() -> dict:
@@ -6109,8 +6112,9 @@ def _watch_list(uid: int) -> list[dict]:
 
 
 async def _watch_probe(kind: str, entity: str, msg_id: int | None,
-                       sess: Path) -> str:
-    """alive | dead | msg_gone | error. Ошибка сети — не событие."""
+                       sess: Path) -> tuple[str, str, bool]:
+    """(status, reason, session_fault). status: alive|dead|msg_gone|error.
+    session_fault=True — виновата сессия, а не цель: пробуем другую."""
     from telethon import errors as _wterr
     from telethon.tl.functions.messages import CheckChatInviteRequest
     from telethon.tl.types import User as _WUser
@@ -6123,36 +6127,44 @@ async def _watch_probe(kind: str, entity: str, msg_id: int | None,
     try:
         await asyncio.wait_for(client.connect(), timeout=10)
         if not await client.is_user_authorized():
-            return "error"
+            return "error", "сессия не авторизована", True
         if kind == "invite":
             try:
                 await client(CheckChatInviteRequest(hash=entity))
-                return "alive"
-            except (_wterr.InviteHashExpiredError, _wterr.InviteHashInvalidError,
-                    _wterr.ChannelPrivateError):
-                return "dead"
-            return "error"
-        ent = await client.get_entity(entity)
-        if isinstance(ent, _WUser):
-            if ent.deleted or getattr(ent, "deactivated", False):
-                return "dead"
-            if msg_id and not ent.bot:
-                return "alive"
+                return "alive", "", False
+            except (_wterr.InviteHashExpiredError, _wterr.InviteHashInvalidError):
+                return "dead", "приглашение недействительно", False
+            except _wterr.ChannelPrivateError:
+                return "dead", "канал стал приватным или удалён", False
+            return "error", "приглашение не проверено", False
+        try:
+            ent = await client.get_entity(entity)
+        except (_wterr.UsernameNotOccupiedError, _wterr.UsernameInvalidError):
+            return "dead", "username не существует", False
+        except (_wterr.UserDeactivatedError, _wterr.UserDeactivatedBanError):
+            return "dead", "аккаунт удалён или заблокирован", False
+        except _wterr.ChannelPrivateError:
+            return "dead", "канал/чат стал приватным или удалён", False
+        except _wterr.RPCError as e:
+            err = str(e).lower()
+            if any(w in err for w in ("deactivated", "deleted", "banned")):
+                return "dead", f"удалён или заблокирован: {e}", False
+            return "error", f"RPC: {type(e).__name__}", False
+        if isinstance(ent, _WUser) and (ent.deleted
+                                        or getattr(ent, "deactivated", False)):
+            return "dead", "аккаунт или бот удалён", False
         if getattr(ent, "deactivated", False):
-            return "dead"
+            return "dead", "канал/чат удалён", False
         if msg_id:
             try:
                 m = await client.get_messages(ent, ids=msg_id)
-                return "alive" if m else "msg_gone"
-            except Exception:
-                return "msg_gone"
-        return "alive"
-    except (_wterr.UsernameNotOccupiedError, _wterr.UsernameInvalidError,
-            _wterr.UserDeactivatedError, _wterr.UserDeactivatedBanError,
-            _wterr.ChannelPrivateError):
-        return "dead"
-    except Exception:
-        return "error"
+            except _wterr.RPCError as e:
+                return "error", f"сообщение не прочитано: {type(e).__name__}", False
+            if m is None:
+                return "msg_gone", "сообщение удалено", False
+        return "alive", "", False
+    except Exception as e:
+        return "error", f"{type(e).__name__}: {e}", True
     finally:
         try:
             await client.disconnect()
@@ -6171,35 +6183,101 @@ async def _watch_probe_url(url: str) -> str:
         return "error"
 
 
-async def _watch_check_one(it: dict, sessions: list[Path]) -> tuple[int, str]:
+def _watch_pool() -> list[Path]:
+    """Живые сессии пула: мёртвые по статусу и недавно сбойные — мимо."""
+    now = time.time()
+    dead = {str(x) for x in (_status_load().get("dead") or [])}
+    out = []
+    for s in load_sessions():
+        if s.stem.startswith(".") or s.stem in dead:
+            continue
+        if _watch_bad.get(s.stem, 0) > now:
+            continue
+        out.append(s)
+    return out
+
+
+async def _watch_check_one(it: dict, sessions: list[Path]) -> tuple[int, str, str]:
     async with _watch_sem:
         if it["kind"] == "url":
-            return it["id"], await _watch_probe_url(it["entity"])
+            return it["id"], await _watch_probe_url(it["entity"]), ""
         if not sessions:
-            return it["id"], "error"
-        sess = random.choice(sessions)
-        st = await _watch_probe(it["kind"], it["entity"], it.get("msg_id"), sess)
-        return it["id"], st
+            return it["id"], "error", "нет живых сессий"
+        pool = list(sessions)
+        random.shuffle(pool)
+        for sess in pool[:3]:
+            st, reason, fault = await _watch_probe(
+                it["kind"], it["entity"], it.get("msg_id"), sess)
+            if not fault:
+                return it["id"], st, reason
+            _watch_bad[sess.stem] = time.time() + WATCH_BAD_SESSION_TTL
+            log.info("watchdog: session %s fault (%s) — retry", sess.stem, reason)
+        return it["id"], "error", "нет ответа от сессий"
+
+
+async def _watch_notify_alive(it: dict) -> None:
+    if not _BOT:
+        return
+    plain = html_mod.escape(str(it.get("raw") or it["entity"]))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔕 Отключить до сноса",
+                             callback_data=f"watch:mute:{it['id']}")]])
+    try:
+        await _BOT.send_message(
+            it["uid"],
+            _cx(bq(f"<b>{NAME}</b>  —  👁 Сторож")
+                + "\n\n🟢 <b>Цель жива</b>"
+                + f"\n🎯 <code>{plain}</code>"
+                + "\n🕒 следующая проверка через минуту"),
+            parse_mode=ParseMode.HTML, reply_markup=kb,
+            disable_web_page_preview=True)
+    except Exception as e:
+        log.warning("watchdog alive ping failed: %s", e)
+
+
+async def _watch_notify_dead(it: dict, st: str, reason: str) -> None:
+    plain = html_mod.escape(str(it.get("raw") or it["entity"]))
+    head = ("🔴 <b>Сообщение удалено</b>" if st == "msg_gone"
+            else "🔴 <b>Цель снесена</b>")
+    why = f"\n└─ причина: {html_mod.escape(reason)}" if reason else ""
+    text = (bq(f"<b>{NAME}</b>  —  👁 Сторож") + f"\n\n{head}"
+            + f"\n🎯 <code>{plain}</code>{why}"
+            + f"\n🕒 {datetime.now().strftime('%d.%m %H:%M:%S')}")
+    if it.get("admin_only"):
+        extra = (f"\n💬 <code>{html_mod.escape(str(it.get('origin') or ''))}</code>"
+                 if it.get("origin") else "")
+        await _admin_send(text + extra)
+        return
+    if not _BOT:
+        return
+    try:
+        await _BOT.send_message(it["uid"], _cx(text),
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True)
+    except Exception:
+        pass
 
 
 async def watch_sweep() -> None:
     d = load_watch()
     now = time.time()
-    if any(it.get("until", 0) <= now for it in d["items"]):
-        d["items"] = [it for it in d["items"] if it.get("until", 0) > now]
-        save_watch(d)
+    before = len(d["items"])
+    d["items"] = [it for it in d["items"] if it.get("until", 0) > now]
+    changed = len(d["items"]) != before
+    sessions = _watch_pool()
     items = list(d["items"])
     if not items:
+        if changed:
+            save_watch(d)
         return
-    sessions = load_sessions()
     outs = await asyncio.gather(
         *[_watch_check_one(it, sessions) for it in items],
         return_exceptions=True)
-    events, changed = [], False
+    deaths, pings = [], []
     for r in outs:
-        if not isinstance(r, tuple):
+        if not isinstance(r, tuple) or len(r) != 3:
             continue
-        wid, st = r
+        wid, st, reason = r
         if st == "error":
             continue
         cur = next((x for x in d["items"] if x["id"] == wid), None)
@@ -6209,52 +6287,35 @@ async def watch_sweep() -> None:
             if cur.get("status") != "alive":
                 cur["status"] = "alive"
                 changed = True
+            last = float(cur.get("last_ping") or 0)
+            if not cur.get("silent") and now - last >= WATCH_ALIVE_PING:
+                cur["last_ping"] = now
+                changed = True
+                pings.append(cur)
             continue
         d["items"] = [x for x in d["items"] if x["id"] != wid]
-        events.append((cur, st))
+        deaths.append((cur, st, reason))
         changed = True
     if changed:
-        save_watch(d, force=True)
-    for cur, st in events:
-        label = "сообщение удалено" if st == "msg_gone" \
-            else "цель удалена / заморожена"
-        plain = str(cur.get("raw") or cur["entity"])
-        esc = html_mod.escape(plain)
-        await push_send_log(
-            "Сторож: цель снята",
-            [f"🎯 <code>{esc}</code> — {label}",
-             f"👤 владелец: <code>{cur['uid']}</code>"])
-        if cur.get("admin_only"):
-            await push_send_log(
-                "Сторож: отправитель удалён",
-                [f"\U0001f3af <code>{esc}</code> — "
-                  "отправитель сообщения удалён",
-                 f"\U0001f4ac сообщение: <code>{html_mod.escape(str(cur.get('origin') or ''))}</code>"])
-            continue
-        if _BOT:
-            try:
-                await _BOT.send_message(
-                    cur["uid"], _cx(
-                        bq(f"<b>{NAME}</b>  —  👁 Сторож")
-                        + f"\n\n⚡ <b>Успешное удаление</b>"
-                        + f"\n🎯 <code>{esc}</code>"
-                        + f"\n🕒 {datetime.now().strftime('%d.%m %H:%M:%S')}"),
-                    parse_mode=ParseMode.HTML)
-            except Exception:
-                pass
+        save_watch(d, force=bool(deaths))
+    for cur, st, reason in deaths:
+        await _watch_notify_dead(cur, st, reason)
+    for cur in pings:
+        await _watch_notify_alive(cur)
 
 
 async def watch_loop() -> None:
     log.info("watchdog: sweep every %ss", WATCH_INTERVAL)
     await asyncio.sleep(WATCH_START_DELAY)
     while True:
+        started = time.time()
         try:
             await watch_sweep()
         except asyncio.CancelledError:
             return
         except Exception as e:
             log.warning("watchdog sweep failed: %s", e)
-        await asyncio.sleep(WATCH_INTERVAL)
+        await asyncio.sleep(max(5.0, WATCH_INTERVAL - (time.time() - started)))
 
 
 def kb_watch() -> InlineKeyboardMarkup:
@@ -6270,10 +6331,12 @@ def watch_menu_text(uid: int) -> str:
     mine = _watch_list(uid)
     rows = "\n".join(
         f"{'🟢' if it['status'] == 'alive' else '🔴'} "
+        f"{'🔕 ' if it.get('silent') else ''}"
         f"<code>{html_mod.escape(str(it['raw'])[:60])}</code>"
         for it in mine) or "<i>пусто</i>"
     return (bq(f"<b>{NAME}</b>  —  👁 Сторож")
             + "\n\nСледит за целями и присылает событие, когда цель удалят."
+            + "\nПроверка раз в минуту."
             + f"\n\n<b>Под наблюдением ({len(mine)}/{WATCH_MAX_PER_USER}):</b>\n{rows}")
 
 
@@ -6299,6 +6362,27 @@ async def watch_menu(cb: CallbackQuery, state: FSMContext):
     s, _ = sub_quality(subs, uid)
     if s in ("free", "expired") and not user_is_admin(uid):
         await cb.answer("🔒 Нужна подписка", show_alert=True)
+        return
+    if act.startswith("mute:"):
+        try:
+            wid = int(act.split(":", 1)[1])
+        except ValueError:
+            await cb.answer()
+            return
+        d = load_watch()
+        hit = next((it for it in d["items"]
+                    if it["id"] == wid and it["uid"] == uid), None)
+        if hit is None:
+            await cb.answer("цель уже снята", show_alert=True)
+            return
+        hit["silent"] = True
+        hit["last_ping"] = time.time()
+        save_watch(d, force=True)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.answer("🔕 больше не пишу, пока цель жива")
         return
     if act == "add":
         await safe_edit(cb.message, _cx(
