@@ -6886,15 +6886,15 @@ async def _transplant_one(sess: Path) -> bool:
     if (TRANSPLANT_READY / f"{name}_new.session").exists():
         if await _ready_new_alive(name):
             log.info("transplant %s: already transplanted — waiting for admin", name)
-            await _transplant_drop_source(sess)
+            await _transplant_archive_source(sess)
             return True
         log.warning("transplant %s: partial _new is not authorized — cleaning",
                     name)
         _transplant_cleanup_partial(TRANSPLANT_READY / f"{name}_new")
     if (SESSIONS_DIR / f"{name}_new.session").exists():
-        log.info("transplant %s: new session already in pool — dropping source",
+        log.info("transplant %s: new session already in pool — archiving source",
                  name)
-        await _transplant_drop_source(sess)
+        await _transplant_archive_source(sess)
         return True
     async with _transplant_sem:
         api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
@@ -7030,21 +7030,16 @@ async def _transplant_one(sess: Path) -> bool:
             except Exception as e:
                 log.warning("transplant %s: 2fa set failed: %s", name, e)
 
-            # 6. logout старой + удаление файлов
-            try:
-                await old.log_out()
-            except Exception:
-                pass
+            # 6. источник НЕ гасим. Проверено на пяти аккаунтах 22.11:
+            #    child, рождённый через AcceptLoginToken, умирает вместе с
+            #    сессией, подтвердившей токен. log_out сразу после QR убивает
+            #    обоих, и аккаунт теряется целиком. Файл уходит из lolz в
+            #    _done (архив), ключ остаётся живым, пока child не проверен.
             try:
                 await old.disconnect()
             except Exception:
                 pass
-            for ext in (".session", ".session-journal"):
-                try:
-                    Path(str(sess) + ext).unlink(missing_ok=True)
-                except Exception as e:
-                    log.warning("transplant %s: remove failed: %s", name, e)
-            await _transplant_drop_source(sess)
+            await _transplant_archive_source(sess)
             try:
                 await new.disconnect()
             except Exception:
@@ -7052,7 +7047,7 @@ async def _transplant_one(sess: Path) -> bool:
             await push_send_log(
                 "Пересадка lolz",
                 [f"✅ <code>{html_mod.escape(name)}_new</code> — +{phone}",
-                 "🔁 старая сессия выведена, облачный пароль стоит"])
+                 "🔁 источник в _done (не погашен), облачный пароль стоит"])
             ready = len(list(TRANSPLANT_READY.glob("*_new.session")))
             await notify_admin_ready(name, phone, ready)
             log.info("transplant %s: done → lolz/_ready/%s_new.session",
