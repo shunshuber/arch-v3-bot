@@ -1,0 +1,90 @@
+name: probe-keep
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Probe kept sources
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+        run: |
+          python - <<'PY'
+          import asyncio
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, ".")
+          import snoser
+          from telethon import TelegramClient
+
+          STEMS = [
+              "8897042141", "9001019356", "9037022523", "9051664441",
+              "8468350434", "7055196067", "7451977524", "6196787991",
+          ]
+
+          async def one(stem: str, path: Path) -> None:
+              proxies = snoser.load_pin_proxies()
+              px = snoser.pin_for_session(stem, proxies)
+              fp = snoser.session_fingerprint(stem)
+              client = TelegramClient(
+                  str(path), fp["api_id"], fp["api_hash"], proxy=px,
+                  device_model=fp["device"],
+                  system_version=fp["system_version"],
+                  app_version=fp["app_version"],
+                  lang_code=fp["lang_code"])
+              try:
+                  await asyncio.wait_for(client.connect(), timeout=20)
+                  if not await client.is_user_authorized():
+                      print(f"DEAD  {stem}  not authorized", flush=True)
+                      return
+                  me = await client.get_me()
+                  print(f"ALIVE {stem}  phone={me.phone} "
+                        f"name={me.first_name} prem={me.premium}", flush=True)
+                  try:
+                      from telethon.tl.functions.account import (
+                          GetAuthorizationsRequest)
+                      res = await client(GetAuthorizationsRequest())
+                      for a in res.authorizations:
+                          print(f"   auth {stem}: device={a.device_model} "
+                                f"app={a.app_name} current={a.current} "
+                                f"date={a.date_created}", flush=True)
+                  except Exception as e:
+                      print(f"   auth list failed {stem}: "
+                            f"{type(e).__name__}: {e}", flush=True)
+              except Exception as e:
+                  print(f"ERR   {stem}  {type(e).__name__}: {e}", flush=True)
+              finally:
+                  try:
+                      await client.disconnect()
+                  except Exception:
+                      pass
+
+          async def main() -> None:
+              for stem in STEMS:
+                  path = Path("lolz/_keep") / f"{stem}.session"
+                  if not path.exists():
+                      path = Path("lolz") / f"{stem}.session"
+                  if not path.exists():
+                      print(f"MISS  {stem}", flush=True)
+                      continue
+                  print(f"probe {stem} from {path.as_posix()}", flush=True)
+                  await one(stem, path.with_suffix(""))
+
+          asyncio.run(main())
+          PY
