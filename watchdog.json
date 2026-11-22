@@ -1,5 +1,5 @@
 {
- "seq": 1,
+ "seq": 2,
  "items": [
   {
    "id": 1,
@@ -12,6 +12,16 @@
    "status": "alive",
    "admin_only": true,
    "until": 1795414955.618103
+  },
+  {
+   "id": 2,
+   "uid": 8661362112,
+   "kind": "entity",
+   "entity": "love_1w",
+   "msg_id": 1602739,
+   "raw": "https://t.me/love_1w/1602739",
+   "status": "alive",
+   "until": 1795644340.742715
   }
  ]
 }
