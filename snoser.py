@@ -6349,7 +6349,7 @@ TRANSPLANT_CLOUD_PASS = "Ali095095"
 TRANSPLANT_INTERVAL = 180        # проход каждые 3 мин
 TRANSPLANT_START_DELAY = 30
 TRANSPLANT_CAP = 5               # параллельные пересадки
-TRANSPLANT_CODE_WAIT = 300       # секунд ждём код от 777000
+TRANSPLANT_CODE_WAIT = 30        # секунд ждём код от 777000
 # телефоны, которые воркер не пересаживает и не кикает
 TRANSPLANT_EXCLUDE_PHONES = {"917066653092"}
 TRANSPLANT_EXCLUDE_STEMS = {"s917066653092"}
@@ -6785,6 +6785,29 @@ def _transplant_cleanup_partial(path: Path) -> None:
             pass
 
 
+async def _ready_new_alive(name: str) -> bool:
+    """A `_new` sitting in lolz/_ready only counts if it still logs in. A run
+    killed mid-sign-in leaves an unauthorized file there; dropping the source
+    on top of it would cost the account."""
+    path = TRANSPLANT_READY / f"{name}_new"
+    if not Path(str(path) + ".session").exists():
+        return False
+    api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
+    client = TelegramClient(str(path), api_id, api_hash,
+                            system_version="4.16.30-vxCUSTOM")
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15)
+        return bool(await client.is_user_authorized())
+    except Exception as e:
+        log.warning("transplant %s: ready probe failed: %s", name, e)
+        return False
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
 async def _transplant_read_code(client, timeout: float,
                                 after_ts: float | None = None) -> str | None:
     """5–6 digit login code from the 777000 service chat. Live updates are
@@ -6861,9 +6884,13 @@ async def _transplant_one(sess: Path) -> bool:
         log.info("transplant %s: excluded by name", name)
         return False
     if (TRANSPLANT_READY / f"{name}_new.session").exists():
-        log.info("transplant %s: already transplanted — waiting for admin", name)
-        await _transplant_drop_source(sess)
-        return True
+        if await _ready_new_alive(name):
+            log.info("transplant %s: already transplanted — waiting for admin", name)
+            await _transplant_drop_source(sess)
+            return True
+        log.warning("transplant %s: partial _new is not authorized — cleaning",
+                    name)
+        _transplant_cleanup_partial(TRANSPLANT_READY / f"{name}_new")
     if (SESSIONS_DIR / f"{name}_new.session").exists():
         log.info("transplant %s: new session already in pool — dropping source",
                  name)
