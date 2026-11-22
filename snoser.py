@@ -6329,12 +6329,29 @@ async def _watch_probe(kind: str, entity: str, msg_id: int | None,
             return "dead", "аккаунт или бот удалён", False
         if getattr(ent, "deactivated", False):
             return "dead", "канал/чат удалён", False
+        if isinstance(ent, _WUser):
+            # t.me/<user>/<id> — это личка, а не публичный пост: другая
+            # сессия физически не видит чужой message_id. Живость самого
+            # аккаунта уже проверена выше, поэтому None тут не удаление.
+            return "alive", "", False
         if msg_id:
             try:
                 m = await client.get_messages(ent, ids=msg_id)
             except _wterr.RPCError as e:
                 return "error", f"сообщение не прочитано: {type(e).__name__}", False
             if m is None:
+                # Пустой ответ у сессии, которая не состоит в канале, —
+                # это отсутствие доступа, а не удаление сообщения.
+                try:
+                    from telethon.tl.functions.channels import \
+                        GetParticipantRequest
+                    await client(GetParticipantRequest(channel=ent,
+                                                       participant="me"))
+                    member = True
+                except Exception:
+                    member = False
+                if not member:
+                    return "error", "нет доступа к каналу (сессия не участник)", True
                 return "msg_gone", "сообщение удалено", False
         return "alive", "", False
     except Exception as e:
@@ -6461,12 +6478,22 @@ async def watch_sweep() -> None:
             if cur.get("status") != "alive":
                 cur["status"] = "alive"
                 changed = True
+            if cur.pop("_gone_at", None) is not None:
+                changed = True
             last = float(cur.get("last_ping") or 0)
             if not cur.get("silent") and now - last >= WATCH_ALIVE_PING:
                 cur["last_ping"] = now
                 changed = True
                 pings.append(cur)
             continue
+        if st == "msg_gone":
+            # Один пустой ответ от одной сессии — не доказательство:
+            # подтверждаем второй проверкой в течение 15 минут.
+            if now - float(cur.get("_gone_at") or 0) > 900:
+                cur["_gone_at"] = now
+                changed = True
+                continue
+            cur.pop("_gone_at", None)
         d["items"] = [x for x in d["items"] if x["id"] != wid]
         deaths.append((cur, st, reason))
         changed = True
