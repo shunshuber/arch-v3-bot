@@ -8140,11 +8140,11 @@ XROCKET_API = "https://pay.api.xrocket.exchange/api/v1"
 XROCKET_CURRENCY = "USDT"
 
 SUB_PLANS = {
-    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 1.0},
-    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 3.0},
-    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 7.0},
-    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 13.0},
-    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 3.0},
+    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.75},
+    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.25},
+    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 5.25},
+    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 9.75},
+    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 2.25},
 }
 
 # ── Cloudtips (RU cards / SBP) ───────────────────────────
@@ -8550,7 +8550,7 @@ CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
                    or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
-STARS_PRICES = {"d1": 100, "d7": 300, "d30": 700, "d90": 1300, "prem": 300}
+STARS_PRICES = {"d1": 75, "d7": 225, "d30": 525, "d90": 975, "prem": 225}
 
 # старые инвойсы «Навсегда» (fore) уже оплачены у части людей в ссылках —
 # они гасятся как 90 дней, чтобы деньги не пропали
