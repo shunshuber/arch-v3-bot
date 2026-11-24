@@ -1,15 +1,4 @@
 {
  "seq": 3,
- "items": [
-  {
-   "id": 3,
-   "uid": 6783917438,
-   "kind": "entity",
-   "entity": "love_1w",
-   "msg_id": 1608938,
-   "raw": "https://t.me/love_1w/1608938",
-   "status": "alive",
-   "until": 1795760942.8534276
-  }
- ]
+ "items": []
 }
