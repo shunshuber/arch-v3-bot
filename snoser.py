@@ -241,6 +241,7 @@ class GrantFSM(StatesGroup):
 class AddSession(StatesGroup):
     choose = State()
     file = State()
+    raw_file = State()
     code_phone = State()
     code_login = State()
     code_pw = State()
@@ -4927,13 +4928,58 @@ ADD_MAX_ONE = 5 * 1024 * 1024
 ADD_MAX_FILES = 300
 
 
-def _add_stem(name: str) -> str:
+def _add_stem(name: str, folder: Path | None = None) -> str:
+    folder = folder or TRANSPLANT_FOLDER
     stem = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_") or "sess"
     base, n = stem, 1
-    while (TRANSPLANT_FOLDER / f"{stem}.session").exists():
+    while (folder / f"{stem}.session").exists():
         n += 1
         stem = f"{base}_{n}"
     return stem
+
+
+async def _add_download_session_files(msg) -> tuple[list[Path], int, Path]:
+    """Download the document into .upload and expand .zip. Returns
+    (candidate .session paths, skipped-large count, temp dir to clean)."""
+    import zipfile as _zip
+    doc = msg.document
+    name = (doc.file_name or "pasted.session").replace("\\", "/")
+    low = name.lower()
+    if not low.endswith((".session", ".zip")):
+        raise ValueError("extension")
+    limit = ADD_MAX_ZIP if low.endswith(".zip") else ADD_MAX_ONE
+    if not (0 < int(doc.file_size or 0) <= limit):
+        raise ValueError("size")
+    root = Path(__file__).parent
+    tmp = root / ".upload"
+    tmp.mkdir(exist_ok=True)
+    src = tmp / f"u{msg.from_user.id}_{int(time.time() * 1000)}{Path(name).suffix.lower()}"
+    skipped = 0
+    tg_file = await msg.bot.get_file(doc.file_id)
+    await msg.bot.download_file(tg_file.file_path, src)
+    candidates: list[Path] = []
+    if low.endswith(".zip"):
+        with _zip.ZipFile(src) as zf:
+            for info in zf.infolist()[:ADD_MAX_FILES]:
+                if info.is_dir():
+                    continue
+                base = Path(info.filename).name
+                if (not base or base.startswith(".")
+                        or "__MACOSX" in info.filename
+                        or not base.lower().endswith((".session", ".json"))):
+                    continue
+                if info.file_size > ADD_MAX_ONE:
+                    skipped += 1
+                    continue
+                out = tmp / base
+                if out.exists():
+                    out = tmp / f"x{len(candidates)}_{base}"
+                with zf.open(info) as s2, out.open("wb") as d2:
+                    shutil.copyfileobj(s2, d2)
+                candidates.append(out)
+    else:
+        candidates.append(src)
+    return candidates, skipped, tmp
 
 
 async def _add_batch_flush(uid: int) -> None:
@@ -5058,6 +5104,8 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📦 Файлы (.session / .zip)",
                                   callback_data="addsess:file")],
+            [InlineKeyboardButton(text="⚡ Сразу в пул (без пересадки)",
+                                  callback_data="addsess:raw")],
             [InlineKeyboardButton(text="📱 Через код",
                                   icon_custom_emoji_id="5258216851472654189",
                                   callback_data="addsess:code")],
@@ -5085,6 +5133,110 @@ async def addsess_file(cb: CallbackQuery, state: FSMContext):
                                   callback_data="back:home")],
         ]))
     await cb.answer()
+
+
+@router.callback_query(AddSession.choose, F.data == "addsess:raw")
+async def addsess_raw(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await state.set_state(AddSession.raw_file)
+    await safe_edit(
+        cb.message,
+        _cx(bq(f"<b>{NAME}</b>  ·  ⚡ Сессия сразу в пул")
+            + "\n\nПришли <b>.session</b> или <b>.zip</b> — файлы встанут "
+              "в <code>sessions/</code> как есть, без QR-пересадки и без 24 ч гейта."
+            + "\n\nМожно несколько файлов подряд, соберу в один заход."
+            + "\nМёртвые сессии тоже останутся в пуле."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5258132936401624790",
+                                  callback_data="back:home")]]))
+    await cb.answer()
+
+
+@router.message(AddSession.raw_file, F.document)
+async def addsess_raw_recv(msg: Message, state: FSMContext):
+    """Admin upload straight to the pool: no transplant, no age gate."""
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    tmp = None
+    added: list[tuple[str, Path]] = []
+    skipped = 0
+    try:
+        candidates, skipped, tmp = await _add_download_session_files(msg)
+        SESSIONS_DIR.mkdir(exist_ok=True)
+        for p in candidates:
+            if p.suffix.lower() != ".session":
+                continue
+            stem = _add_stem(p.stem, SESSIONS_DIR)
+            dst = SESSIONS_DIR / f"{stem}.session"
+            shutil.move(str(p), str(dst))
+            side = p.with_suffix(".json")
+            if side.exists():
+                shutil.move(str(side), str(SESSIONS_DIR / f"{stem}.json"))
+            added.append((stem, dst))
+    except ValueError:
+        await msg.answer(_cx("❌ Нужен <code>.session</code> или "
+                             "<code>.zip</code> до 60 МБ."),
+                         parse_mode=ParseMode.HTML)
+        return
+    except Exception as e:
+        log.warning("admin raw upload failed: %s", e)
+        await msg.answer(_cx(f"❌ Не разобрал файл: "
+                             f"<code>{html_mod.escape(type(e).__name__)}</code>"),
+                          parse_mode=ParseMode.HTML)
+        return
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+    if not added:
+        await msg.answer(_cx("❌ В файле не нашлось ни одной "
+                             "<code>.session</code>."), parse_mode=ParseMode.HTML)
+        return
+
+    rels: list[str] = []
+    rows: list[str] = []
+    for stem, dst in added:
+        for ext in (".session", ".json"):
+            if (SESSIONS_DIR / f"{stem}{ext}").exists():
+                rels.append(f"sessions/{stem}{ext}")
+        ok, why = True, "проба пропущена"
+        if len(added) <= 6:
+            ok, why = await _session_alive(dst)
+        mark = "✅" if ok else ("⚠️" if why == "not authorized" else "❌")
+        rows.append(f"{mark} <code>{html_mod.escape(stem)}</code> — {why}")
+
+    st = _status_load()
+    changed = False
+    for key in ("dead", "suspect"):
+        before = st.get(key) or []
+        st[key] = [n for n in before if n not in {s for s, _ in added}]
+        changed |= len(st[key]) != len(before)
+    if changed:
+        _status_save(st)
+        rels.append(SESSION_STATUS_FILE.name)
+    await _persist_paths(rels, f"pool: admin raw add {len(added)}")
+    await state.clear()
+    listing = "\n".join(rows[:20])
+    if len(rows) > 20:
+        listing += f"\n… и ещё {len(rows) - 20}"
+    await push_send_log("Добавление сессий (без пересадки)",
+                        [f"⚡ Добавлено <b>{len(added)}</b> в пул напрямую"]
+                        + rows[:20])
+    await msg.answer(_cx(
+        bq(f"<b>{NAME}</b>  ·  ⚡ В пуле +{len(added)}")
+        + f"\n\n{listing}"
+        + (f"\n⚠️ пропущено крупных: {skipped}" if skipped else "")
+        + f"\n🧷 всего в пуле: <b>{len(load_sessions())}</b>"),
+        parse_mode=ParseMode.HTML)
+
+
+@router.message(AddSession.raw_file)
+async def addsess_raw_wrongtype(msg: Message, state: FSMContext):
+    await msg.answer(_cx("❌ Жду файл <code>.session</code> или "
+                         "<code>.zip</code>."), parse_mode=ParseMode.HTML)
 
 
 @router.message(AddSession.file, F.document)
