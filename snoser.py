@@ -207,16 +207,7 @@ def bqe(text: str) -> str:
 
 
 def hero_caption(user_id: int = 0) -> str:
-    """One readable home card: what the bot is and where to go next."""
-    return (bq(f"<b>{NAME}</b>  \u00b7  \u041c\u0435\u043d\u044e")
-            + "\n\n\U0001f680 <b>\u0417\u0430\u043f\u0443\u0441\u043a</b> \u2014 \u0432\u044b\u0431\u0440\u0430\u0442\u044c \u043c\u0435\u0442\u043e\u0434 "
-              "\u0438 \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0436\u0430\u043b\u043e\u0431\u0443."
-            + "\n\U0001f464 <b>\u041f\u0440\u043e\u0444\u0438\u043b\u044c</b> \u2014 \u0432\u043e\u0437\u043c\u043e\u0436\u043d\u043e\u0441\u0442\u0438 "
-              "\u0438 \u0441\u0442\u0430\u0442\u0443\u0441 \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0438."
-            + "\n\U0001f4b3 <b>\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430</b> \u2014 \u0442\u0430\u0440\u0438\u0444\u044b "
-              "\u0438 \u0441\u043f\u043e\u0441\u043e\u0431\u044b \u043e\u043f\u043b\u0430\u0442\u044b."
-            + "\n\n<i>\u041f\u043e\u0441\u043b\u0435 \u0437\u0430\u043f\u0443\u0441\u043a\u0430 \u043f\u0440\u0438\u0445\u043e\u0434\u0438\u0442 "
-              "\u043b\u043e\u0433 \u0441 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u043c \u0438 \u0444\u0430\u0439\u043b\u043e\u043c \u043e\u0442\u0447\u0435\u0442\u0430.</i>")
+    return bq("\u041c\u0435\u043d\u044e:")
 
 
 # ── states ──────────────────────────────────────────────
@@ -3864,20 +3855,18 @@ def report_target_html(raw, msg_id: int | None = None, label: str | None = None)
 
 
 def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
-    """Primary action on top, related pairs beside each other, admin below."""
     rows = [
         [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u043a", icon_custom_emoji_id="5323404142809467476", style="danger", callback_data="menu:launch")],
         [InlineKeyboardButton(text="\u041f\u0440\u043e\u0444\u0438\u043b\u044c", icon_custom_emoji_id="5256143829672672750", callback_data="menu:profile"),
          InlineKeyboardButton(text="\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", icon_custom_emoji_id="5258204546391351475", callback_data="menu:subs")],
-        [InlineKeyboardButton(text="\u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", icon_custom_emoji_id="5298988357538328017", callback_data="menu:refs"),
-         InlineKeyboardButton(text="\u0418\u043d\u0444\u043e", icon_custom_emoji_id="5258391025281408576", callback_data="menu:info")],
+        [InlineKeyboardButton(text="\u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", icon_custom_emoji_id="5298988357538328017", callback_data="menu:refs")],
         [InlineKeyboardButton(text="\u0417\u0435\u0440\u043a\u0430\u043b\u0430", icon_custom_emoji_id="5258254475386167466", callback_data="menu:mirror_list")],
     ]
 
     if ADMIN_ID and user_id == int(ADMIN_ID):
         rows.append([InlineKeyboardButton(text="\u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", icon_custom_emoji_id="5258391025281408576", callback_data="menu:telemetry"),
                      InlineKeyboardButton(text="\u0412\u044b\u0434\u0430\u0442\u044c", icon_custom_emoji_id="5258476306152038031", callback_data="menu:grant")])
-        rows.append([InlineKeyboardButton(text="\u0421\u0435\u0441\u0441\u0438\u0438", icon_custom_emoji_id="5359529383319084413", callback_data="menu:addsess")])
+        rows.append([InlineKeyboardButton(text="Сессия", icon_custom_emoji_id="5359529383319084413", callback_data="menu:addsess")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -3914,21 +3903,19 @@ def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
 
 
 def kb_tiers(premium: bool = False) -> InlineKeyboardMarkup:
-    row = [InlineKeyboardButton(
+    rows = [[InlineKeyboardButton(
         text="\U0001f3c5 \u041e\u0431\u044b\u0447\u043d\u044b\u0435",
-        callback_data="tier:normal")]
+        callback_data="tier:normal")]]
     if premium:
-        row.append(InlineKeyboardButton(
-            text="\U0001f48e \u041f\u0440\u0435\u043c\u0438\u0443\u043c",
+        rows.append([InlineKeyboardButton(
+            text="\u041f\u0440\u0435\u043c\u0438\u0443\u043c",
             icon_custom_emoji_id="5258165702707125574",
-            callback_data="tier:premium"))
-    return InlineKeyboardMarkup(inline_keyboard=[
-        row,
-        [InlineKeyboardButton(
-            text="\u041d\u0430\u0437\u0430\u0434",
-            icon_custom_emoji_id="5258132936401624790",
-            callback_data="back:home")],
-    ])
+            callback_data="tier:premium")])
+    rows.append([InlineKeyboardButton(
+        text="\u041d\u0430\u0437\u0430\u0434",
+        icon_custom_emoji_id="5258132936401624790",
+        callback_data="back:home")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_reasons(method: str = "") -> InlineKeyboardMarkup:
@@ -3940,8 +3927,7 @@ def kb_reasons(method: str = "") -> InlineKeyboardMarkup:
         items = [(k, {"l": v["e"] + " " + v["l"]})
                  for k, v in CHANNEL_REASONS.items()]
     else:
-        items = [(k, {"l": v["e"] + " " + v["l"]})
-                 for k, v in REASONS.items()]
+        items = list(REASONS.items())
     for i in range(0, len(items), 2):
         row = []
         for k, v in items[i:i + 2]:
