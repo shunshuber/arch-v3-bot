@@ -4502,6 +4502,8 @@ async def menu_grant(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Премиум (навсегда)",
+                                  callback_data="grant:premium")],
             [InlineKeyboardButton(text="Отозвать подписку", style="danger",
                                   icon_custom_emoji_id="5267123797600783095",
                                   callback_data="grant:revoke")],
@@ -4510,14 +4512,39 @@ async def menu_grant(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
+@router.callback_query(F.data == "grant:premium")
+async def grant_premium_start(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await state.set_state(GrantFSM.uid)
+    await state.update_data(grant_premium=True)
+    await cb.message.edit_caption(
+        caption=_cx(
+            bq(f"<b>{NAME}</b>  ·  💎 Премиум")
+            + "\n\nПришли <b>ID</b> или <code>@username</code>, "
+              "кому выдать премиум навсегда."
+            + "\n\nПодтверди следующим сообщением <code>yes</code>."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5258132936401624790",
+                                  callback_data="back:home")]]))
+    await cb.answer()
+
+
 @router.message(GrantFSM.uid)
 async def grant_uid(msg: Message, state: FSMContext):
     raw = (msg.text or "").strip()
-    if raw.lower() == "forever":
+    _prem = bool((await state.get_data()).get("grant_premium"))
+    if raw.lower() in ("forever", "premium"):
         await state.set_state(GrantFSM.days)
-        await state.update_data(forever=True)
+        await state.update_data(forever=True,
+                                premium=_prem or raw.lower() == "premium")
         await msg.answer(_cx(
-            "✅ Подписка <b>навсегда</b> будет выдана — подтверди командой <code>yes</code>:"),
+            "✅ " + ("<b>Премиум навсегда</b>" if _prem or raw.lower() == "premium"
+                    else "<b>Подписка навсегда</b>")
+            + " будет выдана — подтверди командой <code>yes</code>:"),
             parse_mode=ParseMode.HTML)
         return
     try:
@@ -4527,6 +4554,12 @@ async def grant_uid(msg: Message, state: FSMContext):
         return
     await state.update_data(uid=uid)
     await state.set_state(GrantFSM.days)
+    if _prem:
+        await msg.answer(_cx(
+            f"📱 Пользователь <code>{uid}</code>.\n"
+            + "Подтверди <code>yes</code> — выдаю <b>премиум навсегда</b>."),
+            parse_mode=ParseMode.HTML)
+        return
     await msg.answer(_cx(
         f"📱 Пользователь <code>{uid}</code>.\n"
         + "Теперь отправь <b>кол-во дней</b> подписки (1 / 7 / 30 / 365 …):"),
@@ -4538,14 +4571,26 @@ async def grant_days(msg: Message, state: FSMContext):
     data = await state.get_data()
     uid = data.get("uid")
     forever = data.get("forever", False)
+    want_premium = bool(data.get("premium"))
     raw = (msg.text or "").strip().lower()
     if forever and raw in ("yes", "y"):
         subs = load_subs()
         rec = subs.setdefault(str(uid), {})
         rec["forever"] = True
+        # "forever" always includes premium methods; the explicit premium
+        # grant sets the same flag so has_premium() opens web/mail/dsa etc.
+        rec["premium"] = True
         save_subs(subs)
+        persist_now("subs", f"admin grant forever/premium for {uid}")
+        await push_send_log(
+            "Выдача подписки",
+            [f"💎 <code>{uid}</code> — "
+             + ("премиум навсегда" if want_premium else "подписка навсегда")])
         await state.clear()
-        await msg.answer(_cx(f"👑 <b>@{uid}</b> получил <b>навсегда</b>."), parse_mode=ParseMode.HTML)
+        await msg.answer(_cx(
+            f"👑 <b>@{uid}</b> получил "
+            + ("<b>премиум навсегда</b>" if want_premium else "<b>навсегда</b>")),
+            parse_mode=ParseMode.HTML)
         return
     try:
         days = int(raw)
@@ -4695,6 +4740,37 @@ async def grant_revoke_yes(cb: CallbackQuery):
     except Exception:
         pass
     await cb.answer("снято")
+
+
+@router.message(Command("premium"))
+async def cmd_premium(msg: Message):
+    """Admin: /premium <uid|@username> — premium forever, no payment."""
+    if not user_is_admin(msg.from_user.id):
+        await msg.answer(_cx("⛔️ Команда для админов."), parse_mode=ParseMode.HTML)
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.answer(_cx("Формат: <code>/premium 8661362112</code> "
+                             "или <code>/premium @username</code>"),
+                         parse_mode=ParseMode.HTML)
+        return
+    uid = _uid_from_raw(parts[1])
+    if uid is None:
+        await msg.answer(_cx("❌ Не нашёл ID или пользователя в users.json."),
+                         parse_mode=ParseMode.HTML)
+        return
+    subs = load_subs()
+    rec = subs.setdefault(str(uid), {})
+    rec["premium"] = True
+    rec["forever"] = True
+    save_subs(subs)
+    persist_now("subs", f"admin premium grant for {uid}")
+    await push_send_log("Выдача премиума",
+                        [f"💎 <code>{uid}</code> — премиум навсегда"])
+    await msg.answer(_cx(
+        f"💎 <b>@{uid}</b> получил <b>премиум навсегда</b>.\n"
+        "Методы web / mail / bank / telegraph / dsa открыты."),
+        parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("wl"))
