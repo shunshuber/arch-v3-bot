@@ -6,6 +6,7 @@ import html as html_mod
 import io
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -218,6 +219,10 @@ class Report(StatesGroup):
     confirm = State()
     bank = State()
     bank_card = State()
+
+
+class SubCustom(StatesGroup):
+    days = State()
 
 
 class Snos(StatesGroup):
@@ -7440,6 +7445,50 @@ async def report_gate_block(uid: int, method: str) -> str | None:
     return None
 
 
+async def _account_log_after(msg: Message, target: dict, task) -> None:
+    """Ждёт отправку профильной жалобы и присылает файл-лог с итогом."""
+    try:
+        res = await task
+    except Exception as e:
+        res = {"ok": 0, "fail": 1, "total": 1,
+               "details": [{"name": "worker", "proxy": "-", "ok": False,
+                            "err": f"{type(e).__name__}: {e}"}]}
+    ok = int(res.get("ok") or 0)
+    total = int(res.get("total") or 0)
+    LOGS_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = LOGS_DIR / f"report_account_{stamp}.txt"
+    lines = [
+        "Arch V3 — журнал отправки",
+        f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "Метод: Аккаунт",
+        f"Цель: {target['raw']}",
+        "Схема: Другое → Прочее",
+        f"От: {msg.from_user.full_name} (id {msg.from_user.id})",
+        f"Итог: {ok}/{total} жалоб",
+        "",
+        "─── детали ───",
+    ]
+    for d in res.get("details") or []:
+        mark = "✅" if d.get("ok") else "❌"
+        line = f"{mark} {d.get('name')} | {d.get('proxy')}"
+        if not d.get("ok") and d.get("err"):
+            line += f" | {d['err']}"
+        lines.append(line)
+    try:
+        path.write_text("\n".join(lines), encoding="utf-8")
+    except Exception as e:
+        log.warning("account log write failed: %s", e)
+        return
+    try:
+        await msg.answer_document(
+            document=FSInputFile(path),
+            caption=f"📄 Лог · Аккаунт · {ok}/{total}",
+            reply_markup=kb_main(msg.from_user.id))
+    except Exception as e:
+        log.warning("account log send failed: %s", e)
+
+
 @router.message(Report.target)
 async def got_target(msg: Message, state: FSMContext):
     _m = (await state.get_data()).get("method")
@@ -7458,11 +7507,12 @@ async def got_target(msg: Message, state: FSMContext):
             await msg.answer(_cx(method_busy_wait_text(
                 "account", "и пришли цель ещё раз.")), parse_mode=ParseMode.HTML)
             return
+        asyncio.create_task(_account_log_after(msg, target, _acct_task))
         await state.clear()
         await msg.answer(_cx(
             bq(f"<b>{NAME}</b>  —  👤 Аккаунт")
             + f"\n\n🎯 Цель: <code>{html_mod.escape(str(target['raw']))}</code>"
-            + "\n\nЖалоба отправлена."),
+            + "\n\nЖалоба запущена — лог придёт отдельным файлом."),
             parse_mode=ParseMode.HTML)
         return
     if _m == "session":
@@ -7519,6 +7569,23 @@ async def got_target(msg: Message, state: FSMContext):
         return
     if _m == "bot":
         rk = (await state.get_data()).get("reason") or "personal"
+        if rk == "other":
+            await state.update_data(target=target, variants=None)
+            await msg.answer(_cx(
+                bq(f"<b>{NAME}</b>  —  ✍️ Свой текст")
+                + "\n\nПришли текст жалобы на бота одним сообщением — "
+                  "он уйдёт как есть, без шаблона."
+                + "\n\nИли оставь стандартный текст кнопкой ниже."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Оставить шаблон",
+                                          callback_data="skip_comment")],
+                    [InlineKeyboardButton(
+                        text="Назад", icon_custom_emoji_id="5258132936401624790",
+                        callback_data="back:reasons")],
+                ]))
+            await state.set_state(Report.comment)
+            return
         text = bot_reason_text(rk)
         await state.update_data(target=target, comment=text,
                                 variants=[text])
@@ -8552,6 +8619,66 @@ CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
 STARS_PRICES = {"d1": 75, "d7": 225, "d30": 525, "d90": 975, "prem": 225}
 
+BASE_PLAN_KEYS = ("d1", "d7", "d30", "d90", "prem")
+CUSTOM_PLANS_FILE = Path(__file__).parent / "custom_plans.json"
+
+
+def custom_plan_price(days: int) -> float:
+    """N дней: линейно между тарифами, вверх до 0.05 USDT."""
+    anchors = [(1, SUB_PLANS["d1"]["price"]),
+               (7, SUB_PLANS["d7"]["price"]),
+               (30, SUB_PLANS["d30"]["price"]),
+               (90, SUB_PLANS["d90"]["price"])]
+    if days <= anchors[0][0]:
+        return anchors[0][1]
+    for (d0, p0), (d1, p1) in zip(anchors, anchors[1:]):
+        if days <= d1:
+            if days == d1:
+                return p1
+            price = p0 + (p1 - p0) * (days - d0) / (d1 - d0)
+            return math.ceil(price * 20) / 20
+    return anchors[-1][1]
+
+
+def load_custom_plans() -> dict:
+    try:
+        d = json.loads(CUSTOM_PLANS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def register_custom_plan(days: int) -> str:
+    """Persist an xN plan so invoices survive runner restarts."""
+    pk = f"x{days}"
+    price = custom_plan_price(days)
+    SUB_PLANS[pk] = {"label": f"{days} дн.", "days": days, "price": price}
+    STARS_PRICES[pk] = int(math.ceil(price * 100))
+    d = load_custom_plans()
+    d[pk] = {"days": days, "price": price}
+    try:
+        CUSTOM_PLANS_FILE.write_text(
+            json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        log.warning("custom plans save failed: %s", e)
+    return pk
+
+
+def _load_custom_plans_into_pool() -> None:
+    for pk, spec in load_custom_plans().items():
+        try:
+            days = int(spec.get("days") or 0)
+            price = float(spec.get("price") or 0)
+        except Exception:
+            continue
+        if not (1 <= days <= 90 and price > 0):
+            continue
+        SUB_PLANS[pk] = {"label": f"{days} дн.", "days": days, "price": price}
+        STARS_PRICES[pk] = int(math.ceil(price * 100))
+
+
+_load_custom_plans_into_pool()
+
 # старые инвойсы «Навсегда» (fore) уже оплачены у части людей в ссылках —
 # они гасятся как 90 дней, чтобы деньги не пропали
 LEGACY_PLANS = {"fore": "d90"}
@@ -9127,10 +9254,12 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
             bq(f"<b>{NAME}</b>  —  ⭐ Telegram Stars")
             + "\n\nТарифы:"
         )
-        for pk, pl in SUB_PLANS.items():
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             caption += f"\n• <b>{pl['label']}</b> — <b>{STARS_PRICES[pk]} ⭐</b>"
         rows = []
-        for pk, pl in SUB_PLANS.items():
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             link = await arch_star_link(pk, cb.from_user.id)
             rows.append([InlineKeyboardButton(
                 text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
@@ -9140,27 +9269,100 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
             bq(f"<b>{NAME}</b>  —  💳 Карта РФ / СБП")
             + "\n\nОплата рублями через Cloudtips: карта любого банка РФ или СБП.\nТарифы:"
         )
-        for pk, pl in SUB_PLANS.items():
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             caption += f"\n• <b>{pl['label']}</b> — <b>{ct_price_rub(pk):.0f} ₽</b>"
         rows = [[InlineKeyboardButton(
-                    text=f"💰 {pl['label']} — {ct_price_rub(pk):.0f} ₽",
+                    text=f"💰 {SUB_PLANS[pk]['label']} — "
+                         f"{ct_price_rub(pk):.0f} ₽",
                     callback_data=f"sub:buy:ct:{pk}")]
-                for pk, pl in SUB_PLANS.items()]
+                for pk in BASE_PLAN_KEYS]
     else:
         caption = (
             bq(f"<b>{NAME}</b>  —  🚀 xRocket")
             + "\n\nИнвойс в USDT через @xrocket.\nТарифы:"
         )
-        for pk, pl in SUB_PLANS.items():
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             caption += f"\n• <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
         rows = [[InlineKeyboardButton(
-                    text=f"💰 {pl['label']} — {pl['price']:g} USDT",
+                    text=f"💰 {SUB_PLANS[pk]['label']} — "
+                         f"{SUB_PLANS[pk]['price']:g} USDT",
                     callback_data=f"sub:buy:xrocket:{pk}")]
-                for pk, pl in SUB_PLANS.items()]
+                for pk in BASE_PLAN_KEYS]
+    rows.append([InlineKeyboardButton(
+        text="🗓 Свои дни (1–90)", callback_data=f"sub:cdays:{m}")])
     rows.append([InlineKeyboardButton(text="К способам", icon_custom_emoji_id="5258132936401624790", callback_data="sub:shop")])
     await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("sub:cdays:"))
+async def sub_custom_start(cb: CallbackQuery, state: FSMContext):
+    m = cb.data.rsplit(":", 1)[1]
+    if m not in ("xtr", "ct", "xr"):
+        await cb.answer("❌", show_alert=True)
+        return
+    await state.update_data(custom_pay=m)
+    await state.set_state(SubCustom.days)
+    await cb.message.edit_caption(
+        caption=_cx(bq(f"<b>{NAME}</b>  —  🗓 Свои дни")
+                    + "\n\nПришли число дней подписки: <b>1–90</b>."
+                    + "\nЦена посчитается по тарифу и округлится вверх."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5258132936401624790",
+                                  callback_data=f"sub:pm:{m}")]]))
+    await cb.answer()
+
+
+@router.message(SubCustom.days)
+async def sub_custom_days(msg: Message, state: FSMContext):
+    txt = (msg.text or "").strip()
+    if not txt.isdigit() or not (1 <= int(txt) <= 90):
+        await msg.answer(_cx("❌ Нужно целое число дней от <b>1</b> до <b>90</b>."),
+                         parse_mode=ParseMode.HTML)
+        return
+    n = int(txt)
+    m = (await state.get_data()).get("custom_pay") or "xr"
+    pk = register_custom_plan(n)
+    pl = SUB_PLANS[pk]
+    try:
+        await _persist_paths([CUSTOM_PLANS_FILE.name],
+                             f"custom plan {pk}: {pl['price']:g} USDT")
+    except Exception as e:
+        log.warning("custom plan persist failed: %s", e)
+    await state.clear()
+    if m == "xtr":
+        price_line = f"{STARS_PRICES[pk]} ⭐"
+        link = await arch_star_link(pk, msg.from_user.id)
+        if not link:
+            await msg.answer(_cx("⚠️ Звёзды сейчас недоступны — выбери другой "
+                                 "способ оплаты."), parse_mode=ParseMode.HTML)
+            return
+        rows = [[InlineKeyboardButton(
+            text=f"⭐ Оплатить {STARS_PRICES[pk]} ⭐", url=link)]]
+    elif m == "ct":
+        price_line = f"{ct_price_rub(pk):.0f} ₽"
+        rows = [[InlineKeyboardButton(
+            text=f"💳 Оплатить {ct_price_rub(pk):.0f} ₽",
+            callback_data=f"sub:buy:ct:{pk}")]]
+    else:
+        price_line = f"{pl['price']:g} USDT"
+        rows = [[InlineKeyboardButton(
+            text=f"🚀 Оплатить {pl['price']:g} USDT",
+            callback_data=f"sub:buy:xrocket:{pk}")]]
+    rows.append([InlineKeyboardButton(
+        text="Назад", icon_custom_emoji_id="5258132936401624790",
+        callback_data=f"sub:pm:{m}")])
+    await msg.answer(_cx(
+        bq(f"<b>{NAME}</b>  —  🗓 {n} дн.")
+        + f"\n\n💳 <b>{pl['label']}</b> — <b>{price_line}</b>"
+        + "\nПодписка включится автоматически после оплаты."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @router.callback_query(F.data.startswith("sub:buy:"))
