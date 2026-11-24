@@ -55,9 +55,11 @@ jobs:
               res = await c(GetStickerSetRequest(
                   stickerset=InputStickerSetShortName(os.environ['SHORT_NAME']),
                   hash=0))
-              print('TITLE:', res.set.title, 'COUNT:', len(res.stickers), flush=True)
-              for st in res.stickers:
-                  print('EMOJI', repr(st.emoji), 'ID', st.id, flush=True)
+              print('TITLE:', res.set.title, 'COUNT:', len(res.documents), flush=True)
+              for p in res.packs:
+                  print('PACK', repr(p.emoticon), p.documents, flush=True)
+              for d in res.documents:
+                  print('DOC', d.id, flush=True)
               await c.disconnect()
 
           asyncio.run(main())
