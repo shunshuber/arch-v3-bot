@@ -1,5 +1,6 @@
 .env.private
 .env
+ct_session.json
 __pycache__/
 cache/
 logs/
