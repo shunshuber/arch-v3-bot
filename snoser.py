@@ -59,6 +59,7 @@ from telethon.tl.types import (
     InputReportReasonPersonalDetails,
     InputReportReasonFake,
     InputReportReasonOther,
+    InputPeerUser,
 )
 import python_socks
 import aiohttp
@@ -10671,15 +10672,30 @@ async def _profile_find_option(client, peer, keyword_ru: str,
         return None
 
 
-async def _profile_options(client, target: str):
-    """Scout the category tree once; returns (other_opt, misc_opt)."""
-    entity = await client.get_entity(target)
-    peer = await client.get_input_entity(entity)
+async def _peer_for(client, target: str,
+                    fallback: tuple[int, int] | None = None):
+    """Resolve the target; if this account cannot resolve usernames
+    (limited account returns USERNAME_NOT_OCCUPIED), fall back to the
+    id/access_hash pair scouted by another session."""
+    try:
+        entity = await client.get_entity(target)
+        return await client.get_input_entity(entity), (entity.id,
+                                                       entity.access_hash)
+    except Exception:
+        if fallback:
+            return InputPeerUser(fallback[0], fallback[1]), fallback
+        raise
+
+
+async def _profile_options(client, target: str,
+                           fallback: tuple[int, int] | None = None):
+    """Scout the category tree once; returns (other, misc, entity_ref)."""
+    peer, ref = await _peer_for(client, target, fallback)
     other = await _profile_find_option(client, peer, "другое", "other")
     if other is None:
-        return None, None
+        return None, None, ref
     misc = await _profile_find_option(client, peer, "прочее", "misc", other)
-    return other, misc
+    return other, misc, ref
 
 
 async def fire_profile_reports(target: str, comment: str = "") -> dict:
@@ -10702,26 +10718,33 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
         await push_send_log("Report (профиль)", ["❌ нет доступных сессий"])
         return results
 
-    # one scout on a usable session — options are the same for all sessions
-    scout = pool[0]
+    # scout the option tree on up to 3 sessions: one limited account that
+    # cannot resolve usernames must not kill the whole run
     other = misc = None
-    try:
-        async with _session_lock(scout):
-            fp = session_fingerprint(scout.stem)
-            client = TelegramClient(
-                str(scout.with_suffix("")), fp["api_id"], fp["api_hash"],
-                proxy=pin_for_session(scout.stem, proxies),
-                device_model=fp["device"], system_version=fp["system_version"],
-                app_version=fp["app_version"], lang_code=fp["lang_code"])
-            try:
-                await _connect_safe(client)
-                if not await client.is_user_authorized():
-                    raise RuntimeError("scout not authorized")
-                other, misc = await _profile_options(client, target)
-            finally:
-                await client.disconnect()
-    except Exception as e:
-        log.warning("profile scout failed: %s", e)
+    entity_ref = None
+    for scout in pool[:3]:
+        try:
+            async with _session_lock(scout):
+                fp = session_fingerprint(scout.stem)
+                client = TelegramClient(
+                    str(scout.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=pin_for_session(scout.stem, proxies),
+                    device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"], lang_code=fp["lang_code"])
+                try:
+                    await _connect_safe(client)
+                    if not await client.is_user_authorized():
+                        raise RuntimeError("scout not authorized")
+                    other, misc, entity_ref = await _profile_options(client,
+                                                                     target)
+                finally:
+                    await client.disconnect()
+        except Exception as e:
+            log.warning("profile scout failed on %s: %s", scout.stem, e)
+            continue
+        if other is not None:
+            break
     if other is None:
         await push_send_log("Report (профиль)", [
             f"🎯 <code>{html_mod.escape(str(target))}</code>",
@@ -10746,8 +10769,7 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
                     await _connect_safe(client)
                     if not await client.is_user_authorized():
                         return name, px, False, "not authorized"
-                    entity = await client.get_entity(target)
-                    peer = await client.get_input_entity(entity)
+                    peer, _ref = await _peer_for(client, target, entity_ref)
                     await client(ReportRequest(
                         peer=peer, id=[], option=b'', message=''))
                     await client(ReportRequest(
