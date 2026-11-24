@@ -1,0 +1,73 @@
+name: probe-username
+
+on:
+  workflow_dispatch:
+    inputs:
+      session:
+        description: "session stem (sessions/<name>.session)"
+        required: true
+        default: "274387152_telethon_new"
+      usernames:
+        description: "comma separated usernames to resolve"
+        required: true
+        default: "vulpenn,telegram,durov"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      SESSION_NAME: ${{ inputs.session }}
+      USERNAMES: ${{ inputs.usernames }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Probe session
+        run: |
+          python - <<'PY'
+          import asyncio, os
+          from pathlib import Path
+          import snoser
+          from telethon import TelegramClient
+
+          async def main():
+              name = os.environ["SESSION_NAME"]
+              sess = Path("sessions") / f"{name}.session"
+              fp = snoser.session_fingerprint(name)
+              proxy = snoser.pin_for_session(name, snoser.load_pin_proxies())
+              c = TelegramClient(
+                  str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                  proxy=proxy, device_model=fp["device"],
+                  system_version=fp["system_version"],
+                  app_version=fp["app_version"], lang_code=fp["lang_code"])
+              await c.connect()
+              print("authorized:", await c.is_user_authorized(), flush=True)
+              me = await c.get_me()
+              print("me:", getattr(me, "id", None), getattr(me, "username", None),
+                    getattr(me, "phone", None), flush=True)
+              for raw in os.environ["USERNAMES"].split(","):
+                  u = raw.strip().lstrip("@")
+                  if not u:
+                      continue
+                  try:
+                      e = await c.get_entity(u)
+                      print("OK", u, type(e).__name__, getattr(e, "id", None),
+                            flush=True)
+                  except Exception as ex:
+                      print("FAIL", u, type(ex).__name__, str(ex)[:200],
+                            flush=True)
+              await c.disconnect()
+
+          asyncio.run(main())
+          PY
