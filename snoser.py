@@ -4021,8 +4021,7 @@ def summary_text(data: dict) -> str:
         lines.append(f"📧 Сендеры: <b>{n_use}/{pool_n}</b> (1/3 пула), писем: <b>{n_use * len(MAIL_RECEIVERS)}</b> → 4 ящика Telegram.")
         lines.append(f"✉️ Тематика: <b>{r['e']} {r['l']}</b> · тексты шаблонные, уникальные.")
     elif data["method"] == "message":
-        lines.append("🎲 <b>Категории случайные:</b> 9 байтов на сессию, "
-                     "текст — свой или из общего пула.")
+        lines.append(f"⚠️ <b>Причина:</b>  {r['e']} {r['l']}")
         lines.append(f"💬 <b>Комментарий:</b>  {c}")
     else:
         lines += [

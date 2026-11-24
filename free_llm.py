@@ -196,8 +196,12 @@ VARIANTS_PROMPT = (
     "ст. 159 УК РФ; угрозы — ст. 119 УК РФ.\n"
     "4. Требование: удалить публикацию, заблокировать аккаунт и пресечь "
     "дальнейшее распространение через платформу.\n\n"
-    "Русский язык, один абзац, 250-450 символов. Без @username, без ссылок, "
-    "без вступлений («Здравствуйте», «Я хочу сообщить»), без пояснений от себя. "
+    "Русский язык, один абзац, 250-450 символов. Никаких эмодзи и скобок с "
+    "сырыми символами: не пересказывай картинку списком значков, а сформулируй "
+    "смысл нарушения словами. Если в исходнике только набор эмодзи или он "
+    "нечитаем, пиши по категории и названию нарушения, не цитируя мусор. "
+    "Без @username, без ссылок, без вступлений («Здравствуйте», "
+    "«Я хочу сообщить»), без пояснений от себя. "
     "РОВНО 8 пронумерованных строк (1-8), по одной жалобе на строку. Каждая "
     "должна звучать по-разному, но сохранять ту же жёсткую конкретику "
     "и резкий финал. Не копируй пример дословно — только структуру.\n\n"
@@ -241,10 +245,10 @@ def _parse_variants(raw: str, reason: str, sub_reason: str,
     out = []
     for line in (raw or "").splitlines():
         line = re.sub(r"^\s*\d+[\.\)]\s*", "", line).strip()
-        line = _clean(line)
+        line = _clean_source(_clean(line))
         if len(line) >= 60 and line not in out:
             out.append(line[:450])
-    snippet = (message_text or reason).strip()[:160]
+    snippet = _clean_source(message_text, reason).strip()[:160]
     law = _law_hint(reason)
     i = 0
     while len(out) < count:
@@ -262,6 +266,25 @@ def _parse_variants(raw: str, reason: str, sub_reason: str,
     return out[:count]
 
 
+def _clean_source(text: str, reason: str = "") -> str:
+    """Drop emoji-only rows and raw symbol noise before feeding the LLM.
+    Screenshots often arrive as a wall of pictographs — quoting that back
+    produces the '🅰️🅰️🚚🚚' garbage instead of an actual complaint."""
+    keep = []
+    for line in (text or "").splitlines():
+        letters = re.findall(r"[A-Za-zА-Яа-яЁё0-9]", line)
+        if len(letters) >= 3:
+            keep.append(line.strip())
+    s = " ".join(keep)
+    s = re.sub(r"[^\w\sа-яА-ЯЁё/,.:;!?()\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    tokens = []
+    for word in s.split():
+        if not tokens or word != tokens[-1]:
+            tokens.append(word)
+    return " ".join(tokens)[:400] or (reason or "").strip()
+
+
 async def generate_complaint_variants(reason: str, sub_reason: str,
                                       message_text: str = "",
                                       count: int = 8) -> list[str]:
@@ -269,8 +292,9 @@ async def generate_complaint_variants(reason: str, sub_reason: str,
     user = f"Description: {reason}"
     if sub_reason:
         user += f"\nDetails: {sub_reason}"
-    if message_text:
-        user += f"\nMessage text: {message_text[:600]}"
+    clean = _clean_source(message_text, reason)
+    if clean:
+        user += f"\nMessage text: {clean[:400]}"
     user += f"\nСгенерируй {count} жалоб."
     for call in (_gemini, _pollinations):
         try:
