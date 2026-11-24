@@ -3886,6 +3886,8 @@ def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
         "channel": "5424818078833715060", "message": "5443038326535759644",
         "telegraph": "5460755126761312667",
         "dsa": "5438496463044752972",
+        "account": "5210956306952758910",   # 👀
+        "manual": "5341715473882955310",    # ⚙
     }
     keys = [k for k in order if (k in PREMIUM_METHODS) == (tier == "premium")]
     rows, row = [], []
