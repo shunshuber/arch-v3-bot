@@ -174,18 +174,27 @@ router = Router()
 # ── branding ────────────────────────────────────────────
 NAME = "Arch V3"
 
-# hero still image: static banner from the repo, cached file_id per run
-HERO_PHOTO_FILE_ID = ""
+GIF_URL = ("https://huggingface.co/datasets/Eraserr/erase-media"
+           "/resolve/main/gifs.gif")
+# file_id cached from a prior send of GIF_URL by this bot
+GIF_FILE_ID = ("CgACAgQAAxkDAAIFSGr32lSWJ9NZz-HVi8Mo7a9dCE-"
+               "tAAJ0CwACwlYNU_ez2iv_Eu5oPQQ")
 
 
 async def send_hero(obj, **kw):
-    """Hero banner: cached file_id first, local banner.png fallback."""
-    global HERO_PHOTO_FILE_ID
-    media = HERO_PHOTO_FILE_ID or FSInputFile(BANNER)
-    m = await obj.answer_photo(photo=media, **kw)
-    ph = getattr(m, "photo", None)
-    if ph:
-        HERO_PHOTO_FILE_ID = ph[-1].file_id
+    """Hero gif: cached file_id first, URL fallback, refresh id."""
+    global GIF_FILE_ID
+    ref = GIF_FILE_ID or GIF_URL
+    try:
+        m = await obj.answer_animation(animation=ref, **kw)
+    except Exception:
+        if ref == GIF_URL:
+            raise
+        GIF_FILE_ID = ""
+        m = await obj.answer_animation(animation=GIF_URL, **kw)
+    anim = getattr(m, "animation", None)
+    if anim and anim.file_id:
+        GIF_FILE_ID = anim.file_id
     return m
 
 
@@ -6022,7 +6031,7 @@ async def captcha_solve(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     # hmm — render the hero card fresh right after pass
     await cb.message.edit_media(
-        media=InputMediaPhoto(media=HERO_PHOTO_FILE_ID or FSInputFile(BANNER)),
+        media=InputMediaAnimation(media=GIF_FILE_ID or GIF_URL),
         reply_markup=kb_main(uid),
     )
     await cb.message.edit_caption(
