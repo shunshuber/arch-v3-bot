@@ -164,10 +164,6 @@ async def user_card_path(bot, user) -> str:
     except Exception as e:
         log.error("card render failed: %s", e)
         return str(BANNER)
-        return str(out)
-    except Exception as e:
-        log.error("card render failed: %s", e)
-        return str(BANNER)
 
 router = Router()
 
@@ -273,6 +269,7 @@ REASON_MAP = {
     "drugs":     InputReportReasonIllegalDrugs,
     "personal":  InputReportReasonPersonalDetails,
     "fake":      InputReportReasonFake,
+    "sexwork":   InputReportReasonPornography,
     "other":     InputReportReasonOther,
 }
 
@@ -2506,8 +2503,9 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
 
     if not sessions or not API_ID or not API_HASH:
-        log.info("blast page completed")
-        return fake_results()
+        log.info("blast skipped: no live sessions or api creds")
+        await push_send_log("Report (сессии)", ["❌ нет доступных сессий"])
+        return {"ok": 0, "fail": 0, "total": 0, "details": []}
 
     async def session_worker(sess: Path, idx: int) -> tuple[str, str, bool, str]:
         name = sess.stem
@@ -4408,7 +4406,7 @@ async def refs_check_and_grant(cb: CallbackQuery):
         for rid in (rec.get("refs") or []):
             r2 = users.get(str(rid), {})
             if (r2.get("ref_grants", 0) or 0) >= 1 and not r2.get("_t2_credited", False):
-                s, until2 = grant_ref_bonus(cb.from_user.id, 1)
+                s, until = grant_ref_bonus(cb.from_user.id, 1)
                 rec["deep_refs"] = (rec.get("deep_refs", 0) or 0) + 1
                 r2["_t2_credited"] = True
                 users[str(rid)] = r2
@@ -4546,24 +4544,15 @@ async def grant_premium_start(cb: CallbackQuery, state: FSMContext):
 async def grant_uid(msg: Message, state: FSMContext):
     raw = (msg.text or "").strip()
     _prem = bool((await state.get_data()).get("grant_premium"))
-    if raw.lower() in ("forever", "premium"):
-        await state.set_state(GrantFSM.days)
-        await state.update_data(forever=True,
-                                premium=_prem or raw.lower() == "premium")
-        await msg.answer(_cx(
-            "✅ " + ("<b>Премиум навсегда</b>" if _prem or raw.lower() == "premium"
-                    else "<b>Подписка навсегда</b>")
-            + " будет выдана — подтверди командой <code>yes</code>:"),
-            parse_mode=ParseMode.HTML)
-        return
-    try:
-        uid = int(raw)
-    except ValueError:
-        await msg.answer("❌ Нужен числовой Telegram ID.")
+    uid = _uid_from_raw(raw)
+    if uid is None:
+        await msg.answer(_cx("❌ Нужен числовой ID или <code>@username</code>."),
+                         parse_mode=ParseMode.HTML)
         return
     await state.update_data(uid=uid)
     await state.set_state(GrantFSM.days)
     if _prem:
+        await state.update_data(forever=True, premium=True)
         await msg.answer(_cx(
             f"📱 Пользователь <code>{uid}</code>.\n"
             + "Подтверди <code>yes</code> — выдаю <b>премиум навсегда</b>."),
@@ -7969,7 +7958,7 @@ async def txt_ai(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
     target = d.get("target")
     if not target:
-        await cb.message.answer("\u041d\u0430\u0436\u043c\u0438 \u00ab\u0417\u0430\u043f\u0443\u0441\u043a\u00e9 \u0437\u0430\u043d\u043e\u0432\u043e", show_alert=True)
+        await cb.answer("\u041d\u0430\u0436\u043c\u0438 \u00ab\u0417\u0430\u043f\u0443\u0441\u043a\u00e9 \u0437\u0430\u043d\u043e\u0432\u043e", show_alert=True)
         return
     try:
         from free_llm import generate_complaint_variants
@@ -8092,6 +8081,7 @@ async def cmt_auto(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     _fixed = METHOD_TEXT_OVERRIDES.get((data.get("method"), data.get("reason")))
     await state.update_data(comment=_fixed or "")
+    data = await state.get_data()
     await safe_edit(cb.message, _cx(summary_text(data)),
                     parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
     await state.set_state(Report.confirm)
@@ -9317,6 +9307,8 @@ def set_channel_id(cid: int) -> None:
 async def on_bot_chat_member(cm, ):
     """Auto-save the private channel id once the bot is added there."""
     chat = cm.chat
+    if getattr(cm, "new_status", "") not in ("member", "administrator", "creator"):
+        return
     if getattr(chat, "type", "") == "channel":
         if get_channel_id() != chat.id:
             set_channel_id(chat.id)
@@ -10022,6 +10014,7 @@ async def on_successful_payment(msg: Message):
         await msg.answer("⚠️ Платёж принят, но план не распознан — напиши админу.")
         return
     pk = plan_key(pk)
+    subs = load_subs()
     if pk in SUB_PLANS:
         subs = load_subs()
         activate_plan(subs, uid, pk)
@@ -10081,7 +10074,7 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
                                float(SUB_PLANS[plan_key].get("price", 0)),
                                "USDT")
             await cb.answer("\u2705 \u041e\u043f\u043b\u0430\u0442\u0430 \u043f\u0440\u043e\u0448\u043b\u0430, \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u0430\u043a\u0442\u0438\u0432\u043d\u0430!", show_alert=True)
-            s, until = sub_quality(subs, info["user"])
+            s, until = sub_quality(subs, pay_user)
             caption = (
                 bq(f"<b>{NAME}</b>  \u2014  \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u043e\u043a")
                 + f"\n\n\u2705 \u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435: <b>{s}</b> ({until})\n"
@@ -10110,13 +10103,19 @@ _REPORT_CB_RE = re.compile(
     r"^(method:[a-z]+|reason:[a-z_]+|cmt:(auto|custom|back)|skip_comment|confirm:(yes|no))$")
 
 
+def _fsm_state_str(v) -> str:
+    s = str(v or "")
+    m = re.match(r"^<State '([^']+)'>$", s)
+    return m.group(1) if m else s
+
+
 async def _fsm_last_entry(uid: int):
     """The user's latest persisted FSM entry: repo file first, store doc second."""
     try:
         if FSM_FILE.exists():
             j = json.loads(FSM_FILE.read_text(encoding="utf-8"))
             for e in j.get("entries", []):
-                if e.get("user_id") == uid and str(e.get("state") or "").startswith("Report:"):
+                if e.get("user_id") == uid and _fsm_state_str(e.get("state")).startswith("Report:"):
                     return e
     except Exception:
         pass
@@ -10127,7 +10126,7 @@ async def _fsm_last_entry(uid: int):
             if txt:
                 j = json.loads(txt)
                 for e in j.get("entries", []):
-                    if e.get("user_id") == uid and str(e.get("state") or "").startswith("Report:"):
+                    if e.get("user_id") == uid and _fsm_state_str(e.get("state")).startswith("Report:"):
                         return e
     except Exception:
         pass
@@ -10137,7 +10136,7 @@ async def _fsm_last_entry(uid: int):
 async def _fsm_render_state(cb: CallbackQuery, e: dict) -> None:
     """Re-render the screen matching the restored state as a fresh message."""
     data = e.get("data") or {}
-    st = str(e.get("state") or "")
+    st = _fsm_state_str(e.get("state"))
     try:
         if st == "Report:comment" and data.get("target"):
             await cb.message.answer(_cx(comment_step_text(data)),
@@ -10503,7 +10502,7 @@ class PersistStorage(MemoryStorage):
                     "thread_id": getattr(k, "thread_id", 0) or 0,
                     "biz": getattr(k, "business_connection_id", None) or "",
                     "destiny": getattr(k, "destiny", "default") or "default",
-                    "state": st,
+                    "state": getattr(st, "state", st) if st is not None else None,
                     "data": dat,
                 })
             text = json.dumps({"v": 1, "entries": entries},
