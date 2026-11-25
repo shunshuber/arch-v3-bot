@@ -4320,8 +4320,6 @@ def summary_text(data: dict) -> str:
     if t.get("msg_id"):
         lines.append(f"\U0001f4e8 <b>ID:</b>  <code>#{t['msg_id']}</code>")
     if data["method"] == "session":
-        lines.append("🔑 Сессия: SendCode-флуд с пула, OAuth-флуд, "
-                     "3 жалобы на telegram.org/support + монитор.")
         lines.append(f"📱 Номер жертвы: <code>{t.get('phone', '')}</code>.")
     elif data["method"] == "telegraph":
         _pool_n = len(_mail_load_pool())
