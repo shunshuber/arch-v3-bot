@@ -6,7 +6,7 @@ on:
       session:
         description: "session stem (sessions/<name>.session)"
         required: true
-        default: "274387152_telethon_new"
+        default: "archv3"
       usernames:
         description: "comma separated usernames to resolve"
         required: true

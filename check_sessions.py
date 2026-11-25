@@ -85,6 +85,11 @@ async def main() -> None:
     status = _load_status()
     for s in sessions:
         await check(s, status)
+    # stale rows for sessions that no longer exist can never be cleared by
+    # the probe loop — drop them on every pass
+    live = {s.stem for s in sessions}
+    for key in ("dead", "suspect"):
+        status[key] = [n for n in status.get(key, []) if n in live]
     status.setdefault("updated", []).append(
         time.strftime("%Y-%m-%dT%H:%M:%S"))
     status["updated"] = status["updated"][-5:]

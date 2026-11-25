@@ -2,7 +2,7 @@ name: bot-refresh
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -28,7 +28,7 @@ jobs:
       MAINTENANCE: "0"
       SUB_CHANNEL_LINK: ${{ secrets.SUB_CHANNEL_LINK }}
       SUB_CHANNEL_ID: ${{ secrets.SUB_CHANNEL_ID }}
-      GROQ_KEY: ${{ secrets.GROQ_KEY }}
+      GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
       CREDS_MULTI: ${{ secrets.CREDENTIALS_LIST }}
       CLOUDTIPS_REFRESH: ${{ secrets.CLOUDTIPS_REFRESH }}
       LOGS_CHAT_ID: ${{ secrets.LOGS_CHAT_ID }}

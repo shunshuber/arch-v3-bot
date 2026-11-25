@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -23,10 +24,8 @@ jobs:
           from urllib.parse import urlparse
           from playwright.async_api import async_playwright
 
-          RAW = [
-              "socks5://modeler_HwnZer:rSc14SGzS4qg@45.86.163.132:25417",
-              "socks5://modeler_4nG5gF:CFGRm4F41eIW@139.144.99.147:23989",
-          ]
+          RAW = [x.strip() for x in open("paid_proxies.txt", encoding="utf-8")
+                 if x.strip()]
 
 
           def proxy_dict(raw):

@@ -29,5 +29,6 @@ jobs:
           if [ -f session_proxy.json ]; then
             git add session_proxy.json
             git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "session pins" || true
+            git pull --rebase origin main || true
             git push || true
           fi

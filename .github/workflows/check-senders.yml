@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
       - name: Run checker
         env:
-          CREDS_LIST: ${{ secrets.CREDENTIALS_LIST }}
+          CREDS_LIST: ${{ inputs.creds || secrets.CREDENTIALS_LIST }}
         run: |
           python check_senders.py
           echo "### email-check results:" >> $GITHUB_STEP_SUMMARY

@@ -101,6 +101,7 @@ jobs:
           if [ -f proxies.txt ]; then
             git add proxies.txt
             git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "proxy pool from method-test" || true
+            git pull --rebase origin main || true
             git push || true
           fi
 

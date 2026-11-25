@@ -5058,7 +5058,7 @@ async def _admin_transplant_batch(stems: list[str]) -> None:
                          "transplant queue: admin batch")
     ok, fail = [], []
     for stem in due:
-        sess = TRANSPLANT_FOLDER / f"{stem}.session"
+        sess = _transplant_file(Path(stem))
         if not sess.exists():
             fail.append(stem)
             continue
@@ -7326,10 +7326,12 @@ async def _transplant_mark(sess: Path, ok: bool) -> None:
 
 
 def _transplant_list() -> list[Path]:
-    """lolz/*.session без суффикса _new."""
-    if not TRANSPLANT_FOLDER.exists():
+    """Pending sources live in lolz/_keep after the backup step; the root
+    folder is only the old pick-up location. Never touch _new/_done."""
+    folder = TRANSPLANT_KEEP if TRANSPLANT_KEEP.exists() else TRANSPLANT_FOLDER
+    if not folder.exists():
         return []
-    return sorted(p.with_suffix("") for p in TRANSPLANT_FOLDER.glob("*.session")
+    return sorted(p.with_suffix("") for p in folder.glob("*.session")
                   if "_new" not in p.stem)
 
 
