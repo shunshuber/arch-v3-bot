@@ -2000,11 +2000,11 @@ def snos_dc_note(phone: str, sessions: list[Path]) -> str:
     return f"🛰 DC цели: {target} · сессий в DC: {matched}/{len(sessions)}"
 
 
-_DC_OPTIONS: dict[int, tuple[str, int]] = {}
+_DC_OPTIONS: dict[int, list[tuple[str, int]]] = {}
 
 
-async def _snos_dc_options(sessions: list[Path], proxies: list) -> dict[int, tuple[str, int]]:
-    """Real DC addresses from help.getConfig through a live pool session."""
+async def _snos_dc_options(sessions: list[Path], proxies: list) -> dict[int, list[tuple[str, int]]]:
+    """All DC addresses from help.getConfig through a live pool session."""
     if _DC_OPTIONS:
         return _DC_OPTIONS
     from telethon.tl.functions.help import GetConfigRequest
@@ -2025,8 +2025,10 @@ async def _snos_dc_options(sessions: list[Path], proxies: list) -> dict[int, tup
                 cfg = await client(GetConfigRequest())
                 for o in cfg.dc_options:
                     if not getattr(o, "cdn", False) and not getattr(o, "ipv6", False):
-                        _DC_OPTIONS.setdefault(int(o.id),
-                                               (o.ip_address, int(o.port)))
+                        _DC_OPTIONS.setdefault(int(o.id), [])
+                        addr = (o.ip_address, int(o.port))
+                        if addr not in _DC_OPTIONS[int(o.id)]:
+                            _DC_OPTIONS[int(o.id)].append(addr)
                 await client.disconnect()
             if _DC_OPTIONS:
                 break
@@ -2048,18 +2050,45 @@ async def snos_temp_dc_sendcode(phone: str, dc: int, sessions: list[Path],
     from telethon.tl.functions.auth import SendCodeRequest
     from telethon.tl.types import CodeSettings
 
-    addr = (await _snos_dc_options(sessions, proxies)).get(dc)
-    if not addr:
+    addrs = (await _snos_dc_options(sessions, proxies)).get(dc) or []
+    if not addrs:
         return [{"name": f"DC{dc}", "proxy": "-", "ok": False,
                  "status": "адрес DC недоступен", "attempt": 0}]
     fp = session_fingerprint(sessions[0].stem)
+    # getConfig lists several IPs per DC — the first one can be unreachable
+    good = None
+    for ip, port in addrs:
+        probe = None
+        try:
+            ms = MemorySession()
+            ms.set_dc(dc, ip, port)
+            probe = TelegramClient(
+                ms, fp["api_id"], fp["api_hash"],
+                proxy=pin_for_session(sessions[0].stem, proxies),
+                device_model=fp["device"], system_version=fp["system_version"],
+                app_version=fp["app_version"], lang_code=fp["lang_code"],
+                flood_sleep_threshold=0)
+            await asyncio.wait_for(probe.connect(), timeout=12)
+            good = (ip, port)
+            break
+        except Exception:
+            continue
+        finally:
+            try:
+                if probe:
+                    await probe.disconnect()
+            except Exception:
+                pass
+    if not good:
+        return [{"name": f"DC{dc}", "proxy": "-", "ok": False,
+                 "status": f"DC{dc} недоступен", "attempt": 0}]
     out = []
     for i in range(attempts):
         px = pin_for_session(sessions[i % len(sessions)].stem, proxies)
         client = None
         try:
             ms = MemorySession()
-            ms.set_dc(dc, addr[0], addr[1])
+            ms.set_dc(dc, good[0], good[1])
             client = TelegramClient(
                 ms, fp["api_id"], fp["api_hash"], proxy=px,
                 device_model=fp["device"], system_version=fp["system_version"],
