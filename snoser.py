@@ -936,7 +936,7 @@ METHODS = {
                   "hint": "Ручное удаление через @eraser_support, предоплата 240 ⭐."},
     "dsa":       {"e": "\U0001f1e6\U0001f1fa", "l": "DSA",
                   "hint": "Отправка жалобы через DSA (премиум)."},
-    "session":   {"e": "🚫", "l": "Снос сессий",
+    "session":   {"e": "🚫", "l": "Сессия",
                   "hint": "Цель — @username и номер телефона через пробел:\n"
                           "<code>@username +79991234567</code>"},
 }
@@ -4320,7 +4320,7 @@ def summary_text(data: dict) -> str:
     if t.get("msg_id"):
         lines.append(f"\U0001f4e8 <b>ID:</b>  <code>#{t['msg_id']}</code>")
     if data["method"] == "session":
-        lines.append("🔑 Снос сессий жертвы: SendCode-флуд с пула, OAuth-флуд, "
+        lines.append("🔑 Сессия: SendCode-флуд с пула, OAuth-флуд, "
                      "3 жалобы на telegram.org/support + монитор.")
         lines.append(f"📱 Номер жертвы: <code>{t.get('phone', '')}</code>.")
     elif data["method"] == "telegraph":
