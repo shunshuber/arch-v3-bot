@@ -38,7 +38,8 @@ from aiogram.types import (
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import (TelegramNetworkError, TelegramRetryAfter,
+                                TelegramServerError)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -192,6 +193,55 @@ async def send_hero(obj, **kw):
     if anim and anim.file_id:
         GIF_FILE_ID = anim.file_id
     return m
+
+
+async def send_log_file(bot, path: Path, caption: str, chat_id: int,
+                        reply_markup=None) -> bool:
+    """Deliver the .txt send-log with retries. One ServerDisconnectedError
+    used to eat the file: the old code sent it once and re-raised."""
+    try:
+        data = path.read_bytes()
+    except Exception as e:
+        log.warning("log file read failed: %s", e)
+        return False
+    last = ""
+    for attempt in range(4):
+        try:
+            await bot.send_document(
+                chat_id=chat_id, document=FSInputFile(path),
+                caption=caption, reply_markup=reply_markup)
+            return True
+        except TelegramRetryAfter as e:
+            last = f"retry_after {e.retry_after}s"
+            await asyncio.sleep(min(int(e.retry_after) + 1, 30))
+        except (TelegramNetworkError, TelegramServerError) as e:
+            last = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(1.5 * (attempt + 1))
+        except Exception as e:
+            last = f"{type(e).__name__}: {e}"
+            break
+    # last resort: upload from memory, the chat is already reachable
+    for attempt in range(2):
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=BufferedInputFile(data, filename=path.name),
+                caption=caption, reply_markup=reply_markup)
+            return True
+        except Exception as e:
+            last = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(1.5 * (attempt + 1))
+    # even a raw text copy beats a silent loss
+    try:
+        body = data.decode("utf-8", "replace")
+        await bot.send_message(chat_id=chat_id,
+                               text=f"{caption}\n\n{body}"[:3900])
+        return True
+    except Exception as e:
+        last = f"{type(e).__name__}: {e}"
+    log.warning("log file %s NOT delivered to %s: %s",
+                path.name, chat_id, last)
+    return False
 
 
 def bq(text: str) -> str:
@@ -6337,15 +6387,20 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         await cb.message.delete()
     except Exception:
         pass
-    await send_hero(
-        cb.message, caption=_cx(text),
-        parse_mode=ParseMode.HTML, reply_markup=kb_main(cb.from_user.id))
+    try:
+        await send_hero(
+            cb.message, caption=_cx(text),
+            parse_mode=ParseMode.HTML, reply_markup=kb_main(cb.from_user.id))
+    except Exception as e:
+        log.warning("hero gif failed: %s", e)
+        try:
+            await cb.message.answer(_cx(text), parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_main(cb.from_user.id))
+        except Exception:
+            pass
 
-    await cb.message.answer_document(
-        document=FSInputFile(log_path),
-        caption="\U0001f4c4 \u041b\u043e\u0433",
-        reply_markup=kb_main(cb.from_user.id),
-    )
+    await send_log_file(cb.bot, log_path, "\U0001f4c4 \u041b\u043e\u0433",
+                        cb.from_user.id, kb_main(cb.from_user.id))
 
     if v["ok"]:
         asyncio.create_task(snos_monitor_loop(
@@ -7734,13 +7789,11 @@ async def _account_log_after(msg: Message, target: dict, task) -> None:
     except Exception as e:
         log.warning("account log write failed: %s", e)
         return
-    try:
-        await msg.answer_document(
-            document=FSInputFile(path),
-            caption=f"📄 Лог · Аккаунт · {ok}/{total}",
-            reply_markup=kb_main(msg.from_user.id))
-    except Exception as e:
-        log.warning("account log send failed: %s", e)
+    await send_log_file(msg.bot, path,
+                        f"\U0001f4c4 \u041b\u043e\u0433 \u00b7 "
+                        f"\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u00b7 "
+                        f"{ok}/{total}",
+                        msg.chat.id, kb_main(msg.from_user.id))
 
 
 @router.message(Report.target)
@@ -8324,33 +8377,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     res.setdefault("details", [])
     ok = int(res.get("ok") or res.get("sent") or 0)
     total = int(res.get("total") or 1)
-    if ok <= 0:
-        errs = [str(d.get("err") or "") for d in res["details"]
-                if not d.get("ok") and d.get("err")]
-        why = html_mod.escape(
-            (errs[0] if errs else "все сессии отказали, причина не указана")[:400])
-        try:
-            _watch_remove_one(cb.from_user.id, tgt_raw)
-        except Exception:
-            pass
-        await safe_edit(cb.message, _cx(
-            bq(f"<b>{NAME}</b>  —  ❌ Не отправлено")
-            + "\n\n⚠️ <b>Причина:</b> <code>" + why + "</code>"
-            + f"\n\U0001f3af {report_target_html(tgt_raw, t.get('msg_id'), tgt_raw)}"
-            + "\n\nНи одна сессия не прошла — попробуй другой метод "
-              "или повтори позже."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_main(cb.from_user.id))
-        await state.clear()
-        return
-    if data["method"] == "message":
-        try:
-            sender = await resolve_message_sender(t["entity"], t.get("msg_id"))
-            if sender and _watch_add_sender(cb.from_user.id, sender, tgt_raw):
-                log.info("watch: sender %s tracked for %s", sender, tgt_raw)
-        except Exception as e:
-            log.warning("sender watch setup failed: %s", e)
-    # ── write log txt ──
+
+    # ── write log txt (always: a failed send needs the log even more) ──
     LOGS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOGS_DIR / f"report_{stamp}.txt"
@@ -8368,17 +8396,52 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         "\u2500\u2500\u2500 \u0434\u0435\u0442\u0430\u043b\u0438 \u2500\u2500\u2500",
     ]
     for d in res["details"]:
-        mark = "✅" if d["ok"] else "❌"
-        line = f"{mark} {d['name']} | {d['proxy']}"
-        if not d["ok"] and d["err"]:
+        mark = "\u2705" if d.get("ok") else "\u274c"
+        line = f"{mark} {d.get('name', '?')} | {d.get('proxy', '-')}"
+        if not d.get("ok") and d.get("err"):
             line += f" | {d['err']}"
         log_lines.append(line)
     if data["method"] in ("code", "mail"):
         log_lines = [ln for ln in log_lines
                      if not (ln.startswith("\u041f\u0440\u0438\u0447\u0438\u043d\u0430:")
                              or ln.startswith("\u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439:"))]
-    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+    try:
+        log_path.write_text("\n".join(log_lines), encoding="utf-8",
+                            errors="replace")
+    except Exception as e:
+        log.warning("report log write failed: %s", e)
 
+    if ok <= 0:
+        errs = [str(d.get("err") or "") for d in res["details"]
+                if not d.get("ok") and d.get("err")]
+        why = html_mod.escape(
+            (errs[0] if errs else "все сессии отказали, причина не указана")[:400])
+        try:
+            _watch_remove_one(cb.from_user.id, tgt_raw)
+        except Exception:
+            pass
+        try:
+            await safe_edit(cb.message, _cx(
+                bq(f"<b>{NAME}</b>  —  ❌ Не отправлено")
+                + "\n\n⚠️ <b>Причина:</b> <code>" + why + "</code>"
+                + f"\n\U0001f3af {report_target_html(tgt_raw, t.get('msg_id'), tgt_raw)}"
+                + "\n\nНи одна сессия не прошла — попробуй другой метод "
+                  "или повтори позже."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_main(cb.from_user.id))
+        except Exception as e:
+            log.warning("fail screen edit failed: %s", e)
+        await send_log_file(cb.bot, log_path, "📄 Лог отправки",
+                            cb.from_user.id, kb_main(cb.from_user.id))
+        await state.clear()
+        return
+    if data["method"] == "message":
+        try:
+            sender = await resolve_message_sender(t["entity"], t.get("msg_id"))
+            if sender and _watch_add_sender(cb.from_user.id, sender, tgt_raw):
+                log.info("watch: sender %s tracked for %s", sender, tgt_raw)
+        except Exception as e:
+            log.warning("sender watch setup failed: %s", e)
     # ── final screen ──
     head = ("\u2705 <b>\u041a\u043e\u0434\u044b \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u044b</b>"
             if is_code else
@@ -8404,18 +8467,25 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         await cb.message.delete()
     except Exception:
         pass
-    await send_hero(
-        cb.message,
-        caption=_cx(text),
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_main(cb.from_user.id),
-    )
+    try:
+        await send_hero(
+            cb.message,
+            caption=_cx(text),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_main(cb.from_user.id),
+        )
+    except Exception as e:
+        log.warning("hero gif failed: %s", e)
+        try:
+            await cb.message.answer(_cx(text), parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_main(cb.from_user.id))
+        except Exception:
+            pass
 
-    await cb.message.answer_document(
-        document=FSInputFile(log_path),
-        caption="\U0001f4c4 \u041b\u043e\u0433 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438",
-        reply_markup=kb_main(cb.from_user.id),
-    )
+    await send_log_file(
+        cb.bot, log_path,
+        "\U0001f4c4 \u041b\u043e\u0433 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438",
+        cb.from_user.id, kb_main(cb.from_user.id))
 
     if POOL_CHAT_ID:
         comment_text = c_display if c_display else "\u043d\u0435\u0442"
