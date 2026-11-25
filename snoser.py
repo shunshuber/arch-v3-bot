@@ -936,9 +936,12 @@ METHODS = {
                   "hint": "Ручное удаление через @eraser_support, предоплата 240 ⭐."},
     "dsa":       {"e": "\U0001f1e6\U0001f1fa", "l": "DSA",
                   "hint": "Отправка жалобы через DSA (премиум)."},
+    "session":   {"e": "🚫", "l": "Снос сессий",
+                  "hint": "Цель — @username и номер телефона через пробел:\n"
+                          "<code>@username +79991234567</code>"},
 }
 
-PREMIUM_METHODS = {"web", "mail", "bank", "telegraph", "dsa"}
+PREMIUM_METHODS = {"web", "mail", "bank", "telegraph", "dsa", "session"}
 
 
 def has_premium(subs: dict, user_id: int) -> bool:
@@ -4191,8 +4194,8 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
 
 
 def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
-    order = ["web", "mail", "bank", "telegraph", "dsa", "bot", "channel",
-             "message", "account", "manual"]
+    order = ["web", "mail", "bank", "telegraph", "dsa", "session",
+             "bot", "channel", "message", "account", "manual"]
     icons = {
         "web": "5282843764451195532", "mail": "5253742260054409879",
         "bank": "5409048419211682843", "bot": "5461117441612462242",
@@ -4201,6 +4204,7 @@ def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
         "dsa": "5438496463044752972",
         "account": "5210956306952758910",   # 👀
         "manual": "5341715473882955310",    # ⚙
+        "session": "5240241223632954241",   # 🚫
     }
     keys = [k for k in order if (k in PREMIUM_METHODS) == (tier == "premium")]
     rows, row = [], []
@@ -5082,7 +5086,7 @@ async def cmd_premium(msg: Message):
                         [f"💎 <code>{uid}</code> — премиум навсегда"])
     await msg.answer(_cx(
         f"💎 <b>@{uid}</b> получил <b>премиум навсегда</b>.\n"
-        "Методы web / mail / bank / telegraph / dsa открыты."),
+        "Методы web / mail / bank / telegraph / dsa / session открыты."),
         parse_mode=ParseMode.HTML)
 
 
