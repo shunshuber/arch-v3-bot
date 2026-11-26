@@ -1,4 +1,15 @@
 {
- "seq": 3,
- "items": []
+ "seq": 4,
+ "items": [
+  {
+   "id": 4,
+   "uid": 8661362112,
+   "kind": "entity",
+   "entity": "znakomstva_vseyaNR",
+   "msg_id": 2103317,
+   "raw": "https://t.me/znakomstva_vseyaNR/2103317",
+   "status": "alive",
+   "until": 1795960404.8089218
+  }
+ ]
 }
