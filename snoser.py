@@ -5323,38 +5323,26 @@ async def _add_batch_flush(uid: int) -> None:
 
 
 async def _admin_transplant_batch(stems: list[str]) -> None:
-    """Immediate transplant for an admin upload; failures fall back to the
-    24h age queue. Nothing here logs the source out."""
+    """Immediate transplant for an admin upload — the 24h age gate is
+    skipped on purpose: a pushed file is a deliberate command, not a fresh
+    lolz drop. Failures fall back to the retry queue. Nothing logs out."""
     now = time.time()
     q = _queue_load()
     ages = _age_load()
-    age_changed = False
-    due, young = [], []
+    due = []
     for stem in stems:
-        born = ages.get(stem)
-        if not born:
-            born = int(now)
-            ages[stem] = born
-            age_changed = True
+        # old-enough marker: neither this pass nor the worker re-applies
+        # the gate to a file the admin just uploaded
+        ages[stem] = int(now - TRANSPLANT_MIN_AGE_SEC - 60)
         e = q.get(stem) or {}
         e["tries"] = int(e.get("tries") or 0)
-        if born + TRANSPLANT_MIN_AGE_SEC > now:
-            # Telegram refuses ResetAuthorizations on a fresh session —
-            # queue it for the 24h age gate instead of burning a try.
-            e["next_try"] = float(born) + TRANSPLANT_MIN_AGE_SEC
-            q[stem] = e
-            young.append(stem)
-            continue
         e["next_try"] = now + 900          # hold so the worker doesn't double-run
         e["last_try"] = int(now)
         q[stem] = e
         due.append(stem)
     _queue_save(q)
-    age_rels = []
-    if age_changed:
-        _age_save(ages)
-        age_rels.append("lolz_age.json")
-    await _persist_paths(["lolz_queue.json"] + age_rels,
+    _age_save(ages)
+    await _persist_paths(["lolz_queue.json", "lolz_age.json"],
                          "transplant queue: admin batch")
     ok, fail = [], []
     for stem in due:
@@ -5379,10 +5367,6 @@ async def _admin_transplant_batch(stems: list[str]) -> None:
             f"<code>{html_mod.escape(n)}</code>" for n in moved))
     if ok and not moved:
         lines.append("✅ пересажено, но в <code>_ready</code> пусто — смотри лог.")
-    if young:
-        lines.append("🕕 свежие — ждут 24 ч (авто): "
-                     + ", ".join(f"<code>{html_mod.escape(s)}</code>"
-                                 for s in young))
     if fail:
         lines.append("⏳ ждут очереди (отказ): "
                      + ", ".join(f"<code>{html_mod.escape(s)}</code>"
