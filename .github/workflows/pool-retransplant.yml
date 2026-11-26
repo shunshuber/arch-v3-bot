@@ -1,0 +1,53 @@
+name: pool-retransplant
+
+on:
+  workflow_dispatch:
+    inputs:
+      stems:
+        description: "stems to transplant, comma separated (empty = every pool session without _new)"
+        required: false
+        default: ""
+      dry_run:
+        description: "1 = print the plan only"
+        required: false
+        default: "0"
+
+concurrency:
+  group: lolz-transplant
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  transplant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      API_ID: ${{ secrets.API_ID }}
+      API_HASH: ${{ secrets.API_HASH }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      ARCH_BOT_TOKEN: ${{ secrets.ARCH_BOT_TOKEN }}
+      ADMIN_ID: ${{ secrets.ADMIN_ID }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      POOL_STEMS: ${{ inputs.stems }}
+      POOL_DRY: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Transplant pool sources
+        run: python pool_retransplant.py
+      - name: Commit leftovers
+        run: |
+          git config user.name arch-bot
+          git config user.email arch@users.noreply.github.com
+          git add -A
+          git -c user.name=arch-bot -c user.email=arch@users.noreply.github.com commit -m "pool transplant results" || true
+          git pull --rebase origin main || true
+          git push origin HEAD:main || true

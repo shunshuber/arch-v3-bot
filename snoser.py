@@ -936,12 +936,9 @@ METHODS = {
                   "hint": "Ручное удаление через @eraser_support, предоплата 240 ⭐."},
     "dsa":       {"e": "\U0001f1e6\U0001f1fa", "l": "DSA",
                   "hint": "Отправка жалобы через DSA (премиум)."},
-    "session":   {"e": "🚫", "l": "Сессия",
-                  "hint": "Цель — @username и номер телефона через пробел:\n"
-                          "<code>@username +79991234567</code>"},
 }
 
-PREMIUM_METHODS = {"web", "mail", "bank", "telegraph", "dsa", "session"}
+PREMIUM_METHODS = {"web", "mail", "bank", "telegraph", "dsa"}
 
 
 def has_premium(subs: dict, user_id: int) -> bool:
@@ -4194,7 +4191,7 @@ def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
 
 
 def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
-    order = ["web", "mail", "bank", "telegraph", "dsa", "session",
+    order = ["web", "mail", "bank", "telegraph", "dsa",
              "bot", "channel", "message", "account", "manual"]
     icons = {
         "web": "5282843764451195532", "mail": "5253742260054409879",
@@ -4204,7 +4201,6 @@ def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
         "dsa": "5438496463044752972",
         "account": "5210956306952758910",   # 👀
         "manual": "5341715473882955310",    # ⚙
-        "session": "5240241223632954241",   # 🚫
     }
     keys = [k for k in order if (k in PREMIUM_METHODS) == (tier == "premium")]
     rows, row = [], []
@@ -4319,9 +4315,7 @@ def summary_text(data: dict) -> str:
     ]
     if t.get("msg_id"):
         lines.append(f"\U0001f4e8 <b>ID:</b>  <code>#{t['msg_id']}</code>")
-    if data["method"] == "session":
-        lines.append(f"📱 Номер жертвы: <code>{t.get('phone', '')}</code>.")
-    elif data["method"] == "telegraph":
+    if data["method"] == "telegraph":
         _pool_n = len(_mail_load_pool())
         lines.append(f"📝 Сендеры: <b>{max(1, _pool_n // 3)}/{_pool_n}</b> (1/3 пула), "
                      f"писем: <b>{max(1, _pool_n // 3) * len(TELEGRAPH_RECIPIENTS)}</b> "
@@ -4575,7 +4569,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
     _extra = {"method": key}
     if key == "account":
         _extra["reason"] = "drugs"
-    elif key in ("session", "telegraph"):
+    elif key == "telegraph":
         _extra["reason"] = "other"
     await state.update_data(**_extra)
     m = METHODS[key]
@@ -4603,7 +4597,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
         await state.clear()
         await cb.answer()
         return
-    if key in ("session", "telegraph", "account"):
+    if key in ("telegraph", "account"):
         await cb.message.edit_caption(
             caption=_cx((
                 bq(f"<b>{NAME}</b>")
@@ -7360,7 +7354,8 @@ async def _transplant_backup(sess: Path) -> bool:
     try:
         TRANSPLANT_KEEP.mkdir(parents=True, exist_ok=True)
         dest = TRANSPLANT_KEEP / f"{sess.stem}.session"
-        shutil.copy2(src, dest)
+        if src.resolve() != dest.resolve():
+            shutil.copy2(src, dest)
     except Exception as e:
         log.warning("transplant backup copy failed: %s", e)
         return False
@@ -8450,6 +8445,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     await cb.answer()   # ack before slow GitHub reads
     data = await state.get_data()
+    if data.get("method") not in METHODS:
+        await cb.message.answer("Метод больше недоступен — /start")
+        await state.clear()
+        return
     t = data["target"]
     _block = await report_gate_block(cb.from_user.id, data.get("method", ""))
     if _block:
