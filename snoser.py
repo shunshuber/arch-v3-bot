@@ -9350,7 +9350,8 @@ def save_subs(subs: dict) -> None:
                          encoding="utf-8")
     # grants/payments must survive runner restarts — commit the state back
     commit_file_to_repo("subs.json", "subs update", cooldown=60)
-    store.push_async("subs", SUBS_FILE.read_text(encoding="utf-8"))
+    # force: a throttled push dropped the grant when two saves raced
+    store.push_async("subs", SUBS_FILE.read_text(encoding="utf-8"), force=True)
 
 
 def user_is_admin(user_id: int) -> bool:
@@ -9426,12 +9427,23 @@ def commit_file_to_repo(rel_path: str, msg: str, cooldown: float = 0) -> None:
                      "commit", "-m", msg],
                     cwd=base, timeout=60, check=False, capture_output=True)
                 if r.returncode != 0:
-                    return   # nothing to commit — file unchanged
+                    # "nothing to commit" is normal; a real failure here used
+                    # to be swallowed and the grant never reached the repo
+                    staged = subprocess.run(
+                        ["git", "diff", "--cached", "--quiet"], cwd=base,
+                        timeout=30, check=False).returncode != 0
+                    if staged:
+                        log.warning("commit %s failed: %s", rel_path,
+                                    (r.stderr or b"").decode("utf-8", "replace")[:300])
+                    return
                 # Concurrent Contents-API writers keep moving main. Rebase,
                 # recover from a failed rebase, then push to an explicit ref.
+                # autostash: other data files (fsm, lolz, watchdog) are dirty
+                # in the same checkout and made every rebase refuse to start.
                 for attempt in range(8):
                     pull = subprocess.run(
-                        ["git", "pull", "--rebase", "origin", "main"],
+                        ["git", "-c", "rebase.autoStash=true", "pull",
+                         "--rebase", "origin", "main"],
                         cwd=base, timeout=90, check=False,
                         capture_output=True)
                     if pull.returncode != 0:
@@ -9485,7 +9497,7 @@ def save_users(users: dict) -> None:
     USERS_FILE.write_text(text, encoding="utf-8")
     # bindings must survive runner restarts — commit the DB back
     commit_file_to_repo("users.json", "users update", cooldown=120)
-    store.push_async("users", text)
+    store.push_async("users", text, force=True)
 
 
 def touch_user(user) -> dict:
@@ -9788,6 +9800,133 @@ def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
     save_subs(subs)
     persist_now("subs", f"subs paid: plan {plan_key} for {user_id}")
     return rec
+
+
+# ── subscriptions audit ─────────────────────────────────
+def _fmt_until(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M") if ts else "—"
+
+
+def sub_expected_until(plan: str, ts: float) -> float:
+    """Expiry a paid order of `plan` bought at `ts` must produce."""
+    pl = SUB_PLANS.get(plan_key(plan))
+    if not pl or pl["days"] is None:
+        return 0.0
+    return float(ts) + float(pl["days"]) * 86400
+
+
+async def subs_audit(repair: bool = True) -> list[str]:
+    """Reconcile subs.json with the Telegram store doc and the paid ledger.
+
+    Three recovery layers, each one keeps the larger value — an entry is
+    never shortened, so an expired-but-replayed order cannot revive a term:
+      1. store doc records missing from the repo copy;
+      2. store doc term longer than the local one;
+      3. paid star orders whose days never landed (grant loop died between
+         activate_plan() and the store push).
+    Returns human-readable fix lines; writes nothing when repair is False.
+    """
+    subs = load_subs()
+    fixes: list[str] = []
+
+    fid = (store._INDEX.get("subs") or {}).get("file_id")
+    doc: dict = {}
+    if fid:
+        try:
+            txt = await store._tg_read("subs", fid)
+            if txt:
+                doc = json.loads(txt) or {}
+        except Exception as e:
+            log.warning("subs_audit: store read %s", e)
+    for uid_s, rec in doc.items():
+        if not isinstance(rec, dict):
+            continue
+        cur = subs.get(uid_s)
+        if cur is None:
+            subs[uid_s] = dict(rec)
+            fixes.append(
+                f"сторе → файл: <code>{uid_s}</code> · "
+                + ("навсегда" if rec.get("forever")
+                   else _fmt_until(float(rec.get("until") or 0))))
+            continue
+        until_doc = float(rec.get("until") or 0)
+        until_cur = float(cur.get("until") or 0)
+        if until_doc > until_cur + 60:
+            cur["until"] = until_doc
+            fixes.append(f"срок из стора: <code>{uid_s}</code> → {_fmt_until(until_doc)}")
+        if rec.get("forever") and not cur.get("forever"):
+            cur["forever"] = True
+            fixes.append(f"«навсегда» из стора: <code>{uid_s}</code>")
+        if rec.get("premium") and not cur.get("premium"):
+            cur["premium"] = True
+            fixes.append(f"premium из стора: <code>{uid_s}</code>")
+
+    try:
+        orders = await star_orders_read()
+    except Exception as e:
+        log.warning("subs_audit: orders %s", e)
+        orders = []
+    now = time.time()
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        try:
+            uid = str(int(o.get("uid") or 0))
+            pk = plan_key(str(o.get("plan") or ""))
+            ts = float(o.get("ts") or 0)
+        except Exception:
+            continue
+        if uid == "0" or not ts:
+            continue
+        rec = subs.setdefault(uid, {})
+        stars = int(o.get("amount") or 0)
+        if pk == "prem":
+            if not rec.get("premium") or not rec.get("forever"):
+                rec["premium"] = True
+                rec["forever"] = True
+                fixes.append(f"премиум по оплате ({stars}⭐): <code>{uid}</code>")
+            continue
+        exp = sub_expected_until(pk, ts)
+        cur_until = float(rec.get("until") or 0)
+        if exp > cur_until + 1:
+            rec["until"] = exp
+            tail = "" if exp > now else " (уже истёк)"
+            fixes.append(f"оплата {pk} ({stars}⭐): <code>{uid}</code> → "
+                         f"{_fmt_until(exp)}{tail}")
+
+    if fixes and repair:
+        save_subs(subs)
+        persist_now("subs", f"subs audit: {len(fixes)} fixes")
+        log.info("subs_audit: %d fixes applied", len(fixes))
+    return fixes
+
+
+@router.message(Command("subsaudit"))
+async def cmd_subs_audit(msg: Message):
+    if not (msg.from_user and user_is_admin(msg.from_user.id)):
+        return
+    note = await msg.answer(_cx("🩺 сверяю файл · стор · оплаты…"),
+                            parse_mode=ParseMode.HTML)
+    try:
+        fixes = await subs_audit(repair=True)
+    except Exception as e:
+        await note.edit_text(_cx(f"🔴 аудит упал: <code>{html_mod.escape(str(e))}</code>"),
+                             parse_mode=ParseMode.HTML)
+        return
+    subs = load_subs()
+    now = time.time()
+    act = sum(1 for r in subs.values() if isinstance(r, dict)
+              and (r.get("forever") or float(r.get("until") or 0) > now))
+    head = (bq(f"<b>{NAME}</b>  ·  🩺 Аудит подписок")
+            + f"\n\n📦 записей: <b>{len(subs)}</b> · активных: <b>{act}</b>")
+    body = ("\n\n" + "\n".join("• " + x for x in fixes[:40])
+            if fixes else "\n\nвсё сходится, потерь нет")
+    foot = (f"\n\n🟢 Успешно: {len(fixes)}"
+            f"\n🔴 Ошибки: 0")
+    try:
+        await note.edit_text(_cx(head + body + foot), parse_mode=ParseMode.HTML)
+    except Exception:
+        await msg.answer(_cx(head + body + foot), parse_mode=ParseMode.HTML)
 
 
 # ── subscriptions UI ────────────────────────────────────
@@ -11449,6 +11588,17 @@ async def main():
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
             await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
+            # reconcile grants that died between activate_plan and the push
+            if not globals().get("_subs_audit_done"):
+                globals()["_subs_audit_done"] = True
+                try:
+                    _fx = await subs_audit(repair=True)
+                    if _fx:
+                        log.info("subs audit on boot: %d fixes", len(_fx))
+                        asyncio.create_task(
+                            push_send_log("Аудит подписок", _fx[:40]))
+                except Exception as e:
+                    log.warning("subs audit on boot: %s", e)
             if not globals().get("_ct_poller_started"):
                 globals()["_ct_poller_started"] = True
                 asyncio.create_task(ct_poller_loop(bot))
